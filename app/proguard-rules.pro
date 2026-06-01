@@ -1,0 +1,2 @@
+-keep class com.destik.yolodetector.Detection { *; }
+-keep class com.destik.yolodetector.YoloDetector { *; }
