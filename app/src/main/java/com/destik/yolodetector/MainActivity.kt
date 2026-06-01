@@ -26,6 +26,15 @@ class MainActivity : AppCompatActivity() {
     private val pickBin = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { applyFile(it, isParam = false) }
     }
+    private val pickOnnx = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { u ->
+            val path = FileUtils.copyToCache(this, u, "model.onnx")
+            if (path == null) { toast("Ошибка копирования"); return@let }
+            config.onnxPath = path
+            binding.tvOnnxFile.text = FileUtils.getFileName(this, u)
+            saveConfig(); refreshSummary()
+        }
+    }
     private val settingsResult = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) {
             r.data?.getStringExtra("config")?.let { config = Gson().fromJson(it, ModelConfig::class.java) }
@@ -66,6 +75,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnModelLibrary.setOnClickListener {
             libraryResult.launch(Intent(this, ModelLibraryActivity::class.java))
         }
+        binding.btnSelectOnnx.setOnClickListener { pickOnnx.launch("*/*") }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
         binding.btnStartCamera.setOnClickListener {
             if (config.paramPath.isEmpty() || config.binPath.isEmpty()) {
@@ -132,9 +142,11 @@ class MainActivity : AppCompatActivity() {
             append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  Thr: ${config.numThreads}  ${if (config.useGPU) "GPU" else "CPU"}\n")
             append("out0: ${config.outputName0}")
         }
-        val hasFiles = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
+        val hasNcnn = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
+        val hasOnnx = config.onnxPath.isNotEmpty()
+        val hasFiles = if (config.engine == "onnx") hasOnnx else hasNcnn
         binding.btnStartCamera.isEnabled   = hasFiles
-        binding.btnDetectOutputs.isEnabled = hasFiles
+        binding.btnDetectOutputs.isEnabled = hasNcnn
     }
 
     private fun checkCameraAndLaunch() {
@@ -149,6 +161,7 @@ class MainActivity : AppCompatActivity() {
         if (json != null) runCatching { config = Gson().fromJson(json, ModelConfig::class.java) }
         binding.tvParamFile.text = config.paramPath.takeIf { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
         binding.tvBinFile.text   = config.binPath.takeIf   { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
+        binding.tvOnnxFile.text  = config.onnxPath.takeIf  { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
     }
     private fun saveConfig() {
         getSharedPreferences("yolo", MODE_PRIVATE).edit().putString("config", Gson().toJson(config)).apply()

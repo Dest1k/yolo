@@ -10,6 +10,23 @@
         android:orientation="vertical"
         android:padding="20dp">
 
+        <!-- Engine -->
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Движок инференса" android:textColor="@color/text_secondary"
+            android:textSize="13sp" android:layout_marginBottom="4dp"/>
+        <RadioGroup android:id="@+id/rgEngine"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:layout_marginBottom="16dp">
+            <RadioButton android:id="@+id/rbNcnn"
+                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:text="NCNN + Vulkan" android:textColor="@color/text_primary"
+                android:buttonTint="@color/accent"/>
+            <RadioButton android:id="@+id/rbOnnx"
+                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:text="ONNX + NNAPI" android:textColor="@color/text_primary"
+                android:buttonTint="@color/accent"/>
+        </RadioGroup>
+
         <!-- YOLO Version -->
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Версия YOLO" android:textColor="@color/text_secondary" android:textSize="13sp"/>

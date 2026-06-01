@@ -19,7 +19,8 @@ class CameraActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCameraBinding
     private lateinit var config: ModelConfig
-    private val detector = YoloDetector()
+    private val ncnnDetector = YoloDetector()
+    private var onnxDetector: OnnxDetector? = null
     private lateinit var executor: ExecutorService
     private val processing = AtomicBoolean(false)
     private var lastFps = 0f
@@ -37,7 +38,12 @@ class CameraActivity : AppCompatActivity() {
         executor = Executors.newSingleThreadExecutor()
 
         executor.execute {
-            val ok = runCatching { detector.init(config) }.getOrDefault(false)
+            val ok = if (config.engine == "onnx") {
+                onnxDetector = OnnxDetector(config)
+                runCatching { onnxDetector!!.init() }.getOrDefault(false)
+            } else {
+                runCatching { ncnnDetector.init(config) }.getOrDefault(false)
+            }
             runOnUiThread {
                 if (ok) startCamera()
                 else {
@@ -48,7 +54,7 @@ class CameraActivity : AppCompatActivity() {
         }
 
         binding.fabSettings.setOnClickListener { showSettingsSheet() }
-        binding.btnFlip.setOnClickListener    { flipCamera() }
+        binding.btnFlip.setOnClickListener { flipCamera() }
     }
 
     private fun flipCamera() {
@@ -95,13 +101,18 @@ class CameraActivity : AppCompatActivity() {
                     val t0 = System.currentTimeMillis()
 
                     val rawDets: Array<Detection> = try {
-                        detector.detect(bmp, config)
+                        if (config.engine == "onnx")
+                            onnxDetector?.detect(bmp) ?: emptyArray()
+                        else
+                            ncnnDetector.detect(bmp, config)
                     } catch (e: Exception) {
                         Log.e("Camera", "detect error", e); emptyArray()
                     }
 
-                    // Get diagnostics from native layer (tensor shape, max confidence, etc.)
-                    val diag = try { detector.getDiagnostics() } catch (_: Exception) { "" }
+                    val diag = try {
+                        if (config.engine == "onnx") onnxDetector?.getDiagnostics() ?: ""
+                        else ncnnDetector.getDiagnostics()
+                    } catch (_: Exception) { "" }
 
                     var dets = rotateDetections(rawDets, rotation)
                     if (isFront) {
@@ -160,8 +171,14 @@ class CameraActivity : AppCompatActivity() {
         SettingsSheet(config) { updated ->
             config = updated
             executor.execute {
-                detector.release()
-                runCatching { detector.init(config) }
+                ncnnDetector.release()
+                onnxDetector?.release()
+                if (config.engine == "onnx") {
+                    onnxDetector = OnnxDetector(config)
+                    runCatching { onnxDetector!!.init() }
+                } else {
+                    runCatching { ncnnDetector.init(config) }
+                }
             }
         }.show(supportFragmentManager, "settings")
     }
@@ -169,6 +186,7 @@ class CameraActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         executor.shutdown()
-        detector.release()
+        ncnnDetector.release()
+        onnxDetector?.release()
     }
 }
