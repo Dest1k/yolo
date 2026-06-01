@@ -231,12 +231,18 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         return env->NewObjectArray(0,dc,nullptr);
 
     ncnn::Mat in;
+    // Use stride-aware pixel conversion to handle row padding in Android bitmaps
     if(info.format==ANDROID_BITMAP_FORMAT_RGBA_8888){
-        in=ncnn::Mat::from_pixels_resize((const unsigned char*)px,ncnn::Mat::PIXEL_RGBA2RGB,
-            (int)info.width,(int)info.height,g_input_size,g_input_size);
+        in=ncnn::Mat::from_pixels_resize(
+            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+            (int)info.width, (int)info.height, (int)info.stride,
+            g_input_size, g_input_size);
     } else if(info.format==ANDROID_BITMAP_FORMAT_RGB_565){
-        in=ncnn::Mat::from_pixels_resize((const unsigned char*)px,ncnn::Mat::PIXEL_RGB565toRGB,
-            (int)info.width,(int)info.height,g_input_size,g_input_size);
+        // RGB565: stride is in bytes, 2 bytes per pixel
+        in=ncnn::Mat::from_pixels_resize(
+            (const unsigned char*)px, ncnn::Mat::PIXEL_RGB565toRGB,
+            (int)info.width, (int)info.height, (int)info.stride,
+            g_input_size, g_input_size);
     } else {
         LOGE("unsupported bitmap format %d",info.format);
         AndroidBitmap_unlockPixels(env,bitmap);
