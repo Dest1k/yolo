@@ -63,13 +63,10 @@ static ParamInfo parse_param(const std::string& path){
     char ltype[256],lname[256]; int bc,tc;
     for(int i=0;i<nl;i++){
         if(fscanf(f,"%255s %255s %d %d",ltype,lname,&bc,&tc)!=4) break;
-        std::vector<std::string> bottoms,tops;
-        for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1){bottoms.push_back(b);all_bottoms.insert(b);}}
+        std::vector<std::string> tops;
+        for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1) all_bottoms.insert(b);}
         for(int j=0;j<tc;j++){char t[256]={};if(fscanf(f,"%255s",t)==1){tops.push_back(t);all_tops.insert(t);top_order.push_back(t);}}
-        if(strcasecmp(ltype,"Input")==0 && !tops.empty()){
-            info.input_name = tops[0];
-            LOGD("Found input blob: %s",tops[0].c_str());
-        }
+        if(strcasecmp(ltype,"Input")==0&&!tops.empty()) info.input_name=tops[0];
         char line[4096]={}; fgets(line,sizeof(line),f);
     }
     fclose(f);
@@ -78,7 +75,7 @@ static ParamInfo parse_param(const std::string& path){
         if(seen.count(t)) continue; seen.insert(t);
         if(!all_bottoms.count(t)) info.output_names.push_back(t);
     }
-    for(auto& n:info.output_names) LOGD("output blob: %s",n.c_str());
+    LOGD("input_blob=%s outputs=%d",info.input_name.c_str(),(int)info.output_names.size());
     return info;
 }
 
@@ -92,44 +89,38 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input(g_input_name.c_str(),in);
     ncnn::Mat out;
-    if(ex.extract(g_out0.c_str(),out)!=0){
-        LOGE("v10: extract '%s' failed",g_out0.c_str()); return;
-    }
+    if(ex.extract(g_out0.c_str(),out)!=0){LOGE("v10: extract '%s' failed",g_out0.c_str()); return;}
     LOGD("v10 out: w=%d h=%d c=%d",out.w,out.h,out.c);
-    if(out.w==0||out.h==0){ LOGE("v10: empty output"); return; }
+    if(out.w==0||out.h==0){LOGE("v10: empty output"); return;}
 
-    bool tr = (out.h == 6 && out.w > 6);
-    int nd = tr ? out.w : out.h;
-    int na = tr ? out.h : out.w;
-    LOGD("v10 transposed=%d nd=%d na=%d",tr,nd,na);
-    if(na < 6){ LOGE("v10: unexpected attr count %d",na); return; }
+    bool tr=(out.h==6&&out.w>6);
+    int nd=tr?out.w:out.h, na=tr?out.h:out.w;
+    if(na<6){LOGE("v10: bad attr count %d",na); return;}
 
-    // Determine coord scale by scanning ALL rows, not just those above threshold.
-    // If ANY x2 value exceeds 1.5 the model outputs pixel coords (0..input_size).
-    bool pixel = false;
+    // Determine if pixel or normalized coords by scanning all rows
+    bool pixel=false;
     for(int i=0;i<nd;i++){
-        float x2 = tr ? safe_get(out,2,i) : safe_get(out,i,2);
-        if(x2 > 1.5f){ pixel=true; break; }
+        float x2=tr?safe_get(out,2,i):safe_get(out,i,2);
+        if(x2>1.5f){pixel=true; break;}
     }
-    float sc = pixel ? (1.f/g_input_size) : 1.f;
+    float sc=pixel?(1.f/g_input_size):1.f;
     LOGD("v10 pixel=%d sc=%f nd=%d",pixel,sc,nd);
 
     for(int i=0;i<nd;i++){
-        float x1    = tr?safe_get(out,0,i):safe_get(out,i,0);
-        float y1    = tr?safe_get(out,1,i):safe_get(out,i,1);
-        float x2    = tr?safe_get(out,2,i):safe_get(out,i,2);
-        float y2    = tr?safe_get(out,3,i):safe_get(out,i,3);
-        float score = tr?safe_get(out,4,i):safe_get(out,i,4);
-        float cid   = tr?safe_get(out,5,i):safe_get(out,i,5);
+        float x1   =tr?safe_get(out,0,i):safe_get(out,i,0);
+        float y1   =tr?safe_get(out,1,i):safe_get(out,i,1);
+        float x2   =tr?safe_get(out,2,i):safe_get(out,i,2);
+        float y2   =tr?safe_get(out,3,i):safe_get(out,i,3);
+        float score=tr?safe_get(out,4,i):safe_get(out,i,4);
+        float cid  =tr?safe_get(out,5,i):safe_get(out,i,5);
         if(score<ct||x2<=x1||y2<=y1) continue;
-        // Guard against NaN/Inf class id
-        int label = (cid>=0.f && cid<10000.f) ? (int)cid : 0;
+        int label=(cid>=0.f&&cid<10000.f)?(int)cid:0;
         Object o;
         o.x=x1*sc; o.y=y1*sc; o.w=(x2-x1)*sc; o.h=(y2-y1)*sc;
         o.label=label; o.prob=score;
         objects.push_back(o);
     }
-    LOGD("v10 detected %d objects",(int)objects.size());
+    LOGD("v10 detected %d",(int)objects.size());
 }
 
 // YOLOv8/v9 anchor-free
@@ -165,7 +156,7 @@ static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,
 static void decode_v5(const ncnn::Mat& f,int st,int si,float ct,std::vector<Object>& o){
     int gh=f.h,gw=f.w; if(gh==0||gw==0) return;
     const int na=3,step=5+g_num_classes;
-    if(f.c < na*step){ LOGE("v5: too few channels %d",f.c); return; }
+    if(f.c<na*step){LOGE("v5: too few channels %d",f.c); return;}
     for(int a=0;a<na;a++){
         float aw=ANCHORS[si][a*2],ah=ANCHORS[si][a*2+1];
         for(int gy=0;gy<gh;gy++) for(int gx=0;gx<gw;gx++){
@@ -205,26 +196,24 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     const char* param=env->GetStringUTFChars(pp,0); const char* bin=env->GetStringUTFChars(bp,0);
     g_param_path=param;
     g_net.opt.use_vulkan_compute=(bool)gpu;
-    // Disable fp16 packing/storage for numerical accuracy; keep fp16 arithmetic for speed
-    g_net.opt.use_fp16_packed    = false;
-    g_net.opt.use_fp16_storage   = false;
-    g_net.opt.use_fp16_arithmetic= true;
+    g_net.opt.use_fp16_packed    =false;
+    g_net.opt.use_fp16_storage   =false;
+    g_net.opt.use_fp16_arithmetic=true;
     int r=g_net.load_param(param);
     if(r!=0){LOGE("load_param failed");env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     r=g_net.load_model(bin);
-    if(r!=0){LOGE("load_model failed"); env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
+    if(r!=0){LOGE("load_model failed");env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     env->ReleaseStringUTFChars(pp,param); env->ReleaseStringUTFChars(bp,bin);
-    ParamInfo pi = parse_param(g_param_path);
-    g_input_name = pi.input_name;
+    ParamInfo pi=parse_param(g_param_path);
+    g_input_name=pi.input_name;
     g_initialized=true;
-    LOGD("Init OK yolov%d input=%d nc=%d gpu=%d input_blob=%s out0=%s",
-         ver,isz,nc,(int)gpu,g_input_name.c_str(),g_out0.c_str());
+    LOGD("Init OK yolov%d input=%d nc=%d gpu=%d input_blob=%s out0=%s",ver,isz,nc,(int)gpu,g_input_name.c_str(),g_out0.c_str());
     return JNI_TRUE;
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env,jobject){
-    ParamInfo pi = parse_param(g_param_path);
+    ParamInfo pi=parse_param(g_param_path);
     jclass sc=env->FindClass("java/lang/String");
     jobjectArray arr=env->NewObjectArray((jsize)pi.output_names.size(),sc,nullptr);
     for(size_t i=0;i<pi.output_names.size();i++)
@@ -232,6 +221,8 @@ Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env,jobje
     return arr;
 }
 
+// nativeDetect: returns detections normalized to the FULL raw bitmap (0..1 each axis)
+// Caller applies rotation & aspect correction on the Java side.
 JNIEXPORT jobjectArray JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         JNIEnv* env,jobject,jobject bitmap,jfloat ct,jfloat nt,jint nth){
@@ -250,14 +241,19 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     if(AndroidBitmap_lockPixels(env,bitmap,&px)!=ANDROID_BITMAP_RESULT_SUCCESS)
         return env->NewObjectArray(0,dc,nullptr);
 
+    // Center-crop to square to avoid squishing the image
+    int w=(int)info.width, h=(int)info.height;
+    int sq=std::min(w,h);
+    int ox=(w-sq)/2, oy=(h-sq)/2;
+    const unsigned char* src=(const unsigned char*)px + oy*(int)info.stride + ox*4;
+
     ncnn::Mat in=ncnn::Mat::from_pixels_resize(
-        (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
-        (int)info.width, (int)info.height, (int)info.stride,
+        src, ncnn::Mat::PIXEL_RGBA2RGB,
+        sq, sq, (int)info.stride,
         g_input_size, g_input_size);
 
     AndroidBitmap_unlockPixels(env,bitmap);
-
-    if(in.empty()){LOGE("from_pixels_resize returned empty mat");return env->NewObjectArray(0,dc,nullptr);}
+    if(in.empty()){LOGE("from_pixels_resize empty");return env->NewObjectArray(0,dc,nullptr);}
 
     const float mv[]={0,0,0},nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
@@ -267,6 +263,15 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     if     (g_yolo_version>=10) detect_v10(in,objs,ct);
     else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
     else                        detect_v5 (in,objs,ct,nt);
+
+    // Transform coords from crop-space [0..1] to full-bitmap-normalized [0..1]
+    float fw=(float)w, fh=(float)h, fsq=(float)sq;
+    for(auto& o:objs){
+        o.x=(o.x*fsq+ox)/fw;
+        o.y=(o.y*fsq+oy)/fh;
+        o.w=o.w*fsq/fw;
+        o.h=o.h*fsq/fh;
+    }
 
     jobjectArray res=env->NewObjectArray((jsize)objs.size(),dc,nullptr);
     for(size_t i=0;i<objs.size();i++){
