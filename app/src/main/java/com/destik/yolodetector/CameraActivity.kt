@@ -148,9 +148,11 @@ class CameraActivity : AppCompatActivity() {
      */
     private fun rotateDetections(dets: Array<Detection>, degrees: Int): Array<Detection> =
         when (degrees) {
-            90  -> dets.map { Detection(it.y,             1f - it.x - it.w, it.h, it.w, it.label, it.confidence) }.toTypedArray()
+            // 90° CW:  (px,py)→(1-py,px)  ∴ box(x,y,w,h)→(1-y-h, x,   h, w)
+            90  -> dets.map { Detection(1f - it.y - it.h, it.x,             it.h, it.w, it.label, it.confidence) }.toTypedArray()
             180 -> dets.map { Detection(1f - it.x - it.w, 1f - it.y - it.h, it.w, it.h, it.label, it.confidence) }.toTypedArray()
-            270 -> dets.map { Detection(1f - it.y - it.h, it.x,             it.h, it.w, it.label, it.confidence) }.toTypedArray()
+            // 270° CW: (px,py)→(py,1-px)  ∴ box(x,y,w,h)→(y,   1-x-w, h, w)
+            270 -> dets.map { Detection(it.y,             1f - it.x - it.w, it.h, it.w, it.label, it.confidence) }.toTypedArray()
             else -> dets
         }
 
