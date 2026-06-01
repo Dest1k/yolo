@@ -18,7 +18,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var config = ModelConfig()
-    private val detector = YoloDetector()
     private val executor = Executors.newSingleThreadExecutor()
 
     private val pickParam = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -37,6 +36,10 @@ class MainActivity : AppCompatActivity() {
         if (ok) launchCamera() else toast("Нужно разрешение камеры")
     }
 
+    // Shared detector instance — parse-only, no inference here
+    private val detector = YoloDetector()
+    private var detectorReady = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -44,18 +47,16 @@ class MainActivity : AppCompatActivity() {
         loadConfig()
 
         binding.btnSelectParam.setOnClickListener { pickParam.launch("*/*") }
-        binding.btnSelectBin.setOnClickListener { pickBin.launch("*/*") }
+        binding.btnSelectBin.setOnClickListener   { pickBin.launch("*/*") }
         binding.btnSettings.setOnClickListener {
             settingsResult.launch(Intent(this, SettingsActivity::class.java)
                 .putExtra("config", Gson().toJson(config)))
         }
-        binding.btnDetectOutputs.setOnClickListener { probeModel() }
+        binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
         binding.btnStartCamera.setOnClickListener {
             if (config.paramPath.isEmpty() || config.binPath.isEmpty()) {
                 toast("Выберите .param и .bin файлы")
-            } else {
-                saveConfig(); checkCameraAndLaunch()
-            }
+            } else { saveConfig(); checkCameraAndLaunch() }
         }
         refreshSummary()
     }
@@ -66,41 +67,45 @@ class MainActivity : AppCompatActivity() {
         if (path == null) { toast("Ошибка копирования"); return }
         if (isParam) { config.paramPath = path; binding.tvParamFile.text = FileUtils.getFileName(this, uri) }
         else         { config.binPath   = path; binding.tvBinFile.text   = FileUtils.getFileName(this, uri) }
+        detectorReady = false
         refreshSummary()
     }
 
-    /** Load model, parse param, probe outputs — show dialog with results */
-    private fun probeModel() {
+    /** Load model (needed to set g_param_path), then parse .param — no inference */
+    private fun analyzeModel() {
         if (config.paramPath.isEmpty() || config.binPath.isEmpty()) {
-            toast("Сначала выберите .param и .bin")
-            return
+            toast("Сначала выберите .param и .bin"); return
         }
-        toast("Анализирую модель...")
+        binding.btnDetectOutputs.isEnabled = false
+        binding.btnDetectOutputs.text = "Анализ..."
         executor.execute {
-            val ok = detector.init(config)
-            val text = if (!ok) {
-                "Ошибка загрузки модели"
-            } else {
-                val names = detector.getOutputNames()
-                val probe = detector.probeOutputs()
-                val sb = StringBuilder()
-                sb.append("Найдено выходов: ${names.size}\n\n")
-                sb.append("Формы тензоров:\n$probe\n")
-                if (names.isNotEmpty()) {
-                    sb.append("Применить первый выход как output0?")
-                    // auto-apply first output name
-                    config = config.copy(outputName0 = names[0],
-                        outputName1 = if (names.size > 1) names[1] else "output1",
-                        outputName2 = if (names.size > 2) names[2] else "output2")
-                    saveConfig()
-                }
-                sb.toString()
-            }
+            // Init loads the model AND sets g_param_path for parsing
+            val ok = runCatching { detector.init(config) }.getOrDefault(false)
+            val names: Array<String> = if (ok) runCatching { detector.getOutputNames() }.getOrDefault(emptyArray()) else emptyArray()
             runOnUiThread {
-                refreshSummary()
+                binding.btnDetectOutputs.isEnabled = true
+                binding.btnDetectOutputs.text = "🔍 Определить выходы модели"
+                if (!ok) { toast("Ошибка загрузки модели"); return@runOnUiThread }
+                if (names.isEmpty()) { toast("Не удалось определить выходы (проверьте .param файл)"); return@runOnUiThread }
+
+                // Auto-apply
+                config = config.copy(
+                    outputName0 = names.getOrElse(0) { "output0" },
+                    outputName1 = names.getOrElse(1) { "output1" },
+                    outputName2 = names.getOrElse(2) { "output2" }
+                )
+                detectorReady = true
+                saveConfig(); refreshSummary()
+
+                val msg = buildString {
+                    append("Найдено выходов: ${names.size}\n\n")
+                    names.forEachIndexed { i, n -> append("[$i] $n\n") }
+                    append("\nИмена автоматически записаны в настройки.")
+                    append("\n\nТеперь выберите версию YOLO в Настройках.")
+                }
                 AlertDialog.Builder(this)
-                    .setTitle("Инфо о модели")
-                    .setMessage(text)
+                    .setTitle("Выходы модели")
+                    .setMessage(msg)
                     .setPositiveButton("OK", null)
                     .show()
             }
@@ -110,14 +115,12 @@ class MainActivity : AppCompatActivity() {
     private fun refreshSummary() {
         binding.tvSummary.text = buildString {
             append("YOLO v${config.yoloVersion}  |  ${config.inputSize}×${config.inputSize}  |  ${config.numClasses} классов\n")
-            append("Conf: ${"%,.2f".format(config.confThreshold)}  ")
-            append("NMS: ${"%,.2f".format(config.nmsThreshold)}  ")
-            append("Threads: ${config.numThreads}  ")
-            append(if (config.useGPU) "GPU" else "CPU")
-            append("\nOutput0: ${config.outputName0}")
+            append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  Thr: ${config.numThreads}  ${if (config.useGPU) "GPU" else "CPU"}\n")
+            append("out0: ${config.outputName0}")
         }
-        binding.btnStartCamera.isEnabled   = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
-        binding.btnDetectOutputs.isEnabled = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
+        val hasFiles = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
+        binding.btnStartCamera.isEnabled   = hasFiles
+        binding.btnDetectOutputs.isEnabled = hasFiles
     }
 
     private fun checkCameraAndLaunch() {
@@ -137,6 +140,5 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("yolo", MODE_PRIVATE).edit().putString("config", Gson().toJson(config)).apply()
     }
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-
     override fun onDestroy() { super.onDestroy(); executor.shutdown() }
 }

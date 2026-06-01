@@ -3,16 +3,13 @@ package com.destik.yolodetector
 import android.graphics.Bitmap
 
 class YoloDetector {
-
     external fun nativeInit(
         paramPath: String, binPath: String,
         version: Int, inputSize: Int, numClasses: Int, useGPU: Boolean,
         out0: String, out1: String, out2: String
     ): Boolean
-
     external fun nativeDetect(bitmap: Bitmap, confThreshold: Float, nmsThreshold: Float, numThreads: Int): Array<Detection>
     external fun nativeGetOutputNames(): Array<String>
-    external fun nativeProbeOutputs(): String
     external fun nativeRelease()
 
     fun init(config: ModelConfig): Boolean =
@@ -24,10 +21,7 @@ class YoloDetector {
         nativeDetect(bitmap, config.confThreshold, config.nmsThreshold, config.numThreads)
 
     fun getOutputNames(): Array<String> = nativeGetOutputNames()
-    fun probeOutputs(): String = nativeProbeOutputs()
     fun release() = nativeRelease()
 
-    companion object {
-        init { System.loadLibrary("yolo_ncnn") }
-    }
+    companion object { init { System.loadLibrary("yolo_ncnn") } }
 }
