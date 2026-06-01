@@ -265,7 +265,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     g_net.opt.use_vulkan_compute=(bool)gpu;
     g_net.opt.use_fp16_packed    =false;
     g_net.opt.use_fp16_storage   =false;
-    g_net.opt.use_fp16_arithmetic=true;
+    g_net.opt.use_fp16_arithmetic=false;
     if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); return JNI_FALSE; }
     if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  return JNI_FALSE; }
     ParamInfo pi=parse_param(g_param_path);
@@ -311,17 +311,28 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         return env->NewObjectArray(0,dc,nullptr);
 
     int w=(int)info.width, h=(int)info.height;
-    int sq=std::min(w,h);
-    int ox=(w-sq)/2, oy=(h-sq)/2;
-    const unsigned char* src=(const unsigned char*)px + oy*(int)info.stride + ox*4;
 
-    ncnn::Mat in=ncnn::Mat::from_pixels_resize(
-        src, ncnn::Mat::PIXEL_RGBA2RGB,
-        sq, sq, (int)info.stride,
-        g_input_size, g_input_size);
+    // Letterbox: scale to fit g_input_size × g_input_size, pad remainder with black.
+    // Matches the preprocessing YOLO training uses (preserves aspect ratio).
+    float scale = std::min((float)g_input_size / w, (float)g_input_size / h);
+    int   nw    = (int)(w * scale + .5f);
+    int   nh    = (int)(h * scale + .5f);
+    int   pad_x = (g_input_size - nw) / 2;
+    int   pad_y = (g_input_size - nh) / 2;
+
+    ncnn::Mat resized = ncnn::Mat::from_pixels_resize(
+        (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+        w, h, (int)info.stride,
+        nw, nh);
 
     AndroidBitmap_unlockPixels(env,bitmap);
-    if(in.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
+    if(resized.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
+
+    ncnn::Mat in;
+    ncnn::copy_make_border(resized, in,
+        pad_y, g_input_size - nh - pad_y,
+        pad_x, g_input_size - nw - pad_x,
+        ncnn::BORDER_CONSTANT, 0.f);
 
     const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
@@ -332,12 +343,19 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
     else                        detect_v5 (in,objs,ct,nt);
 
-    const float fw=(float)w, fh=(float)h, fsq=(float)sq;
+    // Reverse letterbox: norm model coords → original frame norm coords
+    const float fw=(float)w, fh=(float)h;
+    const float fpx=(float)pad_x, fpy=(float)pad_y;
+    const float fis=(float)g_input_size;
     for(auto& o:objs){
-        o.x=(o.x*fsq+ox)/fw;
-        o.y=(o.y*fsq+oy)/fh;
-        o.w=o.w*fsq/fw;
-        o.h=o.h*fsq/fh;
+        float x1 = o.x       * fis;
+        float y1 = o.y       * fis;
+        float x2 = (o.x+o.w) * fis;
+        float y2 = (o.y+o.h) * fis;
+        o.x = (x1 - fpx) / (scale * fw);
+        o.y = (y1 - fpy) / (scale * fh);
+        o.w = (x2 - x1)  / (scale * fw);
+        o.h = (y2 - y1)  / (scale * fh);
     }
 
     jobjectArray res=env->NewObjectArray((jsize)objs.size(),dc,nullptr);
