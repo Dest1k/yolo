@@ -332,7 +332,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     ncnn::copy_make_border(resized, in,
         pad_y, g_input_size - nh - pad_y,
         pad_x, g_input_size - nw - pad_x,
-        ncnn::BORDER_CONSTANT, 0.f);
+        ncnn::BORDER_CONSTANT, 114.f);
 
     const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
