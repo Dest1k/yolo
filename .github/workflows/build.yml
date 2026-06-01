@@ -23,10 +23,27 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK
+      - name: Install NDK and CMake
         run: |
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+
+      - name: Download Gradle wrapper jar
+        run: |
+          mkdir -p gradle/wrapper
+          wget -q https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar \
+            -O gradle/wrapper/gradle-wrapper.jar || \
+          wget -q https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradle/wrapper/gradle-wrapper.jar \
+            -O gradle/wrapper/gradle-wrapper.jar || \
+          curl -sL "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -o gradle-dist.zip && \
+            unzip -q gradle-dist.zip gradle-8.4/lib/gradle-wrapper-*.jar -d /tmp/gw && \
+            cp /tmp/gw/gradle-8.4/lib/gradle-wrapper-*.jar gradle/wrapper/gradle-wrapper.jar || true
+          # Fallback: use gradle to generate wrapper
+          if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
+            wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp/gradle-install
+            /tmp/gradle-install/gradle-8.4/bin/gradle wrapper --gradle-version 8.4 --distribution-type bin
+          fi
 
       - name: Cache NCNN
         id: cache-ncnn
@@ -62,7 +79,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
 
-      - name: Upload APK
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: yolo-detector-debug
