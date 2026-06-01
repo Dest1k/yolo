@@ -20,6 +20,14 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Install Gradle and generate wrapper
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt/gradle
+          export PATH=$PATH:/opt/gradle/gradle-8.4/bin
+          gradle wrapper --gradle-version 8.4 --distribution-type bin
+          chmod +x gradlew
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -27,23 +35,6 @@ jobs:
         run: |
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-
-      - name: Download Gradle wrapper jar
-        run: |
-          mkdir -p gradle/wrapper
-          wget -q https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar \
-            -O gradle/wrapper/gradle-wrapper.jar || \
-          wget -q https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradle/wrapper/gradle-wrapper.jar \
-            -O gradle/wrapper/gradle-wrapper.jar || \
-          curl -sL "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -o gradle-dist.zip && \
-            unzip -q gradle-dist.zip gradle-8.4/lib/gradle-wrapper-*.jar -d /tmp/gw && \
-            cp /tmp/gw/gradle-8.4/lib/gradle-wrapper-*.jar gradle/wrapper/gradle-wrapper.jar || true
-          # Fallback: use gradle to generate wrapper
-          if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
-            wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
-            unzip -q /tmp/gradle.zip -d /tmp/gradle-install
-            /tmp/gradle-install/gradle-8.4/bin/gradle wrapper --gradle-version 8.4 --distribution-type bin
-          fi
 
       - name: Cache NCNN
         id: cache-ncnn
@@ -62,7 +53,7 @@ jobs:
           cp -r ncnn-20240102-android-vulkan/armeabi-v7a app/src/main/cpp/ncnn/
           rm -rf ncnn.zip ncnn-20240102-android-vulkan
 
-      - name: Cache Gradle
+      - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
           path: |
@@ -70,9 +61,6 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
