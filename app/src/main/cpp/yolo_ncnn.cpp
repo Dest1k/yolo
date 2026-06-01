@@ -69,13 +69,12 @@ static std::vector<std::string> parse_output_names(const std::string& path){
     return result;
 }
 
-// Safe accessor — returns 0 if out of bounds
 static inline float safe_get(const ncnn::Mat& m, int row, int col){
     if(row<0||row>=m.h||col<0||col>=m.w) return 0.f;
     return m.row(row)[col];
 }
 
-// ── YOLOv10/v11 NMS-free ───────────────────────────────────────────────────────
+// YOLOv10/v11 NMS-free
 static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input("images",in);
@@ -86,17 +85,12 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
     LOGD("v10 out: w=%d h=%d c=%d",out.w,out.h,out.c);
     if(out.w==0||out.h==0){ LOGE("v10: empty output"); return; }
 
-    // Determine layout:
-    // Case A: [N, 6]  → h=N w=6  (or h=N w>6 for some exports)
-    // Case B: [6, N]  → h=6 w=N  (transposed)
-    // Case C: [1, N, 6] → c=1 h=N w=6 (batched)
-    bool tr = (out.h == 6 && out.w > 6); // transposed [6, N]
+    bool tr = (out.h == 6 && out.w > 6);
     int nd = tr ? out.w : out.h;
-    int na = tr ? out.h : out.w; // should be >=6
+    int na = tr ? out.h : out.w;
     LOGD("v10 transposed=%d nd=%d na=%d",tr,nd,na);
     if(na < 6){ LOGE("v10: unexpected attr count %d",na); return; }
 
-    // detect coord scale: pixel (0..input_size) or normalised (0..1)
     bool pixel = true;
     for(int i=0;i<std::min(nd,20);i++){
         float score = tr ? safe_get(out,4,i) : safe_get(out,i,4);
@@ -106,7 +100,6 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
         break;
     }
     float sc = pixel ? (1.f/g_input_size) : 1.f;
-    LOGD("v10 pixel=%d sc=%f",pixel,sc);
 
     for(int i=0;i<nd;i++){
         float x1    = tr?safe_get(out,0,i):safe_get(out,i,0);
@@ -124,7 +117,7 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
     LOGD("v10 detected %d objects",(int)objects.size());
 }
 
-// ── YOLOv8/v9 anchor-free ──────────────────────────────────────────────────────
+// YOLOv8/v9 anchor-free
 static void detect_v8(const ncnn::Mat& in,std::vector<Object>& objects,float ct,float nt){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input("images",in);
@@ -152,7 +145,7 @@ static void detect_v8(const ncnn::Mat& in,std::vector<Object>& objects,float ct,
     nms(objects,nt);
 }
 
-// ── YOLOv5/v6/v7 anchor-based ───────────────────────────────────────────────
+// YOLOv5/v6/v7 anchor-based
 static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,90,156,198,373,326}};
 static void decode_v5(const ncnn::Mat& f,int st,int si,float ct,std::vector<Object>& o){
     int gh=f.h,gw=f.w; if(gh==0||gw==0) return;
@@ -226,28 +219,20 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     AndroidBitmapInfo info;
     if(AndroidBitmap_getInfo(env,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS)
         return env->NewObjectArray(0,dc,nullptr);
+    if(info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888){
+        LOGE("unsupported bitmap format %d",info.format);
+        return env->NewObjectArray(0,dc,nullptr);
+    }
     void* px=nullptr;
     if(AndroidBitmap_lockPixels(env,bitmap,&px)!=ANDROID_BITMAP_RESULT_SUCCESS)
         return env->NewObjectArray(0,dc,nullptr);
 
-    ncnn::Mat in;
-    // Use stride-aware pixel conversion to handle row padding in Android bitmaps
-    if(info.format==ANDROID_BITMAP_FORMAT_RGBA_8888){
-        in=ncnn::Mat::from_pixels_resize(
-            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
-            (int)info.width, (int)info.height, (int)info.stride,
-            g_input_size, g_input_size);
-    } else if(info.format==ANDROID_BITMAP_FORMAT_RGB_565){
-        // RGB565: stride is in bytes, 2 bytes per pixel
-        in=ncnn::Mat::from_pixels_resize(
-            (const unsigned char*)px, ncnn::Mat::PIXEL_RGB565toRGB,
-            (int)info.width, (int)info.height, (int)info.stride,
-            g_input_size, g_input_size);
-    } else {
-        LOGE("unsupported bitmap format %d",info.format);
-        AndroidBitmap_unlockPixels(env,bitmap);
-        return env->NewObjectArray(0,dc,nullptr);
-    }
+    // Pass stride to handle row padding in Android bitmaps
+    ncnn::Mat in=ncnn::Mat::from_pixels_resize(
+        (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+        (int)info.width, (int)info.height, (int)info.stride,
+        g_input_size, g_input_size);
+
     AndroidBitmap_unlockPixels(env,bitmap);
 
     if(in.empty()){LOGE("from_pixels_resize returned empty mat");return env->NewObjectArray(0,dc,nullptr);}
