@@ -79,18 +79,15 @@ class CameraActivity : AppCompatActivity() {
                     proxy.close(); return@setAnalyzer
                 }
 
-                // Capture metadata before any async work
                 val rotation = proxy.imageInfo.rotationDegrees
                 val rawW     = proxy.width
                 val rawH     = proxy.height
 
-                // Scoped bitmap lifecycle: always recycled in finally
                 val bmp: Bitmap = try {
                     proxy.toBitmap()
                 } catch (e: Exception) {
                     Log.e("Camera", "toBitmap failed", e)
-                    proxy.close()
-                    processing.set(false)
+                    proxy.close(); processing.set(false)
                     return@setAnalyzer
                 }
 
@@ -100,31 +97,31 @@ class CameraActivity : AppCompatActivity() {
                     val rawDets: Array<Detection> = try {
                         detector.detect(bmp, config)
                     } catch (e: Exception) {
-                        Log.e("Camera", "detect error", e)
-                        emptyArray()
+                        Log.e("Camera", "detect error", e); emptyArray()
                     }
 
-                    // 1. Rotate coords from raw-sensor space to display-upright space.
-                    //    rotationDegrees = CW degrees needed to make the image upright.
-                    var dets = rotateDetections(rawDets, rotation)
+                    // Get diagnostics from native layer (tensor shape, max confidence, etc.)
+                    val diag = try { detector.getDiagnostics() } catch (_: Exception) { "" }
 
-                    // 2. Mirror X for front camera: PreviewView flips the front preview
-                    //    automatically, but ImageAnalysis frames are NOT flipped.
+                    var dets = rotateDetections(rawDets, rotation)
                     if (isFront) {
                         dets = dets.map {
                             Detection(1f - it.x - it.w, it.y, it.w, it.h, it.label, it.confidence)
                         }.toTypedArray()
                     }
 
-                    // After rotation, logical image dims swap for 90/270
                     val imgW = if (rotation == 90 || rotation == 270) rawH else rawW
                     val imgH = if (rotation == 90 || rotation == 270) rawW else rawH
 
                     val dt = System.currentTimeMillis() - t0
                     lastFps = if (dt > 0) 1000f / dt else lastFps
 
+                    // Debug line: "rot=90 | v10|300x6|px:1|maxC:0.87|dets:3"
+                    val debugLine = "rot=${rotation}° | $diag"
+
                     runOnUiThread {
                         binding.overlay.setImageAspect(imgW.toFloat() / imgH.toFloat())
+                        binding.overlay.setDebugLine(debugLine)
                         binding.overlay.update(dets, config.classNames, lastFps)
                     }
                 } catch (e: Exception) {
@@ -147,20 +144,14 @@ class CameraActivity : AppCompatActivity() {
 
     /**
      * Rotate detection boxes (normalised 0..1) by [degrees] CW to match display orientation.
-     *
-     * CameraX ImageProxy delivers raw sensor frames; PreviewView auto-corrects orientation
-     * but ImageAnalysis does not — so we transform coordinates manually.
-     *
-     * Derivation (90° CW, normalised coords, rotation about image centre):
-     *   point (x,y) → (y, 1-x)
-     *   box   (x,y,w,h) → (y, 1-x-w, h, w)
+     * 90° CW: point (x,y) → (y, 1-x);  box (x,y,w,h) → (y, 1-x-w, h, w)
      */
     private fun rotateDetections(dets: Array<Detection>, degrees: Int): Array<Detection> =
         when (degrees) {
             90  -> dets.map { Detection(it.y,             1f - it.x - it.w, it.h, it.w, it.label, it.confidence) }.toTypedArray()
             180 -> dets.map { Detection(1f - it.x - it.w, 1f - it.y - it.h, it.w, it.h, it.label, it.confidence) }.toTypedArray()
             270 -> dets.map { Detection(1f - it.y - it.h, it.x,             it.h, it.w, it.label, it.confidence) }.toTypedArray()
-            else -> dets  // 0° or unexpected value: no rotation
+            else -> dets
         }
 
     private fun showSettingsSheet() {

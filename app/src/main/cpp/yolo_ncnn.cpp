@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
+#include <iomanip>
 
 #include "net.h"
 
@@ -27,6 +29,9 @@ static std::string g_input_name = "images";
 static std::string g_out0 = "out0";
 static std::string g_out1 = "output1";
 static std::string g_out2 = "output2";
+
+// Updated every nativeDetect call; read by nativeGetDiagnostics
+static std::string g_diag;
 
 static inline float sigmoid_f(float x){ return 1.f/(1.f+expf(-x)); }
 static inline bool  is_bad(float v)   { return std::isnan(v)||std::isinf(v); }
@@ -81,15 +86,12 @@ static ParamInfo parse_param(const std::string& path){
         if(seen.count(t)) continue; seen.insert(t);
         if(!all_bottoms.count(t)) info.output_names.push_back(t);
     }
-    LOGD("input=%s outputs=%d",info.input_name.c_str(),(int)info.output_names.size());
     return info;
 }
 
 // Flatten a 3-D NCNN Mat (c,h,w) into a 2-D (c*h, w) view so row(i) works uniformly.
-// For 2-D mats (c==1) this is a no-op.
 static ncnn::Mat squeeze2d(const ncnn::Mat& m){
     if(m.c<=1) return m;
-    // Reinterpret: rows = c*h, cols = w
     ncnn::Mat out(m.w, m.c*m.h);
     for(int ci=0;ci<m.c;ci++)
         memcpy((float*)out+ci*m.h*m.w, m.channel(ci), m.h*m.w*sizeof(float));
@@ -106,31 +108,36 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input(g_input_name.c_str(),in);
     ncnn::Mat raw;
-    if(ex.extract(g_out0.c_str(),raw)!=0){ LOGE("v10: extract '%s' failed",g_out0.c_str()); return; }
+    if(ex.extract(g_out0.c_str(),raw)!=0){
+        g_diag="v10|extract FAILED";
+        LOGE("v10: extract '%s' failed",g_out0.c_str()); return;
+    }
     ncnn::Mat out=squeeze2d(raw);
     LOGD("v10 out: w=%d h=%d c=%d",out.w,out.h,out.c);
-    if(out.w==0||out.h==0){ LOGE("v10: empty output"); return; }
+    if(out.w==0||out.h==0){ g_diag="v10|empty output"; return; }
 
-    // Layout: [N,6] h=N w=6  OR transposed [6,N] h=6 w=N.
-    // Use w==6 as the definitive check (more robust than h==6 for small N).
-    bool tr=(out.w==6&&out.h>6) ? false   // normal [N,6]
-           :(out.h==6&&out.w>6) ? true    // transposed [6,N]
-           :(out.w>=6)          ? false   // w>=6 → treat as [N, w]
-           :true;                         // fallback
+    // Layout: [N,6] → w=6,h=N  or transposed [6,N] → w=N,h=6
+    bool tr=(out.w==6&&out.h>6) ? false
+           :(out.h==6&&out.w>6) ? true
+           :(out.w>=6)          ? false
+           :true;
     int nd=tr?out.w:out.h;
     int na=tr?out.h:out.w;
-    LOGD("v10 tr=%d nd=%d na=%d",tr,nd,na);
-    if(na<6){ LOGE("v10: bad attr count %d (need >=6)",na); return; }
+    if(na<6){
+        char buf[128]; snprintf(buf,sizeof(buf),"v10|%dx%d|na=%d<6",out.h,out.w,na);
+        g_diag=buf; LOGE("v10: bad attr count %d",na); return;
+    }
 
-    // Determine pixel vs normalised coords by scanning ALL rows
+    // Determine pixel vs normalised by scanning all rows
     bool pixel=false;
     for(int i=0;i<nd;i++){
         float x2=tr?safe_get(out,2,i):safe_get(out,i,2);
         if(!is_bad(x2)&&x2>1.5f){ pixel=true; break; }
     }
     float sc=pixel?(1.f/g_input_size):1.f;
-    LOGD("v10 pixel=%d sc=%f",pixel,sc);
 
+    float max_conf=0.f;
+    int   raw_count=0;
     for(int i=0;i<nd;i++){
         float x1   =tr?safe_get(out,0,i):safe_get(out,i,0);
         float y1   =tr?safe_get(out,1,i):safe_get(out,i,1);
@@ -138,8 +145,9 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
         float y2   =tr?safe_get(out,3,i):safe_get(out,i,3);
         float score=tr?safe_get(out,4,i):safe_get(out,i,4);
         float cid  =tr?safe_get(out,5,i):safe_get(out,i,5);
-        // Skip NaN/Inf, low-confidence, degenerate boxes
         if(is_bad(score)||is_bad(x1)||is_bad(y1)||is_bad(x2)||is_bad(y2)) continue;
+        raw_count++;
+        if(score>max_conf) max_conf=score;
         if(score<ct||x2<=x1||y2<=y1) continue;
         int label=(cid>=0.f&&cid<65536.f)?(int)cid:0;
         Object o;
@@ -147,26 +155,36 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
         o.label=label; o.prob=score;
         objects.push_back(o);
     }
-    LOGD("v10 detected %d",(int)objects.size());
+
+    // Build diagnostic string visible on screen
+    char buf[256];
+    snprintf(buf,sizeof(buf),
+             "v10|%dx%d|px:%d|maxC:%.2f|dets:%d",
+             out.h, out.w, pixel, max_conf, (int)objects.size());
+    g_diag=buf;
+    LOGD("%s",buf);
 }
 
-// ── YOLOv8/v9 anchor-free ─────────────────────────────────────────────────────
+// ── YOLOv8/v9 anchor-free ────────────────────────────────────────────────────
 static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input(g_input_name.c_str(),in);
     ncnn::Mat raw;
-    if(ex.extract(g_out0.c_str(),raw)!=0){ LOGE("v8: extract '%s' failed",g_out0.c_str()); return; }
+    if(ex.extract(g_out0.c_str(),raw)!=0){ g_diag="v8|extract FAILED"; return; }
     ncnn::Mat out=squeeze2d(raw);
     LOGD("v8 out: w=%d h=%d",out.w,out.h);
-    if(out.w==0||out.h==0) return;
-    // Layout: [4+nc, N] or [N, 4+nc]
+    if(out.w==0||out.h==0){ g_diag="v8|empty"; return; }
     bool t=(out.h==4+g_num_classes);
     int nb=t?out.w:out.h, na=t?out.h:out.w;
+    float max_conf=0.f;
     for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
         for(int c=0;c<g_num_classes&&(4+c)<na;c++){
             float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
-            if(!is_bad(s)&&s>ms){ ms=s; mc=c; }
+            if(!is_bad(s)){
+                if(s>max_conf) max_conf=s;
+                if(s>ms){ ms=s; mc=c; }
+            }
         }
         if(mc<0) continue;
         float cx=t?safe_get(out,0,i):safe_get(out,i,0);
@@ -180,11 +198,14 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
         objects.push_back(o);
     }
     nms(objects,nt);
+    char buf[256];
+    snprintf(buf,sizeof(buf),"v8|%dx%d|maxC:%.2f|dets:%d",out.h,out.w,max_conf,(int)objects.size());
+    g_diag=buf;
 }
 
-// ── YOLOv5/v6/v7 anchor-based ─────────────────────────────────────────────────
+// ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
 static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,90,156,198,373,326}};
-static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<Object>& o){
+static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<Object>& o, float& max_conf){
     int gh=f.h, gw=f.w; if(gh==0||gw==0) return;
     const int na=3, step=5+g_num_classes;
     if(f.c<na*step){ LOGE("v5: too few channels %d",f.c); return; }
@@ -192,22 +213,20 @@ static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<
         float aw=ANCHORS[si][a*2], ah=ANCHORS[si][a*2+1];
         for(int gy=0;gy<gh;gy++) for(int gx=0;gx<gw;gx++){
             float obj=sigmoid_f(f.channel(a*step+4).row(gy)[gx]);
-            if(is_bad(obj)||obj<ct) continue;
+            if(is_bad(obj)) continue;
+            if(obj>max_conf) max_conf=obj;
+            if(obj<ct) continue;
             float mc=0; int mi=0;
             for(int c=0;c<g_num_classes;c++){
                 float s=sigmoid_f(f.channel(a*step+5+c).row(gy)[gx])*obj;
                 if(!is_bad(s)&&s>mc){ mc=s; mi=c; }
             }
             if(mc<ct) continue;
-            float tx=f.channel(a*step  ).row(gy)[gx];
-            float ty=f.channel(a*step+1).row(gy)[gx];
-            float tw=f.channel(a*step+2).row(gy)[gx];
-            float th=f.channel(a*step+3).row(gy)[gx];
+            float tx=f.channel(a*step  ).row(gy)[gx], ty=f.channel(a*step+1).row(gy)[gx];
+            float tw=f.channel(a*step+2).row(gy)[gx], th=f.channel(a*step+3).row(gy)[gx];
             if(is_bad(tx)||is_bad(ty)||is_bad(tw)||is_bad(th)) continue;
-            float bx=(sigmoid_f(tx)*2-.5f+gx)*st;
-            float by=(sigmoid_f(ty)*2-.5f+gy)*st;
-            float bw=powf(sigmoid_f(tw)*2,2)*aw;
-            float bh=powf(sigmoid_f(th)*2,2)*ah;
+            float bx=(sigmoid_f(tx)*2-.5f+gx)*st, by=(sigmoid_f(ty)*2-.5f+gy)*st;
+            float bw=powf(sigmoid_f(tw)*2,2)*aw,   bh=powf(sigmoid_f(th)*2,2)*ah;
             Object ob;
             ob.x=(bx-bw*.5f)/g_input_size; ob.y=(by-bh*.5f)/g_input_size;
             ob.w=bw/g_input_size; ob.h=bh/g_input_size; ob.label=mi; ob.prob=mc;
@@ -220,8 +239,11 @@ static void detect_v5(const ncnn::Mat& in, std::vector<Object>& o, float ct, flo
     ex.input(g_input_name.c_str(),in);
     const char* n[]={g_out0.c_str(),g_out1.c_str(),g_out2.c_str()};
     const int st[]={8,16,32};
-    for(int s=0;s<3;s++){ ncnn::Mat f; if(ex.extract(n[s],f)==0) decode_v5(f,st[s],s,ct,o); }
+    float max_conf=0.f;
+    for(int s=0;s<3;s++){ ncnn::Mat f; if(ex.extract(n[s],f)==0) decode_v5(f,st[s],s,ct,o,max_conf); }
     nms(o,nt);
+    char buf[128]; snprintf(buf,sizeof(buf),"v5|maxC:%.2f|dets:%d",max_conf,(int)o.size());
+    g_diag=buf;
 }
 
 extern "C" {
@@ -233,7 +255,10 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         jstring o0, jstring o1, jstring o2){
     if(g_initialized){ g_net.clear(); g_initialized=false; }
     g_yolo_version=(int)ver; g_input_size=(int)isz; g_num_classes=(int)nc;
-    auto gc=[&](jstring s)->std::string{ const char* c=env->GetStringUTFChars(s,0); std::string r(c); env->ReleaseStringUTFChars(s,c); return r; };
+    auto gc=[&](jstring s)->std::string{
+        const char* c=env->GetStringUTFChars(s,0); std::string r(c);
+        env->ReleaseStringUTFChars(s,c); return r;
+    };
     g_out0=gc(o0); g_out1=gc(o1); g_out2=gc(o2);
     std::string param=gc(pp), bin=gc(bp);
     g_param_path=param;
@@ -246,6 +271,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     ParamInfo pi=parse_param(g_param_path);
     g_input_name=pi.input_name;
     g_initialized=true;
+    g_diag="init OK";
     LOGD("Init OK yolov%d input=%d nc=%d gpu=%d blob_in=%s out0=%s",
          ver,isz,nc,(int)gpu,g_input_name.c_str(),g_out0.c_str());
     return JNI_TRUE;
@@ -261,8 +287,11 @@ Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env, jobj
     return arr;
 }
 
-// Returns detections normalised to the full raw bitmap (0..1 per axis).
-// Rotation and front-camera mirroring are handled on the Java side.
+JNIEXPORT jstring JNICALL
+Java_com_destik_yolodetector_YoloDetector_nativeGetDiagnostics(JNIEnv* env, jobject){
+    return env->NewStringUTF(g_diag.c_str());
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         JNIEnv* env, jobject, jobject bitmap, jfloat ct, jfloat nt, jint nth){
@@ -281,7 +310,6 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     if(AndroidBitmap_lockPixels(env,bitmap,&px)!=ANDROID_BITMAP_RESULT_SUCCESS)
         return env->NewObjectArray(0,dc,nullptr);
 
-    // Center-crop to square — avoids squishing and preserves aspect ratio
     int w=(int)info.width, h=(int)info.height;
     int sq=std::min(w,h);
     int ox=(w-sq)/2, oy=(h-sq)/2;
@@ -304,7 +332,6 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
     else                        detect_v5 (in,objs,ct,nt);
 
-    // Map from crop-space [0..1] back to full-bitmap-normalised [0..1]
     const float fw=(float)w, fh=(float)h, fsq=(float)sq;
     for(auto& o:objs){
         o.x=(o.x*fsq+ox)/fw;

@@ -10,6 +10,7 @@ class YoloDetector {
     ): Boolean
     external fun nativeDetect(bitmap: Bitmap, confThreshold: Float, nmsThreshold: Float, numThreads: Int): Array<Detection>
     external fun nativeGetOutputNames(): Array<String>
+    external fun nativeGetDiagnostics(): String
     external fun nativeRelease()
 
     fun init(config: ModelConfig): Boolean =
@@ -21,6 +22,7 @@ class YoloDetector {
         nativeDetect(bitmap, config.confThreshold, config.nmsThreshold, config.numThreads)
 
     fun getOutputNames(): Array<String> = nativeGetOutputNames()
+    fun getDiagnostics(): String = nativeGetDiagnostics()
     fun release() = nativeRelease()
 
     companion object { init { System.loadLibrary("yolo_ncnn") } }
