@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp"
+    android:background="@color/card_bg">
+
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Быстрые настройки" android:textColor="@color/accent"
+        android:textSize="18sp" android:textStyle="bold" android:layout_marginBottom="16dp"/>
+
+    <!-- Version chips -->
+    <com.google.android.material.chip.ChipGroup
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        app:singleSelection="true"
+        xmlns:app="http://schemas.android.com/apk/res-auto">
+        <com.google.android.material.chip.Chip android:id="@+id/chipV5"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="v5/v6/v7" app:chipBackgroundColor="@color/bg_dark"
+            android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
+            style="@style/Widget.MaterialComponents.Chip.Filter"/>
+        <com.google.android.material.chip.Chip android:id="@+id/chipV8"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="v8/v9/v10/v11" app:chipBackgroundColor="@color/bg_dark"
+            android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
+            style="@style/Widget.MaterialComponents.Chip.Filter"/>
+    </com.google.android.material.chip.ChipGroup>
+
+    <!-- Conf -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="Confidence"
+            android:textColor="@color/text_secondary"/>
+        <TextView android:id="@+id/tvConfVal" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:textColor="@color/accent" android:textStyle="bold"/>
+    </LinearLayout>
+    <SeekBar android:id="@+id/seekConf" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:max="100"
+        android:progressTint="@color/accent" android:layout_marginBottom="12dp"/>
+
+    <!-- NMS -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="NMS"
+            android:textColor="@color/text_secondary"/>
+        <TextView android:id="@+id/tvNmsVal" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:textColor="@color/accent" android:textStyle="bold"/>
+    </LinearLayout>
+    <SeekBar android:id="@+id/seekNms" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:max="100"
+        android:progressTint="@color/accent" android:layout_marginBottom="12dp"/>
+
+    <!-- Threads -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="CPU потоки"
+            android:textColor="@color/text_secondary"/>
+        <TextView android:id="@+id/tvThreadsVal" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:textColor="@color/accent" android:textStyle="bold"/>
+    </LinearLayout>
+    <SeekBar android:id="@+id/seekThreads" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:progressTint="@color/accent"
+        android:layout_marginBottom="12dp"/>
+
+    <!-- GPU -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical"
+        android:layout_marginBottom="8dp">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="GPU (Vulkan)"
+            android:textColor="@color/text_primary"/>
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchGpu" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:thumbTint="@color/accent"/>
+    </LinearLayout>
+
+    <!-- Output names (compact) -->
+    <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut0"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="Output 0 name" android:textColor="@color/text_primary"
+        android:background="@drawable/bg_field" android:padding="8dp"
+        android:layout_marginBottom="6dp"/>
+    <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut1"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="Output 1 name (v5)" android:textColor="@color/text_primary"
+        android:background="@drawable/bg_field" android:padding="8dp"
+        android:layout_marginBottom="6dp"/>
+    <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut2"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="Output 2 name (v5)" android:textColor="@color/text_primary"
+        android:background="@drawable/bg_field" android:padding="8dp"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Input size & classes (inline) -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:layout_marginBottom="16dp">
+        <com.google.android.material.textfield.TextInputEditText android:id="@+id/etInputSize"
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:hint="Размер входа" android:inputType="number"
+            android:textColor="@color/text_primary" android:background="@drawable/bg_field"
+            android:padding="8dp" android:layout_marginEnd="8dp"/>
+        <com.google.android.material.textfield.TextInputEditText android:id="@+id/etNumClasses"
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:hint="Классы" android:inputType="number"
+            android:textColor="@color/text_primary" android:background="@drawable/bg_field"
+            android:padding="8dp"/>
+    </LinearLayout>
+
+    <Button android:id="@+id/btnApply"
+        android:layout_width="match_parent" android:layout_height="48dp"
+        android:text="Применить" android:backgroundTint="@color/accent"
+        android:textColor="@color/bg_dark" android:textStyle="bold"/>
+
+</LinearLayout>
