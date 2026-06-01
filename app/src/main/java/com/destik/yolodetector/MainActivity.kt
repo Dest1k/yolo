@@ -32,6 +32,17 @@ class MainActivity : AppCompatActivity() {
             refreshSummary()
         }
     }
+    private val libraryResult = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode == RESULT_OK) {
+            r.data?.getStringExtra("config")?.let {
+                config = Gson().fromJson(it, ModelConfig::class.java)
+                binding.tvParamFile.text = config.paramPath.substringAfterLast('/')
+                binding.tvBinFile.text   = config.binPath.substringAfterLast('/')
+                saveConfig(); refreshSummary()
+                toast("Модель загружена. Нажмите «Определить выходы» для авто-настройки.")
+            }
+        }
+    }
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) launchCamera() else toast("Нужно разрешение камеры")
     }
@@ -51,6 +62,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnSettings.setOnClickListener {
             settingsResult.launch(Intent(this, SettingsActivity::class.java)
                 .putExtra("config", Gson().toJson(config)))
+        }
+        binding.btnModelLibrary.setOnClickListener {
+            libraryResult.launch(Intent(this, ModelLibraryActivity::class.java))
         }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
         binding.btnStartCamera.setOnClickListener {
