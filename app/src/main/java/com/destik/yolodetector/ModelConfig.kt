@@ -3,10 +3,10 @@ package com.destik.yolodetector
 data class ModelConfig(
     var paramPath: String = "",
     var binPath: String = "",
-    var yoloVersion: Int = 8,
+    var yoloVersion: Int = 10,
     var inputSize: Int = 640,
     var numClasses: Int = 80,
-    var confThreshold: Float = 0.4f,
+    var confThreshold: Float = 0.25f,
     var nmsThreshold: Float = 0.45f,
     var numThreads: Int = 4,
     var useGPU: Boolean = false,
