@@ -24,45 +24,22 @@ class SettingsSheet(
     override fun onViewCreated(v: View, s: Bundle?) {
         super.onViewCreated(v, s)
         bind()
-        b.btnApply.setOnClickListener {
-            collect()
-            onApply(config)
-            dismiss()
-        }
+        b.btnApply.setOnClickListener { collect(); onApply(config); dismiss() }
     }
 
     private fun bind() {
-        // Conf threshold 0..100 -> 0.0..1.0
         b.seekConf.progress = (config.confThreshold * 100).toInt()
         b.tvConfVal.text = "%.2f".format(config.confThreshold)
-        b.seekConf.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, p: Int, f: Boolean) {
-                b.tvConfVal.text = "%.2f".format(p / 100f)
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) {}
-        })
+        b.seekConf.setOnSeekBarChangeListener(seek { b.tvConfVal.text = "%.2f".format(it / 100f) })
 
         b.seekNms.progress = (config.nmsThreshold * 100).toInt()
         b.tvNmsVal.text = "%.2f".format(config.nmsThreshold)
-        b.seekNms.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, p: Int, f: Boolean) {
-                b.tvNmsVal.text = "%.2f".format(p / 100f)
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) {}
-        })
+        b.seekNms.setOnSeekBarChangeListener(seek { b.tvNmsVal.text = "%.2f".format(it / 100f) })
 
         b.seekThreads.max = 7
         b.seekThreads.progress = config.numThreads - 1
         b.tvThreadsVal.text = config.numThreads.toString()
-        b.seekThreads.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, p: Int, f: Boolean) {
-                b.tvThreadsVal.text = (p + 1).toString()
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) {}
-        })
+        b.seekThreads.setOnSeekBarChangeListener(seek { b.tvThreadsVal.text = (it + 1).toString() })
 
         b.switchGpu.isChecked = config.useGPU
         b.etInputSize.setText(config.inputSize.toString())
@@ -71,14 +48,19 @@ class SettingsSheet(
         b.etOut1.setText(config.outputName1)
         b.etOut2.setText(config.outputName2)
 
-        // YOLO version chips
         when {
-            config.yoloVersion >= 8 -> b.chipV8.isChecked = true
-            else -> b.chipV5.isChecked = true
+            config.yoloVersion >= 10 -> b.chipV10.isChecked = true
+            config.yoloVersion >= 8  -> b.chipV8.isChecked  = true
+            else                     -> b.chipV5.isChecked  = true
         }
     }
 
     private fun collect() {
+        val version = when {
+            b.chipV10.isChecked -> 10
+            b.chipV8.isChecked  -> 8
+            else                -> 5
+        }
         config = config.copy(
             confThreshold = b.seekConf.progress / 100f,
             nmsThreshold  = b.seekNms.progress / 100f,
@@ -89,8 +71,14 @@ class SettingsSheet(
             outputName0   = b.etOut0.text.toString().trim(),
             outputName1   = b.etOut1.text.toString().trim(),
             outputName2   = b.etOut2.text.toString().trim(),
-            yoloVersion   = if (b.chipV8.isChecked) 8 else 5
+            yoloVersion   = version
         )
+    }
+
+    private fun seek(onChange: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(sb: SeekBar, p: Int, f: Boolean) = onChange(p)
+        override fun onStartTrackingTouch(sb: SeekBar) {}
+        override fun onStopTrackingTouch(sb: SeekBar) {}
     }
 
     override fun onDestroyView() { super.onDestroyView(); _b = null }

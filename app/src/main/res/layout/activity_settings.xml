@@ -15,16 +15,19 @@
             android:text="Версия YOLO" android:textColor="@color/text_secondary" android:textSize="13sp"/>
         <RadioGroup android:id="@+id/rgVersion"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="16dp">
+            android:orientation="vertical" android:layout_marginBottom="16dp">
             <RadioButton android:id="@+id/rbV5"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="v5/v6/v7 (якорь)"
+                android:text="v5 / v6 / v7  (anchor-based, 3 выхода)"
                 android:textColor="@color/text_primary" android:buttonTint="@color/accent"/>
             <RadioButton android:id="@+id/rbV8"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="v8/v9/v10/v11 (без якорь)"
-                android:textColor="@color/text_primary" android:buttonTint="@color/accent"
-                android:layout_marginStart="16dp"/>
+                android:text="v8 / v9  (anchor-free, 1 выход [4+nc, N])"
+                android:textColor="@color/text_primary" android:buttonTint="@color/accent"/>
+            <RadioButton android:id="@+id/rbV10"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="v10 / v11  (NMS-free, 1 выход [N, 6])"
+                android:textColor="@color/text_primary" android:buttonTint="@color/accent"/>
         </RadioGroup>
 
         <!-- Input size -->
@@ -47,7 +50,7 @@
             android:background="@drawable/bg_field"
             android:padding="10dp" android:layout_marginBottom="16dp"/>
 
-        <!-- Confidence threshold -->
+        <!-- Confidence -->
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:layout_marginBottom="4dp">
             <TextView android:layout_width="0dp" android:layout_height="wrap_content"
@@ -62,11 +65,11 @@
             android:max="100" android:progressTint="@color/accent"
             android:layout_marginBottom="16dp"/>
 
-        <!-- NMS threshold -->
+        <!-- NMS -->
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:layout_marginBottom="4dp">
             <TextView android:layout_width="0dp" android:layout_height="wrap_content"
-                android:layout_weight="1" android:text="NMS threshold"
+                android:layout_weight="1" android:text="NMS threshold  (не используется в v10/v11)"
                 android:textColor="@color/text_secondary" android:textSize="13sp"/>
             <TextView android:id="@+id/tvNmsVal"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
@@ -89,8 +92,7 @@
         </LinearLayout>
         <SeekBar android:id="@+id/seekThreads"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:progressTint="@color/accent"
-            android:layout_marginBottom="16dp"/>
+            android:progressTint="@color/accent" android:layout_marginBottom="16dp"/>
 
         <!-- GPU -->
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -111,23 +113,23 @@
             android:textSize="13sp" android:layout_marginBottom="4dp"/>
         <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut0"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:hint="output0 (v8: output0, v5: output)"
+            android:hint="Output 0  (v8/v10: output0)"
             android:textColor="@color/text_primary" android:background="@drawable/bg_field"
             android:padding="10dp" android:layout_marginBottom="8dp"/>
         <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut1"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:hint="output1 (v5 only)"
+            android:hint="Output 1  (v5 only)"
             android:textColor="@color/text_primary" android:background="@drawable/bg_field"
             android:padding="10dp" android:layout_marginBottom="8dp"/>
         <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut2"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:hint="output2 (v5 only)"
+            android:hint="Output 2  (v5 only)"
             android:textColor="@color/text_primary" android:background="@drawable/bg_field"
             android:padding="10dp" android:layout_marginBottom="16dp"/>
 
         <!-- Class names -->
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Имена классов (.txt, один пер строке)" android:textColor="@color/text_secondary"
+            android:text="Имена классов (.txt, один per строке)" android:textColor="@color/text_secondary"
             android:textSize="13sp" android:layout_marginBottom="4dp"/>
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:gravity="center_vertical"

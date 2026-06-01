@@ -54,9 +54,11 @@ class SettingsActivity : AppCompatActivity() {
         binding.etOut2.setText(config.outputName2)
 
         // YOLO version radio
-        binding.rgVersion.check(
-            if (config.yoloVersion >= 8) R.id.rbV8 else R.id.rbV5
-        )
+        when {
+            config.yoloVersion >= 10 -> binding.rbV10.isChecked = true
+            config.yoloVersion >= 8  -> binding.rbV8.isChecked  = true
+            else                     -> binding.rbV5.isChecked  = true
+        }
         binding.tvClassNames.text = if (config.classNames.isEmpty())
             "Не загружены (будет cls0, cls1...)" else "${config.classNames.size} имён загружено"
     }
@@ -75,6 +77,11 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun saveAndFinish() {
+        val version = when {
+            binding.rbV10.isChecked -> 10
+            binding.rbV8.isChecked  -> 8
+            else                    -> 5
+        }
         config = config.copy(
             confThreshold = binding.seekConf.progress / 100f,
             nmsThreshold  = binding.seekNms.progress / 100f,
@@ -85,7 +92,7 @@ class SettingsActivity : AppCompatActivity() {
             outputName0   = binding.etOut0.text.toString().trim(),
             outputName1   = binding.etOut1.text.toString().trim(),
             outputName2   = binding.etOut2.text.toString().trim(),
-            yoloVersion   = if (binding.rbV8.isChecked) 8 else 5
+            yoloVersion   = version
         )
         setResult(RESULT_OK, Intent().putExtra("config", Gson().toJson(config)))
         finish()
