@@ -1,6 +1,8 @@
 package com.destik.yolodetector
 
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import android.util.Size
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -11,6 +13,7 @@ import com.destik.yolodetector.databinding.ActivityCameraBinding
 import com.google.gson.Gson
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CameraActivity : AppCompatActivity() {
 
@@ -18,7 +21,9 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var config: ModelConfig
     private val detector = YoloDetector()
     private lateinit var executor: ExecutorService
-    private var lastTime = System.currentTimeMillis()
+    private val processing = AtomicBoolean(false)
+    private var lastFps = 0f
+    private var lastFrameMs = System.currentTimeMillis()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,18 +38,19 @@ class CameraActivity : AppCompatActivity() {
         executor = Executors.newSingleThreadExecutor()
 
         executor.execute {
-            val ok = detector.init(config)
+            val ok = runCatching { detector.init(config) }.getOrDefault(false)
             runOnUiThread {
-                if (ok) startCamera()
-                else {
-                    Toast.makeText(this, "Ошибка загрузки модели", Toast.LENGTH_LONG).show()
+                if (ok) {
+                    startCamera()
+                } else {
+                    Toast.makeText(this, "Ошибка загрузки модели\nout0=${config.outputName0}", Toast.LENGTH_LONG).show()
                     finish()
                 }
             }
         }
 
         binding.fabSettings.setOnClickListener { showSettingsSheet() }
-        binding.btnFlip.setOnClickListener { flipCamera() }
+        binding.btnFlip.setOnClickListener    { flipCamera() }
     }
 
     private var lensFacing = CameraSelector.LENS_FACING_BACK
@@ -59,9 +65,11 @@ class CameraActivity : AppCompatActivity() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
+
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(binding.previewView.surfaceProvider)
             }
+
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -69,15 +77,33 @@ class CameraActivity : AppCompatActivity() {
                 .build()
 
             analysis.setAnalyzer(executor) { proxy ->
-                val bmp = proxy.toBitmap()
-                val t0 = System.currentTimeMillis()
-                val dets = detector.detect(bmp, config)
-                val dt = System.currentTimeMillis() - t0
-                val fps = if (dt > 0) 1000f / dt else 0f
-                runOnUiThread {
-                    binding.overlay.update(dets, config.classNames, fps)
+                // Drop frame if previous still running
+                if (!processing.compareAndSet(false, true)) {
+                    proxy.close(); return@setAnalyzer
                 }
-                proxy.close()
+                try {
+                    val bmp: Bitmap = proxy.toBitmap()
+                    val t0 = System.currentTimeMillis()
+
+                    val dets = try {
+                        detector.detect(bmp, config)
+                    } catch (e: Exception) {
+                        Log.e("CameraActivity", "detect error", e)
+                        emptyArray()
+                    }
+
+                    val dt = System.currentTimeMillis() - t0
+                    lastFps = if (dt > 0) 1000f / dt else lastFps
+
+                    runOnUiThread {
+                        binding.overlay.update(dets, config.classNames, lastFps)
+                    }
+                } catch (e: Exception) {
+                    Log.e("CameraActivity", "frame error", e)
+                } finally {
+                    proxy.close()
+                    processing.set(false)
+                }
             }
 
             runCatching { provider.unbindAll() }
@@ -92,10 +118,9 @@ class CameraActivity : AppCompatActivity() {
     private fun showSettingsSheet() {
         SettingsSheet(config) { updated ->
             config = updated
-            // Reinit detector with new params
             executor.execute {
                 detector.release()
-                detector.init(config)
+                runCatching { detector.init(config) }
             }
         }.show(supportFragmentManager, "settings")
     }
