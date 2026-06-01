@@ -53,6 +53,9 @@ class SettingsActivity : AppCompatActivity() {
         binding.etOut1.setText(config.outputName1)
         binding.etOut2.setText(config.outputName2)
 
+        if (config.engine == "onnx") binding.rbOnnx.isChecked = true
+        else binding.rbNcnn.isChecked = true
+
         // YOLO version radio
         when {
             config.yoloVersion >= 10 -> binding.rbV10.isChecked = true
@@ -83,6 +86,7 @@ class SettingsActivity : AppCompatActivity() {
             else                    -> 5
         }
         config = config.copy(
+            engine        = if (binding.rbOnnx.isChecked) "onnx" else "ncnn",
             confThreshold = binding.seekConf.progress / 100f,
             nmsThreshold  = binding.seekNms.progress / 100f,
             numThreads    = binding.seekThreads.progress + 1,

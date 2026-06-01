@@ -13,5 +13,7 @@ data class ModelConfig(
     var outputName0: String = "output0",
     var outputName1: String = "output1",
     var outputName2: String = "output2",
-    var classNames: List<String> = emptyList()
+    var classNames: List<String> = emptyList(),
+    var onnxPath: String = "",
+    var engine: String = "ncnn"   // "ncnn" or "onnx"
 )
