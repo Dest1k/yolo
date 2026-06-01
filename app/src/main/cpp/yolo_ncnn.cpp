@@ -23,6 +23,7 @@ static int        g_num_classes  = 80;
 static int        g_input_size   = 640;
 static int        g_yolo_version = 10;
 static std::string g_param_path;
+static std::string g_input_name = "images";  // auto-detected from .param
 static std::string g_out0 = "out0";
 static std::string g_out1 = "output1";
 static std::string g_out2 = "output2";
@@ -43,32 +44,47 @@ static void nms(std::vector<Object>& o,float t){
     std::vector<Object> r; for(size_t i=0;i<o.size();i++) if(!s[i]) r.push_back(o[i]); o=r;
 }
 
-static std::vector<std::string> parse_output_names(const std::string& path){
-    std::vector<std::string> result;
-    if(path.empty()) return result;
+// Parse both input blob name and output blob names from .param
+struct ParamInfo {
+    std::string input_name;
+    std::vector<std::string> output_names;
+};
+
+static ParamInfo parse_param(const std::string& path){
+    ParamInfo info;
+    info.input_name = "images"; // fallback
+    if(path.empty()) return info;
     FILE* f=fopen(path.c_str(),"r");
-    if(!f){LOGE("Cannot open param: %s",path.c_str());return result;}
-    int magic=0; if(fscanf(f,"%d",&magic)!=1||magic!=7767517){fclose(f);return result;}
+    if(!f){LOGE("Cannot open param: %s",path.c_str());return info;}
+    int magic=0;
+    if(fscanf(f,"%d",&magic)!=1||magic!=7767517){fclose(f);return info;}
     int nl=0,nb=0; fscanf(f,"%d %d",&nl,&nb);
     std::vector<std::string> top_order;
     std::set<std::string> all_tops,all_bottoms;
     char ltype[256],lname[256]; int bc,tc;
     for(int i=0;i<nl;i++){
         if(fscanf(f,"%255s %255s %d %d",ltype,lname,&bc,&tc)!=4) break;
-        for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1) all_bottoms.insert(b);}
-        for(int j=0;j<tc;j++){char t[256]={};if(fscanf(f,"%255s",t)==1){all_tops.insert(t);top_order.push_back(t);}}
+        std::vector<std::string> bottoms,tops;
+        for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1){bottoms.push_back(b);all_bottoms.insert(b);}}
+        for(int j=0;j<tc;j++){char t[256]={};if(fscanf(f,"%255s",t)==1){tops.push_back(t);all_tops.insert(t);top_order.push_back(t);}}
+        // Input layer: type is "Input" — its top blob is the network input
+        if(strcasecmp(ltype,"Input")==0 && !tops.empty()){
+            info.input_name = tops[0];
+            LOGD("Found input blob: %s",tops[0].c_str());
+        }
         char line[4096]={}; fgets(line,sizeof(line),f);
     }
     fclose(f);
     std::set<std::string> seen;
     for(auto& t:top_order){
         if(seen.count(t)) continue; seen.insert(t);
-        if(!all_bottoms.count(t)) result.push_back(t);
+        if(!all_bottoms.count(t)) info.output_names.push_back(t);
     }
-    for(auto& n:result) LOGD("output blob: %s",n.c_str());
-    return result;
+    for(auto& n:info.output_names) LOGD("output blob: %s",n.c_str());
+    return info;
 }
 
+// Safe accessor — returns 0 if out of bounds
 static inline float safe_get(const ncnn::Mat& m, int row, int col){
     if(row<0||row>=m.h||col<0||col>=m.w) return 0.f;
     return m.row(row)[col];
@@ -77,7 +93,7 @@ static inline float safe_get(const ncnn::Mat& m, int row, int col){
 // YOLOv10/v11 NMS-free
 static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct){
     ncnn::Extractor ex=g_net.create_extractor();
-    ex.input("images",in);
+    ex.input(g_input_name.c_str(),in);
     ncnn::Mat out;
     if(ex.extract(g_out0.c_str(),out)!=0){
         LOGE("v10: extract '%s' failed",g_out0.c_str()); return;
@@ -120,7 +136,7 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
 // YOLOv8/v9 anchor-free
 static void detect_v8(const ncnn::Mat& in,std::vector<Object>& objects,float ct,float nt){
     ncnn::Extractor ex=g_net.create_extractor();
-    ex.input("images",in);
+    ex.input(g_input_name.c_str(),in);
     ncnn::Mat out;
     if(ex.extract(g_out0.c_str(),out)!=0){LOGE("v8: extract '%s' failed",g_out0.c_str());return;}
     LOGD("v8 out: w=%d h=%d c=%d",out.w,out.h,out.c);
@@ -168,7 +184,8 @@ static void decode_v5(const ncnn::Mat& f,int st,int si,float ct,std::vector<Obje
     }
 }
 static void detect_v5(const ncnn::Mat& in,std::vector<Object>& o,float ct,float nt){
-    ncnn::Extractor ex=g_net.create_extractor(); ex.input("images",in);
+    ncnn::Extractor ex=g_net.create_extractor();
+    ex.input(g_input_name.c_str(),in);
     const char* n[]={g_out0.c_str(),g_out1.c_str(),g_out2.c_str()}; const int st[]={8,16,32};
     for(int s=0;s<3;s++){ncnn::Mat f;if(ex.extract(n[s],f)==0) decode_v5(f,st[s],s,ct,o);}
     nms(o,nt);
@@ -195,17 +212,22 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     r=g_net.load_model(bin);
     if(r!=0){LOGE("load_model failed"); env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     env->ReleaseStringUTFChars(pp,param); env->ReleaseStringUTFChars(bp,bin);
+    // Auto-detect input blob name from .param
+    ParamInfo pi = parse_param(g_param_path);
+    g_input_name = pi.input_name;
     g_initialized=true;
-    LOGD("Init OK yolov%d input=%d nc=%d gpu=%d out0=%s",ver,isz,nc,(int)gpu,g_out0.c_str());
+    LOGD("Init OK yolov%d input=%d nc=%d gpu=%d input_blob=%s out0=%s",
+         ver,isz,nc,(int)gpu,g_input_name.c_str(),g_out0.c_str());
     return JNI_TRUE;
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env,jobject){
-    auto names=parse_output_names(g_param_path);
+    ParamInfo pi = parse_param(g_param_path);
     jclass sc=env->FindClass("java/lang/String");
-    jobjectArray arr=env->NewObjectArray((jsize)names.size(),sc,nullptr);
-    for(size_t i=0;i<names.size();i++) env->SetObjectArrayElement(arr,(jsize)i,env->NewStringUTF(names[i].c_str()));
+    jobjectArray arr=env->NewObjectArray((jsize)pi.output_names.size(),sc,nullptr);
+    for(size_t i=0;i<pi.output_names.size();i++)
+        env->SetObjectArrayElement(arr,(jsize)i,env->NewStringUTF(pi.output_names[i].c_str()));
     return arr;
 }
 
@@ -227,7 +249,6 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     if(AndroidBitmap_lockPixels(env,bitmap,&px)!=ANDROID_BITMAP_RESULT_SUCCESS)
         return env->NewObjectArray(0,dc,nullptr);
 
-    // Pass stride to handle row padding in Android bitmaps
     ncnn::Mat in=ncnn::Mat::from_pixels_resize(
         (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
         (int)info.width, (int)info.height, (int)info.stride,
