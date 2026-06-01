@@ -23,7 +23,7 @@ static int        g_num_classes  = 80;
 static int        g_input_size   = 640;
 static int        g_yolo_version = 10;
 static std::string g_param_path;
-static std::string g_out0 = "output0";
+static std::string g_out0 = "out0";
 static std::string g_out1 = "output1";
 static std::string g_out2 = "output2";
 
@@ -43,7 +43,6 @@ static void nms(std::vector<Object>& o,float t){
     std::vector<Object> r; for(size_t i=0;i<o.size();i++) if(!s[i]) r.push_back(o[i]); o=r;
 }
 
-// Parse .param file → return output blob names (blobs produced but never consumed)
 static std::vector<std::string> parse_output_names(const std::string& path){
     std::vector<std::string> result;
     if(path.empty()) return result;
@@ -58,7 +57,7 @@ static std::vector<std::string> parse_output_names(const std::string& path){
         if(fscanf(f,"%255s %255s %d %d",ltype,lname,&bc,&tc)!=4) break;
         for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1) all_bottoms.insert(b);}
         for(int j=0;j<tc;j++){char t[256]={};if(fscanf(f,"%255s",t)==1){all_tops.insert(t);top_order.push_back(t);}}
-        char line[4096]={}; fgets(line,sizeof(line),f); // skip params
+        char line[4096]={}; fgets(line,sizeof(line),f);
     }
     fclose(f);
     std::set<std::string> seen;
@@ -66,29 +65,86 @@ static std::vector<std::string> parse_output_names(const std::string& path){
         if(seen.count(t)) continue; seen.insert(t);
         if(!all_bottoms.count(t)) result.push_back(t);
     }
-    LOGD("param parse: found %d outputs",(int)result.size());
-    for(auto& n:result) LOGD("  output: %s",n.c_str());
+    for(auto& n:result) LOGD("output blob: %s",n.c_str());
     return result;
 }
 
-// ── YOLOv8/v9 anchor-free ───────────────────────────────────────────────────
+// Safe accessor — returns 0 if out of bounds
+static inline float safe_get(const ncnn::Mat& m, int row, int col){
+    if(row<0||row>=m.h||col<0||col>=m.w) return 0.f;
+    return m.row(row)[col];
+}
+
+// ── YOLOv10/v11 NMS-free ───────────────────────────────────────────────────────
+static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct){
+    ncnn::Extractor ex=g_net.create_extractor();
+    ex.input("images",in);
+    ncnn::Mat out;
+    if(ex.extract(g_out0.c_str(),out)!=0){
+        LOGE("v10: extract '%s' failed",g_out0.c_str()); return;
+    }
+    LOGD("v10 out: w=%d h=%d c=%d",out.w,out.h,out.c);
+    if(out.w==0||out.h==0){ LOGE("v10: empty output"); return; }
+
+    // Determine layout:
+    // Case A: [N, 6]  → h=N w=6  (or h=N w>6 for some exports)
+    // Case B: [6, N]  → h=6 w=N  (transposed)
+    // Case C: [1, N, 6] → c=1 h=N w=6 (batched)
+    bool tr = (out.h == 6 && out.w > 6); // transposed [6, N]
+    int nd = tr ? out.w : out.h;
+    int na = tr ? out.h : out.w; // should be >=6
+    LOGD("v10 transposed=%d nd=%d na=%d",tr,nd,na);
+    if(na < 6){ LOGE("v10: unexpected attr count %d",na); return; }
+
+    // detect coord scale: pixel (0..input_size) or normalised (0..1)
+    bool pixel = true;
+    for(int i=0;i<std::min(nd,20);i++){
+        float score = tr ? safe_get(out,4,i) : safe_get(out,i,4);
+        if(score < ct) continue;
+        float x2 = tr ? safe_get(out,2,i) : safe_get(out,i,2);
+        if(x2 > 0.f && x2 <= 1.5f){ pixel=false; }
+        break;
+    }
+    float sc = pixel ? (1.f/g_input_size) : 1.f;
+    LOGD("v10 pixel=%d sc=%f",pixel,sc);
+
+    for(int i=0;i<nd;i++){
+        float x1    = tr?safe_get(out,0,i):safe_get(out,i,0);
+        float y1    = tr?safe_get(out,1,i):safe_get(out,i,1);
+        float x2    = tr?safe_get(out,2,i):safe_get(out,i,2);
+        float y2    = tr?safe_get(out,3,i):safe_get(out,i,3);
+        float score = tr?safe_get(out,4,i):safe_get(out,i,4);
+        float cid   = tr?safe_get(out,5,i):safe_get(out,i,5);
+        if(score<ct||x2<=x1||y2<=y1) continue;
+        Object o;
+        o.x=x1*sc; o.y=y1*sc; o.w=(x2-x1)*sc; o.h=(y2-y1)*sc;
+        o.label=(int)cid; o.prob=score;
+        objects.push_back(o);
+    }
+    LOGD("v10 detected %d objects",(int)objects.size());
+}
+
+// ── YOLOv8/v9 anchor-free ──────────────────────────────────────────────────────
 static void detect_v8(const ncnn::Mat& in,std::vector<Object>& objects,float ct,float nt){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input("images",in);
     ncnn::Mat out;
     if(ex.extract(g_out0.c_str(),out)!=0){LOGE("v8: extract '%s' failed",g_out0.c_str());return;}
-    LOGD("v8 out w=%d h=%d c=%d",out.w,out.h,out.c);
+    LOGD("v8 out: w=%d h=%d c=%d",out.w,out.h,out.c);
+    if(out.w==0||out.h==0) return;
     bool t=(out.h==4+g_num_classes);
-    int nb2=t?out.w:out.h, na=t?out.h:out.w;
-    for(int i=0;i<nb2;i++){
+    int nb=t?out.w:out.h, na=t?out.h:out.w;
+    for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
         for(int c=0;c<g_num_classes&&(4+c)<na;c++){
-            float s=t?out.row(4+c)[i]:out.row(i)[4+c];
+            float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
             if(s>ms){ms=s;mc=c;}
         }
         if(mc<0) continue;
-        float cx=t?out.row(0)[i]:out.row(i)[0], cy=t?out.row(1)[i]:out.row(i)[1];
-        float bw=t?out.row(2)[i]:out.row(i)[2], bh=t?out.row(3)[i]:out.row(i)[3];
+        float cx=t?safe_get(out,0,i):safe_get(out,i,0);
+        float cy=t?safe_get(out,1,i):safe_get(out,i,1);
+        float bw=t?safe_get(out,2,i):safe_get(out,i,2);
+        float bh=t?safe_get(out,3,i):safe_get(out,i,3);
         Object o; o.x=(cx-bw*.5f)/g_input_size; o.y=(cy-bh*.5f)/g_input_size;
         o.w=bw/g_input_size; o.h=bh/g_input_size; o.label=mc; o.prob=ms;
         objects.push_back(o);
@@ -96,39 +152,12 @@ static void detect_v8(const ncnn::Mat& in,std::vector<Object>& objects,float ct,
     nms(objects,nt);
 }
 
-// ── YOLOv10/v11 NMS-free [N,6] or [6,N]: x1,y1,x2,y2,score,cls ───────────────────
-static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct){
-    ncnn::Extractor ex=g_net.create_extractor();
-    ex.input("images",in);
-    ncnn::Mat out;
-    if(ex.extract(g_out0.c_str(),out)!=0){LOGE("v10: extract '%s' failed",g_out0.c_str());return;}
-    LOGD("v10 out w=%d h=%d c=%d",out.w,out.h,out.c);
-    bool tr=(out.h==6); // [6,N] transposed
-    int nd=tr?out.w:out.h;
-    // auto-detect pixel vs normalised from first valid box
-    bool pixel=true;
-    for(int i=0;i<nd&&i<10;i++){
-        float s=tr?out.row(4)[i]:out.row(i)[4];
-        if(s<ct) continue;
-        float x2=tr?out.row(2)[i]:out.row(i)[2];
-        if(x2<=1.5f){pixel=false;} break;
-    }
-    float sc=pixel?(1.f/g_input_size):1.f;
-    LOGD("v10 nd=%d pixel=%d sc=%f",nd,pixel,sc);
-    for(int i=0;i<nd;i++){
-        float x1,y1,x2,y2,score,cid;
-        if(tr){x1=out.row(0)[i];y1=out.row(1)[i];x2=out.row(2)[i];y2=out.row(3)[i];score=out.row(4)[i];cid=out.row(5)[i];}
-        else  {x1=out.row(i)[0];y1=out.row(i)[1];x2=out.row(i)[2];y2=out.row(i)[3];score=out.row(i)[4];cid=out.row(i)[5];}
-        if(score<ct||x2<=x1||y2<=y1) continue;
-        Object o; o.x=x1*sc; o.y=y1*sc; o.w=(x2-x1)*sc; o.h=(y2-y1)*sc;
-        o.label=(int)cid; o.prob=score; objects.push_back(o);
-    }
-}
-
-// ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
+// ── YOLOv5/v6/v7 anchor-based ───────────────────────────────────────────────
 static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,90,156,198,373,326}};
 static void decode_v5(const ncnn::Mat& f,int st,int si,float ct,std::vector<Object>& o){
-    int gh=f.h,gw=f.w; const int na=3,step=5+g_num_classes;
+    int gh=f.h,gw=f.w; if(gh==0||gw==0) return;
+    const int na=3,step=5+g_num_classes;
+    if(f.c < na*step){ LOGE("v5: too few channels %d",f.c); return; }
     for(int a=0;a<na;a++){
         float aw=ANCHORS[si][a*2],ah=ANCHORS[si][a*2+1];
         for(int gy=0;gy<gh;gy++) for(int gx=0;gx<gw;gx++){
@@ -168,15 +197,16 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     g_param_path=param;
     g_net.opt.use_vulkan_compute=(bool)gpu;
     g_net.opt.use_fp16_packed=g_net.opt.use_fp16_storage=g_net.opt.use_fp16_arithmetic=true;
-    int r=g_net.load_param(param); if(r!=0){LOGE("load_param failed");env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
-    r=g_net.load_model(bin);        if(r!=0){LOGE("load_model failed"); env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
+    int r=g_net.load_param(param);
+    if(r!=0){LOGE("load_param failed");env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
+    r=g_net.load_model(bin);
+    if(r!=0){LOGE("load_model failed"); env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     env->ReleaseStringUTFChars(pp,param); env->ReleaseStringUTFChars(bp,bin);
     g_initialized=true;
     LOGD("Init OK yolov%d input=%d nc=%d gpu=%d out0=%s",ver,isz,nc,(int)gpu,g_out0.c_str());
     return JNI_TRUE;
 }
 
-// Parse-only — no inference, no crash risk
 JNIEXPORT jobjectArray JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env,jobject){
     auto names=parse_output_names(g_param_path);
@@ -192,18 +222,39 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     jclass dc=env->FindClass("com/destik/yolodetector/Detection");
     jmethodID ctor=env->GetMethodID(dc,"<init>","(FFFFIF)V");
     if(!g_initialized) return env->NewObjectArray(0,dc,nullptr);
-    AndroidBitmapInfo info; AndroidBitmap_getInfo(env,bitmap,&info);
-    void* px; AndroidBitmap_lockPixels(env,bitmap,&px);
-    int pt=(info.format==ANDROID_BITMAP_FORMAT_RGBA_8888)?ncnn::Mat::PIXEL_RGBA2RGB:ncnn::Mat::PIXEL_RGB;
-    ncnn::Mat in=ncnn::Mat::from_pixels_resize((const unsigned char*)px,pt,info.width,info.height,g_input_size,g_input_size);
+
+    AndroidBitmapInfo info;
+    if(AndroidBitmap_getInfo(env,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS)
+        return env->NewObjectArray(0,dc,nullptr);
+    void* px=nullptr;
+    if(AndroidBitmap_lockPixels(env,bitmap,&px)!=ANDROID_BITMAP_RESULT_SUCCESS)
+        return env->NewObjectArray(0,dc,nullptr);
+
+    ncnn::Mat in;
+    if(info.format==ANDROID_BITMAP_FORMAT_RGBA_8888){
+        in=ncnn::Mat::from_pixels_resize((const unsigned char*)px,ncnn::Mat::PIXEL_RGBA2RGB,
+            (int)info.width,(int)info.height,g_input_size,g_input_size);
+    } else if(info.format==ANDROID_BITMAP_FORMAT_RGB_565){
+        in=ncnn::Mat::from_pixels_resize((const unsigned char*)px,ncnn::Mat::PIXEL_RGB565toRGB,
+            (int)info.width,(int)info.height,g_input_size,g_input_size);
+    } else {
+        LOGE("unsupported bitmap format %d",info.format);
+        AndroidBitmap_unlockPixels(env,bitmap);
+        return env->NewObjectArray(0,dc,nullptr);
+    }
     AndroidBitmap_unlockPixels(env,bitmap);
+
+    if(in.empty()){LOGE("from_pixels_resize returned empty mat");return env->NewObjectArray(0,dc,nullptr);}
+
     const float mv[]={0,0,0},nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
     g_net.opt.num_threads=(int)nth;
+
     std::vector<Object> objs;
     if     (g_yolo_version>=10) detect_v10(in,objs,ct);
     else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
     else                        detect_v5 (in,objs,ct,nt);
+
     jobjectArray res=env->NewObjectArray((jsize)objs.size(),dc,nullptr);
     for(size_t i=0;i<objs.size();i++){
         const Object& o=objs[i];
