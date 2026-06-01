@@ -23,7 +23,7 @@ static int        g_num_classes  = 80;
 static int        g_input_size   = 640;
 static int        g_yolo_version = 10;
 static std::string g_param_path;
-static std::string g_input_name = "images";  // auto-detected from .param
+static std::string g_input_name = "images";
 static std::string g_out0 = "out0";
 static std::string g_out1 = "output1";
 static std::string g_out2 = "output2";
@@ -44,7 +44,6 @@ static void nms(std::vector<Object>& o,float t){
     std::vector<Object> r; for(size_t i=0;i<o.size();i++) if(!s[i]) r.push_back(o[i]); o=r;
 }
 
-// Parse both input blob name and output blob names from .param
 struct ParamInfo {
     std::string input_name;
     std::vector<std::string> output_names;
@@ -52,7 +51,7 @@ struct ParamInfo {
 
 static ParamInfo parse_param(const std::string& path){
     ParamInfo info;
-    info.input_name = "images"; // fallback
+    info.input_name = "images";
     if(path.empty()) return info;
     FILE* f=fopen(path.c_str(),"r");
     if(!f){LOGE("Cannot open param: %s",path.c_str());return info;}
@@ -67,7 +66,6 @@ static ParamInfo parse_param(const std::string& path){
         std::vector<std::string> bottoms,tops;
         for(int j=0;j<bc;j++){char b[256]={};if(fscanf(f,"%255s",b)==1){bottoms.push_back(b);all_bottoms.insert(b);}}
         for(int j=0;j<tc;j++){char t[256]={};if(fscanf(f,"%255s",t)==1){tops.push_back(t);all_tops.insert(t);top_order.push_back(t);}}
-        // Input layer: type is "Input" — its top blob is the network input
         if(strcasecmp(ltype,"Input")==0 && !tops.empty()){
             info.input_name = tops[0];
             LOGD("Found input blob: %s",tops[0].c_str());
@@ -84,7 +82,6 @@ static ParamInfo parse_param(const std::string& path){
     return info;
 }
 
-// Safe accessor — returns 0 if out of bounds
 static inline float safe_get(const ncnn::Mat& m, int row, int col){
     if(row<0||row>=m.h||col<0||col>=m.w) return 0.f;
     return m.row(row)[col];
@@ -107,15 +104,15 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
     LOGD("v10 transposed=%d nd=%d na=%d",tr,nd,na);
     if(na < 6){ LOGE("v10: unexpected attr count %d",na); return; }
 
-    bool pixel = true;
-    for(int i=0;i<std::min(nd,20);i++){
-        float score = tr ? safe_get(out,4,i) : safe_get(out,i,4);
-        if(score < ct) continue;
+    // Determine coord scale by scanning ALL rows, not just those above threshold.
+    // If ANY x2 value exceeds 1.5 the model outputs pixel coords (0..input_size).
+    bool pixel = false;
+    for(int i=0;i<nd;i++){
         float x2 = tr ? safe_get(out,2,i) : safe_get(out,i,2);
-        if(x2 > 0.f && x2 <= 1.5f){ pixel=false; }
-        break;
+        if(x2 > 1.5f){ pixel=true; break; }
     }
     float sc = pixel ? (1.f/g_input_size) : 1.f;
+    LOGD("v10 pixel=%d sc=%f nd=%d",pixel,sc,nd);
 
     for(int i=0;i<nd;i++){
         float x1    = tr?safe_get(out,0,i):safe_get(out,i,0);
@@ -125,9 +122,11 @@ static void detect_v10(const ncnn::Mat& in,std::vector<Object>& objects,float ct
         float score = tr?safe_get(out,4,i):safe_get(out,i,4);
         float cid   = tr?safe_get(out,5,i):safe_get(out,i,5);
         if(score<ct||x2<=x1||y2<=y1) continue;
+        // Guard against NaN/Inf class id
+        int label = (cid>=0.f && cid<10000.f) ? (int)cid : 0;
         Object o;
         o.x=x1*sc; o.y=y1*sc; o.w=(x2-x1)*sc; o.h=(y2-y1)*sc;
-        o.label=(int)cid; o.prob=score;
+        o.label=label; o.prob=score;
         objects.push_back(o);
     }
     LOGD("v10 detected %d objects",(int)objects.size());
@@ -206,13 +205,15 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     const char* param=env->GetStringUTFChars(pp,0); const char* bin=env->GetStringUTFChars(bp,0);
     g_param_path=param;
     g_net.opt.use_vulkan_compute=(bool)gpu;
-    g_net.opt.use_fp16_packed=g_net.opt.use_fp16_storage=g_net.opt.use_fp16_arithmetic=true;
+    // Disable fp16 packing/storage for numerical accuracy; keep fp16 arithmetic for speed
+    g_net.opt.use_fp16_packed    = false;
+    g_net.opt.use_fp16_storage   = false;
+    g_net.opt.use_fp16_arithmetic= true;
     int r=g_net.load_param(param);
     if(r!=0){LOGE("load_param failed");env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     r=g_net.load_model(bin);
     if(r!=0){LOGE("load_model failed"); env->ReleaseStringUTFChars(pp,param);env->ReleaseStringUTFChars(bp,bin);return JNI_FALSE;}
     env->ReleaseStringUTFChars(pp,param); env->ReleaseStringUTFChars(bp,bin);
-    // Auto-detect input blob name from .param
     ParamInfo pi = parse_param(g_param_path);
     g_input_name = pi.input_name;
     g_initialized=true;
