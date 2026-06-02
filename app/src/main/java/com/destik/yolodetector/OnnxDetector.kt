@@ -17,11 +17,20 @@ class OnnxDetector(private val config: ModelConfig) {
     private var session: OrtSession? = null
     private var lastDiag = "onnx|init"
 
+    // Reusable buffers to avoid per-frame GC pressure
+    private var paddedBmp: Bitmap? = null
+    private var pixelBuf: IntArray? = null
+    private var floatBuf: FloatArray? = null
+    private val drawPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
     fun init(): Boolean {
         return try {
             val opts = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(config.numThreads)
+                // NNAPI: hardware ML accelerator (Snapdragon NPU etc.)
                 try { addNnapi() } catch (_: Throwable) {}
+                // XNNPACK: optimized SIMD CPU inference (~2× faster on ARM vs plain CPU)
+                try { addXnnpack(mapOf("intra_op_num_threads" to config.numThreads.toString())) } catch (_: Throwable) {}
             }
             session = env.createSession(config.onnxPath, opts)
             lastDiag = "onnx|ready"
@@ -46,21 +55,29 @@ class OnnxDetector(private val config: ModelConfig) {
             val padX  = (sz - nw) / 2
             val padY  = (sz - nh) / 2
 
-            val padded = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888)
+            // Reuse padded bitmap (same sz×sz) — it gets fully overwritten each frame
+            val padded = paddedBmp?.takeIf { it.width == sz && it.height == sz }
+                ?: Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888).also { paddedBmp = it }
             Canvas(padded).apply {
                 drawColor(Color.rgb(114, 114, 114))
-                drawBitmap(Bitmap.createScaledBitmap(bitmap, nw, nh, true), padX.toFloat(), padY.toFloat(), Paint())
+                // Draw directly into padded using scaled rect — avoids creating scaled Bitmap
+                drawBitmap(bitmap,
+                    android.graphics.Rect(0, 0, bmpW, bmpH),
+                    android.graphics.RectF(padX.toFloat(), padY.toFloat(),
+                                          (padX + nw).toFloat(), (padY + nh).toFloat()),
+                    drawPaint)
             }
-            val pixels = IntArray(sz * sz).also { padded.getPixels(it, 0, sz, 0, 0, sz, sz) }
-            padded.recycle()
+            val n      = sz * sz
+            val pixels = (pixelBuf?.takeIf { it.size == n } ?: IntArray(n).also { pixelBuf = it })
+            padded.getPixels(pixels, 0, sz, 0, 0, sz, sz)
 
-            val n   = sz * sz
-            val arr = FloatArray(3 * n)
-            for (i in pixels.indices) {
+            val arr = (floatBuf?.takeIf { it.size == 3 * n } ?: FloatArray(3 * n).also { floatBuf = it })
+            val inv = 1f / 255f
+            for (i in 0 until n) {
                 val p = pixels[i]
-                arr[i]       = Color.red(p)   / 255f
-                arr[n + i]   = Color.green(p) / 255f
-                arr[2 * n + i] = Color.blue(p) / 255f
+                arr[i]         = (p shr 16 and 0xFF) * inv
+                arr[i + n]     = (p shr  8 and 0xFF) * inv
+                arr[i + n + n] = (p        and 0xFF) * inv
             }
 
             val inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr),
@@ -187,7 +204,11 @@ class OnnxDetector(private val config: ModelConfig) {
 
     fun getDiagnostics(): String = lastDiag
 
-    fun release() { session?.close(); session = null }
+    fun release() {
+        session?.close(); session = null
+        paddedBmp?.recycle(); paddedBmp = null
+        pixelBuf = null; floatBuf = null
+    }
 
     // Element access helpers
     private fun get6(tr: Boolean, attr: Int, nd: Int, i: Int, buf: FloatBuffer): Float =

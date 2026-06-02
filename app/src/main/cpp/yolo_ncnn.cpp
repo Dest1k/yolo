@@ -103,7 +103,7 @@ static inline float safe_get(const ncnn::Mat& m, int row, int col){
     return m.row(row)[col];
 }
 
-// ── YOLOv10/v11 NMS-free ──────────────────────────────────────────────────────
+// ── YOLOv10 NMS-free  [N,6] ──────────────────────────────────────────────────
 static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float ct){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input(g_input_name.c_str(),in);
@@ -262,10 +262,11 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     g_out0=gc(o0); g_out1=gc(o1); g_out2=gc(o2);
     std::string param=gc(pp), bin=gc(bp);
     g_param_path=param;
-    g_net.opt.use_vulkan_compute=(bool)gpu;
-    g_net.opt.use_fp16_packed    =false;
-    g_net.opt.use_fp16_storage   =false;
-    g_net.opt.use_fp16_arithmetic=false;
+    g_net.opt.use_vulkan_compute  =(bool)gpu;
+    // fp16 gives ~2× speedup on ARM with minimal accuracy loss for YOLO
+    g_net.opt.use_fp16_packed     =!gpu;
+    g_net.opt.use_fp16_storage    =!gpu;
+    g_net.opt.use_fp16_arithmetic =!gpu;
     if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); return JNI_FALSE; }
     if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  return JNI_FALSE; }
     ParamInfo pi=parse_param(g_param_path);
@@ -339,7 +340,22 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     g_net.opt.num_threads=(int)nth;
 
     std::vector<Object> objs;
-    if     (g_yolo_version>=10) detect_v10(in,objs,ct);
+    if (g_yolo_version >= 10) {
+        // Auto-detect NMS-free [N,6] vs anchor-free [4+nc,N] (v11 NCNN uses v8 format)
+        ncnn::Extractor ex_peek = g_net.create_extractor();
+        ex_peek.input(g_input_name.c_str(), in);
+        ncnn::Mat raw_peek;
+        bool is_nms_free = false;
+        if (ex_peek.extract(g_out0.c_str(), raw_peek) == 0) {
+            ncnn::Mat p = squeeze2d(raw_peek);
+            // NMS-free layout has exactly 6 attributes; anchor-free has 4+nc (>=8400 proposals)
+            bool tr_p = (p.h==6&&p.w>6);
+            int na_p  = tr_p ? p.h : p.w;
+            is_nms_free = (na_p == 6);
+        }
+        if (is_nms_free) detect_v10(in, objs, ct);
+        else             detect_v8 (in, objs, ct, nt);
+    }
     else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
     else                        detect_v5 (in,objs,ct,nt);
 
