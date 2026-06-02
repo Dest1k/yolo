@@ -31,6 +31,12 @@ Real-time object detection app using YOLOv5/v8/v10 models. Runs on **Android** (
 - Single `.onnx` file
 - NMS-free models (YOLOv10 style: output shape `[1, N, 6]`)
 - Runs via ONNX Runtime; Android also supports NNAPI acceleration
+- Desktop: CUDA EP (NVIDIA) + DirectML EP (AMD/NVIDIA on Windows) auto-detected
+
+### PyTorch TorchScript — `.pt` (Desktop only)
+- TorchScript-exported models (`model.export(format="torchscript")`)
+- YOLOv5 anchor-free output `[1, N, 4+C]` and YOLOv10 NMS-free `[1, N, 6]`
+- GPU via CUDA 12.1 (NVIDIA); auto-falls back to CPU if no GPU found
 
 ---
 
@@ -113,11 +119,13 @@ Open in any browser or VLC. The stream includes bounding boxes composited on eac
 
 ### Usage
 
-1. **Select ONNX model** — click **Browse** and pick a `.onnx` file (NMS-free YOLOv10 format)
-2. **Select source** — webcam index (0 = default) or paste an MJPEG HTTP URL
-3. **Start** — frames appear in the left panel with boxes overlaid
-4. **MJPEG server** — click **MJPEG** to start serving on port 8080
-5. **Screenshot** — click **Screenshot** to save the current frame as PNG
+1. **Select model type** — ONNX (`.onnx`) or PT (`.pt` TorchScript)
+2. **Browse model file** — pick your model
+3. **Select source** — webcam index (0 = default) or paste an MJPEG HTTP URL
+4. **GPU mode** — choose `AUTO` (tries CUDA → DirectML → CPU), `CUDA`, `DirectML`, or `CPU`
+5. **Start** — frames appear in the left panel; active execution provider shown in sidebar
+6. **MJPEG server** — click **MJPEG** to start serving on port 8080
+7. **Screenshot** — click **Screenshot** to save the current frame as PNG
 
 ---
 

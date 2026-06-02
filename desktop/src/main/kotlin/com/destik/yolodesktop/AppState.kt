@@ -5,23 +5,31 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.awt.image.BufferedImage
 
+enum class ModelType { ONNX, PT }
+enum class GpuPreference { CPU, AUTO, CUDA, DIRECTML }
+
 class AppState {
-    var modelPath      by mutableStateOf("")
-    var sourcePath     by mutableStateOf("0")      // webcam index or http URL
-    var inputSize      by mutableStateOf(640)
-    var numClasses     by mutableStateOf(80)
-    var confThreshold  by mutableStateOf(0.25f)
-    var running        by mutableStateOf(false)
-    var statusMessage  by mutableStateOf("Idle")
+    var modelPath       by mutableStateOf("")
+    var modelType       by mutableStateOf(ModelType.ONNX)
+    var sourcePath      by mutableStateOf("0")
+    var inputSize       by mutableStateOf(640)
+    var numClasses      by mutableStateOf(80)
+    var confThreshold   by mutableStateOf(0.25f)
+    var gpuPref         by mutableStateOf(GpuPreference.AUTO)
 
-    var currentFrame   by mutableStateOf<BufferedImage?>(null)
-    var detections     by mutableStateOf<List<Detection>>(emptyList())
+    var running         by mutableStateOf(false)
+    var statusMessage   by mutableStateOf("Idle")
+    var activeProvider  by mutableStateOf("")
 
-    var mjpegActive    by mutableStateOf(false)
-    var mjpegClients   by mutableStateOf(0)
+    var currentFrame    by mutableStateOf<BufferedImage?>(null)
+    var detections      by mutableStateOf<List<Detection>>(emptyList())
+
+    var mjpegActive     by mutableStateOf(false)
+    var mjpegClients    by mutableStateOf(0)
 
     val mjpegServer = MjpegServer(8080)
-    val detector    = OnnxDetector()
+    private val onnxDetector = OnnxDetector()
+    private val ptDetector   = PtDetector()
     var videoInput: VideoInput? = null
 
     val cocoLabels = arrayOf(
@@ -43,19 +51,33 @@ class AppState {
         if (running) return
         if (modelPath.isEmpty()) { statusMessage = "Select a model first"; return }
         try {
-            detector.load(modelPath, inputSize, numClasses, confThreshold)
+            when (modelType) {
+                ModelType.ONNX -> {
+                    onnxDetector.load(modelPath, inputSize, numClasses, confThreshold, gpuPref.toOnnxMode())
+                    activeProvider = onnxDetector.activeProvider
+                }
+                ModelType.PT -> {
+                    ptDetector.load(modelPath, inputSize, numClasses, confThreshold, gpuPref.toPtMode())
+                    activeProvider = if (gpuPref == GpuPreference.CPU) "CPU" else "PyTorch auto"
+                }
+            }
         } catch (e: Exception) {
             statusMessage = "Model load failed: ${e.message}"; return
         }
         running = true
-        statusMessage = "Running"
+        statusMessage = "Running [$activeProvider]"
         videoInput = VideoInput(
-            source = sourcePath,
+            source  = sourcePath,
             onFrame = { img ->
-                val dets = runCatching { detector.detect(img) }.getOrDefault(emptyList())
+                val dets = runCatching {
+                    when (modelType) {
+                        ModelType.ONNX -> onnxDetector.detect(img)
+                        ModelType.PT   -> ptDetector.detect(img)
+                    }
+                }.getOrDefault(emptyList())
                 val composed = drawDetections(img, dets)
                 currentFrame = composed
-                detections = dets
+                detections   = dets
                 if (mjpegActive) {
                     mjpegServer.pushFrame(composed)
                     mjpegClients = mjpegServer.clientCount()
@@ -73,40 +95,54 @@ class AppState {
 
     fun toggleMjpeg() {
         if (mjpegActive) {
-            mjpegServer.stop()
-            mjpegActive = false
-            mjpegClients = 0
+            mjpegServer.stop(); mjpegActive = false; mjpegClients = 0
         } else {
-            mjpegServer.start()
-            mjpegActive = true
+            mjpegServer.start(); mjpegActive = true
         }
     }
 
     fun saveScreenshot(path: String) {
-        val img = currentFrame ?: return
+        val img  = currentFrame ?: return
         val file = java.io.File(path)
         javax.imageio.ImageIO.write(img, "PNG", file)
         statusMessage = "Saved: ${file.name}"
     }
 
+    fun closeDetectors() {
+        onnxDetector.close()
+        ptDetector.close()
+    }
+
+    private fun GpuPreference.toOnnxMode() = when (this) {
+        GpuPreference.CPU       -> OnnxDetector.GpuMode.CPU
+        GpuPreference.CUDA      -> OnnxDetector.GpuMode.CUDA
+        GpuPreference.DIRECTML  -> OnnxDetector.GpuMode.DIRECTML
+        GpuPreference.AUTO      -> OnnxDetector.GpuMode.AUTO
+    }
+
+    private fun GpuPreference.toPtMode() = when (this) {
+        GpuPreference.CPU  -> PtDetector.GpuMode.CPU
+        else               -> PtDetector.GpuMode.AUTO
+    }
+
     private fun drawDetections(src: BufferedImage, dets: List<Detection>): BufferedImage {
         val out = BufferedImage(src.width, src.height, BufferedImage.TYPE_INT_RGB)
-        val g = out.createGraphics()
+        val g   = out.createGraphics()
         g.drawImage(src, 0, 0, null)
         g.stroke = java.awt.BasicStroke(2f)
-        val colors = arrayOf(
-            java.awt.Color(255, 80, 80),   java.awt.Color(80, 200, 80),
-            java.awt.Color(80, 120, 255),  java.awt.Color(255, 200, 0),
-            java.awt.Color(200, 0, 200),   java.awt.Color(0, 200, 200)
+        val palette = arrayOf(
+            java.awt.Color(255, 80, 80),  java.awt.Color(80, 200, 80),
+            java.awt.Color(80, 120, 255), java.awt.Color(255, 200, 0),
+            java.awt.Color(200, 0, 200),  java.awt.Color(0, 200, 200)
         )
         for (d in dets) {
-            val color = colors[d.cls % colors.size]
+            val color = palette[d.cls % palette.size]
             g.color = color
             g.drawRect(d.x1.toInt(), d.y1.toInt(), (d.x2 - d.x1).toInt(), (d.y2 - d.y1).toInt())
             val label = "${labelFor(d.cls)} ${"%.2f".format(d.conf)}"
-            val fm = g.fontMetrics
-            val tw = fm.stringWidth(label)
-            val th = fm.height
+            val fm    = g.fontMetrics
+            val tw    = fm.stringWidth(label)
+            val th    = fm.height
             g.fillRect(d.x1.toInt(), d.y1.toInt() - th, tw + 4, th)
             g.color = java.awt.Color.BLACK
             g.drawString(label, d.x1.toInt() + 2, d.y1.toInt() - 2)
