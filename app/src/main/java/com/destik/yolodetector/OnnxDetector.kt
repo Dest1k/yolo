@@ -3,7 +3,6 @@ package com.destik.yolodetector
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
-import java.util.EnumSet
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -34,12 +33,7 @@ class OnnxDetector(private val config: ModelConfig) {
 
                 if (config.useGPU) {
                     // NNAPI: Qualcomm/ARM NPU/DSP/GPU (Android 8.1+, API 27+)
-                    try {
-                        addNnapi(EnumSet.of(OrtSession.SessionOptions.NNAPIFlags.USE_FP16))
-                        activeEP = "NNAPI"
-                    } catch (_: Throwable) {
-                        try { addNnapi(); activeEP = "NNAPI" } catch (_: Throwable) {}
-                    }
+                    try { addNnapi(); activeEP = "NNAPI" } catch (_: Throwable) {}
                 }
                 // XNNPACK: SIMD-optimised CPU inference; always registered as fallback
                 // Handles ops NNAPI can't, and is sole provider when GPU is off
