@@ -16,37 +16,69 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Top bar: recording indicator (left) + resolution button (right) -->
+    <!-- Top bar -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:orientation="horizontal"
-        android:padding="10dp">
+        android:orientation="vertical"
+        android:padding="8dp">
 
+        <!-- Row 1: REC indicator + controls -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/tvRecIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#BB000000"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="4dp"
+                android:text="● REC"
+                android:textColor="#FF4444"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
+
+            <Button
+                android:id="@+id/btnStream"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="MJPEG"
+                android:textSize="11sp"
+                android:paddingHorizontal="10dp" />
+
+            <Button
+                android:id="@+id/btnResolution"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="720p"
+                android:textSize="11sp"
+                android:paddingHorizontal="10dp" />
+        </LinearLayout>
+
+        <!-- Row 2: Stream URL (visible only when streaming) -->
         <TextView
-            android:id="@+id/tvRecIndicator"
+            android:id="@+id/tvStreamUrl"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
             android:background="#BB000000"
             android:paddingHorizontal="10dp"
             android:paddingVertical="4dp"
-            android:text="● REC"
-            android:textColor="#FF4444"
-            android:textSize="16sp"
-            android:textStyle="bold"
+            android:textColor="#00E676"
+            android:textSize="13sp"
+            android:typeface="monospace"
             android:visibility="gone" />
-
-        <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
-
-        <Button
-            android:id="@+id/btnResolution"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="720p"
-            android:textSize="12sp"
-            android:paddingHorizontal="10dp" />
     </LinearLayout>
 
     <!-- Bottom-right column: screenshot, record, settings -->
