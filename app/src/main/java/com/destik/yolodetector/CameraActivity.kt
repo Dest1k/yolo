@@ -305,7 +305,8 @@ class CameraActivity : AppCompatActivity() {
     // ── Screenshot ────────────────────────────────────────────────────────────
 
     private fun takeScreenshot() {
-        val snap = latestComposed ?: run { toast("Нет кадра"); return }
+        // Copy immediately on the UI thread so inference can recycle latestComposed freely
+        val snap = latestComposed?.copy(latestComposed!!.config, false) ?: run { toast("Нет кадра"); return }
         inferenceExecutor.execute {
             try {
                 val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
@@ -322,6 +323,8 @@ class CameraActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e("Camera", "screenshot", e)
                 runOnUiThread { toast("Ошибка скриншота") }
+            } finally {
+                snap.recycle()
             }
         }
     }

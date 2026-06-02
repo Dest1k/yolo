@@ -54,16 +54,22 @@ class MjpegServer(val port: Int = 8080) {
 
     fun pushFrame(image: BufferedImage, quality: Int = 75) {
         if (!running || !hasClients()) return
-        val baos = ByteArrayOutputStream(64 * 1024)
-        val writer = ImageIO.getImageWritersByFormatName("jpeg").next()
-        val param = writer.defaultWriteParam.apply {
-            compressionMode = javax.imageio.ImageWriteParam.MODE_EXPLICIT
-            compressionQuality = quality / 100f
+        val baos   = ByteArrayOutputStream(64 * 1024)
+        val iter   = ImageIO.getImageWritersByFormatName("jpeg")
+        if (!iter.hasNext()) return
+        val writer = iter.next()
+        try {
+            val param = writer.defaultWriteParam.apply {
+                compressionMode    = javax.imageio.ImageWriteParam.MODE_EXPLICIT
+                compressionQuality = quality / 100f
+            }
+            val ios = ImageIO.createImageOutputStream(baos)
+            writer.output = ios
+            writer.write(null, javax.imageio.IIOImage(image, null, null), param)
+            ios.close()
+        } finally {
+            writer.dispose()
         }
-        val ios = ImageIO.createImageOutputStream(baos)
-        writer.output = ios
-        writer.write(null, javax.imageio.IIOImage(image, null, null), param)
-        ios.close()
         latestJpeg.set(baos.toByteArray())
     }
 

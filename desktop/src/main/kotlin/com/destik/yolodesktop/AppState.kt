@@ -3,12 +3,17 @@ package com.destik.yolodesktop
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.awt.image.BufferedImage
 
 enum class ModelType { ONNX, PT }
 enum class GpuPreference { CPU, AUTO, CUDA, DIRECTML }
 
 class AppState {
+    private val uiScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     var modelPath       by mutableStateOf("")
     var modelType       by mutableStateOf(ModelType.ONNX)
     var sourcePath      by mutableStateOf("0")
@@ -76,21 +81,21 @@ class AppState {
                     }
                 }.getOrDefault(emptyList())
                 val composed = drawDetections(img, dets)
-                currentFrame = composed
-                detections   = dets
-                if (mjpegActive) {
-                    mjpegServer.pushFrame(composed)
-                    mjpegClients = mjpegServer.clientCount()
+                if (mjpegActive) mjpegServer.pushFrame(composed)
+                // Compose state must be mutated on the UI thread
+                uiScope.launch {
+                    currentFrame = composed
+                    detections   = dets
+                    if (mjpegActive) mjpegClients = mjpegServer.clientCount()
                 }
             },
-            onError = { msg -> statusMessage = msg }
+            onError = { msg -> uiScope.launch { statusMessage = msg } }
         ).also { it.start() }
     }
 
     fun stop() {
         videoInput?.stop(); videoInput = null
-        running = false
-        statusMessage = "Stopped"
+        uiScope.launch { running = false; statusMessage = "Stopped" }
     }
 
     fun toggleMjpeg() {
