@@ -76,11 +76,11 @@ class MjpegServer(val port: Int = 8080) {
 
             val out = socket.getOutputStream()
             out.write(
-                "HTTP/1.1 200 OK\r\n" +
+                ("HTTP/1.1 200 OK\r\n" +
                 "Content-Type: multipart/x-mixed-replace; boundary=--mjpeg\r\n" +
                 "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
                 "Pragma: no-cache\r\n" +
-                "Connection: close\r\n\r\n"
+                "Connection: close\r\n\r\n").toByteArray()
             )
 
             var lastSent: ByteArray? = null
@@ -89,9 +89,9 @@ class MjpegServer(val port: Int = 8080) {
                 if (frame == null || frame === lastSent) { Thread.sleep(5); continue }
                 lastSent = frame
                 try {
-                    out.write("----mjpeg\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n")
+                    out.write("----mjpeg\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n".toByteArray())
                     out.write(frame)
-                    out.write("\r\n")
+                    out.write("\r\n".toByteArray())
                     out.flush()
                 } catch (e: Exception) { break }
             }
