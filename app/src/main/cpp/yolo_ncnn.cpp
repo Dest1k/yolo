@@ -337,7 +337,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
     const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
-    g_net.opt.num_threads = ncnn::get_cpu_count();
+    g_net.opt.num_threads = (int)nth;
 
     std::vector<Object> objs;
     if (g_yolo_version >= 10) {
