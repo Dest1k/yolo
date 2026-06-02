@@ -11,6 +11,15 @@
         android:layout_height="match_parent"
         app:scaleType="fillCenter" />
 
+    <!-- Stream input view (visible when using network stream instead of camera) -->
+    <ImageView
+        android:id="@+id/streamView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:background="#000"
+        android:visibility="gone" />
+
     <com.destik.yolodetector.DetectionOverlayView
         android:id="@+id/overlay"
         android:layout_width="match_parent"

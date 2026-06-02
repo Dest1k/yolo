@@ -15,5 +15,6 @@ data class ModelConfig(
     var outputName2: String = "output2",
     var classNames: List<String> = emptyList(),
     var onnxPath: String = "",
-    var engine: String = "ncnn"   // "ncnn" or "onnx"
+    var engine: String = "ncnn",   // "ncnn" or "onnx"
+    var streamUrl: String = ""     // if non-empty, use network stream instead of camera
 )

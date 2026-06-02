@@ -53,6 +53,8 @@ class CameraActivity : AppCompatActivity() {
     private var smartMode = false
 
     private val mjpegServer = MjpegServer(port = 8080)
+    private var mjpegInput: MjpegInput? = null
+    private val streamMode get() = config.streamUrl.isNotEmpty()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,20 +64,35 @@ class CameraActivity : AppCompatActivity() {
         config = Gson().fromJson(intent.getStringExtra("config") ?: "{}", ModelConfig::class.java)
 
         inferenceExecutor.execute {
-            val ok = if (config.engine == "onnx") {
+            val hasModel = config.streamUrl.isEmpty() ||
+                (config.engine == "onnx" && config.onnxPath.isNotEmpty()) ||
+                (config.engine != "onnx" && config.paramPath.isNotEmpty())
+
+            val ok = if (!hasModel) true   // stream without model: still show frames
+            else if (config.engine == "onnx") {
                 onnxDetector = OnnxDetector(config)
                 runCatching { onnxDetector!!.init() }.getOrDefault(false)
             } else {
                 runCatching { ncnnDetector.init(config) }.getOrDefault(false)
             }
             runOnUiThread {
-                if (ok) startCamera()
-                else { Toast.makeText(this, "Ошибка загрузки модели", Toast.LENGTH_LONG).show(); finish() }
+                if (ok) {
+                    if (streamMode) startStreamInput() else startCamera()
+                } else {
+                    Toast.makeText(this, "Ошибка загрузки модели", Toast.LENGTH_LONG).show(); finish()
+                }
             }
         }
 
         binding.fabSettings.setOnClickListener { showSettingsSheet() }
-        binding.btnFlip.setOnClickListener { flipCamera() }
+        binding.btnFlip.setOnClickListener { if (!streamMode) flipCamera() }
+        // Hide camera-only controls when using stream input
+        if (streamMode) {
+            binding.btnFlip.visibility = View.GONE
+            binding.btnResolution.visibility = View.GONE
+            binding.previewView.visibility = View.GONE
+            binding.streamView.visibility = View.VISIBLE
+        }
         binding.btnScreenshot.setOnClickListener { takeScreenshot() }
         binding.btnRecord.setOnClickListener { toggleRecording() }
         binding.btnSmartRecord.setOnClickListener { toggleSmartMode() }
@@ -116,6 +133,33 @@ class CameraActivity : AppCompatActivity() {
                 ?.firstOrNull { !it.isLoopbackAddress && it is Inet4Address }
                 ?.hostAddress
         } catch (e: Exception) { null }
+    }
+
+    // ── Stream input ──────────────────────────────────────────────────────────
+
+    private fun startStreamInput() {
+        val input = MjpegInput(config.streamUrl).also { mjpegInput = it }
+        input.start(
+            onFrame = { bmp ->
+                // Update ImageView with raw frame on UI thread
+                runOnUiThread { binding.streamView.setImageBitmap(bmp) }
+                // Submit inference if not already running
+                if (inferencing.compareAndSet(false, true)) {
+                    val copy = bmp.copy(bmp.config, false)
+                    inferenceExecutor.execute {
+                        runInference(copy, rotation = 0, isFront = false,
+                            imgW = copy.width, imgH = copy.height)
+                    }
+                }
+                // Update overlay aspect ratio
+                runOnUiThread {
+                    binding.overlay.setImageAspect(bmp.width.toFloat() / bmp.height.toFloat())
+                }
+            },
+            onError = { msg ->
+                runOnUiThread { binding.overlay.setDebugLine("⚠ $msg") }
+            }
+        )
     }
 
     // ── Camera ────────────────────────────────────────────────────────────────
@@ -371,6 +415,7 @@ class CameraActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mjpegInput?.stop()
         mjpegServer.stop()
         inferenceExecutor.execute { recorder?.release() }
         streamExecutor.shutdown()

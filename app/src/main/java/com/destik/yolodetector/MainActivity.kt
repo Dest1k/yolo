@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.view.inputmethod.EditorInfo
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -53,10 +54,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) launchCamera() else toast("Нужно разрешение камеры")
+        if (ok) launchActivity() else toast("Нужно разрешение камеры")
     }
 
-    // Shared detector instance — parse-only, no inference here
     private val detector = YoloDetector()
     private var detectorReady = false
 
@@ -77,16 +77,69 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSelectOnnx.setOnClickListener { pickOnnx.launch("*/*") }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
+
+        // Stream URL field
+        binding.etStreamUrl.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) { applyStreamUrl(); true } else false
+        }
+        binding.etStreamUrl.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) applyStreamUrl()
+        }
+        binding.btnClearStream.setOnClickListener {
+            binding.etStreamUrl.setText("")
+            config.streamUrl = ""
+            saveConfig(); refreshSummary()
+        }
+
         binding.btnStartCamera.setOnClickListener {
-            if (config.engine == "onnx") {
-                if (config.onnxPath.isEmpty()) toast("Выберите .onnx файл")
-                else { saveConfig(); checkCameraAndLaunch() }
+            val streamUrl = binding.etStreamUrl.text.toString().trim()
+            config.streamUrl = streamUrl
+            saveConfig()
+
+            if (streamUrl.isNotEmpty()) {
+                // Stream mode: no model files needed (but if set, use them)
+                if (streamUrl.startsWith("rtsp://", ignoreCase = true)) {
+                    toast("RTSP пока не поддерживается. Используйте HTTP MJPEG.")
+                    return@setOnClickListener
+                }
+                if (!streamUrl.startsWith("http", ignoreCase = true)) {
+                    toast("Неверный URL. Формат: http://IP:PORT/stream")
+                    return@setOnClickListener
+                }
+                val hasModel = hasRequiredModelFiles()
+                if (!hasModel) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Запуск без модели")
+                        .setMessage("Файлы модели не выбраны. Стрим будет отображаться без детекции объектов.\n\nПродолжить?")
+                        .setPositiveButton("Да") { _, _ -> checkCameraPermAndLaunch() }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                } else {
+                    checkCameraPermAndLaunch()
+                }
             } else {
-                if (config.paramPath.isEmpty() || config.binPath.isEmpty()) toast("Выберите .param и .bin файлы")
-                else { saveConfig(); checkCameraAndLaunch() }
+                // Camera mode
+                if (!hasRequiredModelFiles()) {
+                    toast(if (config.engine == "onnx") "Выберите .onnx файл" else "Выберите .param и .bin файлы")
+                } else {
+                    checkCameraPermAndLaunch()
+                }
             }
         }
         refreshSummary()
+    }
+
+    private fun applyStreamUrl() {
+        val url = binding.etStreamUrl.text.toString().trim()
+        if (config.streamUrl != url) {
+            config.streamUrl = url
+            saveConfig(); refreshSummary()
+        }
+    }
+
+    private fun hasRequiredModelFiles(): Boolean {
+        return if (config.engine == "onnx") config.onnxPath.isNotEmpty()
+               else config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
     }
 
     private fun applyFile(uri: Uri, isParam: Boolean) {
@@ -99,7 +152,6 @@ class MainActivity : AppCompatActivity() {
         refreshSummary()
     }
 
-    /** Load model (needed to set g_param_path), then parse .param — no inference */
     private fun analyzeModel() {
         if (config.paramPath.isEmpty() || config.binPath.isEmpty()) {
             toast("Сначала выберите .param и .bin"); return
@@ -107,7 +159,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnDetectOutputs.isEnabled = false
         binding.btnDetectOutputs.text = "Анализ..."
         executor.execute {
-            // Init loads the model AND sets g_param_path for parsing
             val ok = runCatching { detector.init(config) }.getOrDefault(false)
             val names: Array<String> = if (ok) runCatching { detector.getOutputNames() }.getOrDefault(emptyArray()) else emptyArray()
             runOnUiThread {
@@ -115,8 +166,6 @@ class MainActivity : AppCompatActivity() {
                 binding.btnDetectOutputs.text = "🔍 Определить выходы модели"
                 if (!ok) { toast("Ошибка загрузки модели"); return@runOnUiThread }
                 if (names.isEmpty()) { toast("Не удалось определить выходы (проверьте .param файл)"); return@runOnUiThread }
-
-                // Auto-apply
                 config = config.copy(
                     outputName0 = names.getOrElse(0) { "output0" },
                     outputName1 = names.getOrElse(1) { "output1" },
@@ -124,52 +173,63 @@ class MainActivity : AppCompatActivity() {
                 )
                 detectorReady = true
                 saveConfig(); refreshSummary()
-
                 val msg = buildString {
                     append("Найдено выходов: ${names.size}\n\n")
                     names.forEachIndexed { i, n -> append("[$i] $n\n") }
                     append("\nИмена автоматически записаны в настройки.")
                     append("\n\nТеперь выберите версию YOLO в Настройках.")
                 }
-                AlertDialog.Builder(this)
-                    .setTitle("Выходы модели")
-                    .setMessage(msg)
-                    .setPositiveButton("OK", null)
-                    .show()
+                AlertDialog.Builder(this).setTitle("Выходы модели").setMessage(msg)
+                    .setPositiveButton("OK", null).show()
             }
         }
     }
 
     private fun refreshSummary() {
+        val streamUrl = config.streamUrl
         binding.tvSummary.text = buildString {
             append("YOLO v${config.yoloVersion}  |  ${config.inputSize}×${config.inputSize}  |  ${config.numClasses} классов\n")
             append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  Thr: ${config.numThreads}  ${if (config.useGPU) "GPU" else "CPU"}\n")
             append("out0: ${config.outputName0}")
+            if (streamUrl.isNotEmpty()) append("\n📡 Поток: $streamUrl")
         }
         val hasNcnn = config.paramPath.isNotEmpty() && config.binPath.isNotEmpty()
         val hasOnnx = config.onnxPath.isNotEmpty()
         val hasFiles = if (config.engine == "onnx") hasOnnx else hasNcnn
-        binding.btnStartCamera.isEnabled   = hasFiles
+        val hasStream = streamUrl.isNotEmpty()
+        binding.btnStartCamera.isEnabled   = hasFiles || hasStream
+        binding.btnStartCamera.text        = if (hasStream) "Запустить стрим" else "Запустить камеру"
         binding.btnDetectOutputs.isEnabled = hasNcnn
     }
 
-    private fun checkCameraAndLaunch() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
-            launchCamera() else cameraPermission.launch(Manifest.permission.CAMERA)
+    private fun checkCameraPermAndLaunch() {
+        // Camera permission needed even for stream mode (CameraX might still init)
+        if (config.streamUrl.isNotEmpty()) {
+            // Stream mode: no camera permission needed
+            launchActivity()
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+                launchActivity() else cameraPermission.launch(Manifest.permission.CAMERA)
+        }
     }
-    private fun launchCamera() {
+
+    private fun launchActivity() {
         startActivity(Intent(this, CameraActivity::class.java).putExtra("config", Gson().toJson(config)))
     }
+
     private fun loadConfig() {
         val json = getSharedPreferences("yolo", MODE_PRIVATE).getString("config", null)
         if (json != null) runCatching { config = Gson().fromJson(json, ModelConfig::class.java) }
         binding.tvParamFile.text = config.paramPath.takeIf { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
         binding.tvBinFile.text   = config.binPath.takeIf   { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
         binding.tvOnnxFile.text  = config.onnxPath.takeIf  { it.isNotEmpty() }?.substringAfterLast('/') ?: "Не выбран"
+        if (config.streamUrl.isNotEmpty()) binding.etStreamUrl.setText(config.streamUrl)
     }
+
     private fun saveConfig() {
         getSharedPreferences("yolo", MODE_PRIVATE).edit().putString("config", Gson().toJson(config)).apply()
     }
+
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     override fun onDestroy() { super.onDestroy(); executor.shutdown() }
 }

@@ -90,6 +90,27 @@
                 android:textColor="@color/accent"/>
         </LinearLayout>
 
+        <!-- Stream section -->
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Сетевой поток (MJPEG HTTP)" android:textColor="@color/text_secondary"
+            android:textSize="13sp" android:layout_marginTop="8dp"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:layout_marginBottom="20dp">
+            <EditText android:id="@+id/etStreamUrl"
+                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:hint="http://192.168.x.x:8080/stream"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:background="@drawable/bg_field" android:padding="10dp"
+                android:singleLine="true" android:inputType="textUri"
+                android:imeOptions="actionDone" />
+            <Button android:id="@+id/btnClearStream"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="✕" android:layout_marginStart="8dp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/text_secondary"/>
+        </LinearLayout>
+
         <!-- Model library button -->
         <Button android:id="@+id/btnModelLibrary"
             android:layout_width="match_parent" android:layout_height="48dp"
