@@ -16,13 +16,10 @@ dependencies {
     implementation(compose.materialIconsExtended)
 
     // ── ONNX Runtime ───────────────────────────────────────────────────────────
-    // GPU variant on Linux/Windows: enables CUDA EP + DirectML EP at runtime.
-    // Falls back to CPU automatically when no compatible GPU/driver is present.
-    if (isMac) {
-        implementation("com.microsoft.onnxruntime:onnxruntime:1.18.0")
-    } else {
-        implementation("com.microsoft.onnxruntime:onnxruntime-gpu:1.18.0")
-    }
+    // The standard jar already includes CUDA EP + DirectML EP bindings.
+    // GPU providers activate at runtime when system CUDA/DirectML libs are present;
+    // fall back to CPU automatically when they are not. No separate -gpu artifact exists.
+    implementation("com.microsoft.onnxruntime:onnxruntime:1.18.0")
 
     // ── DJL PyTorch (.pt / TorchScript models) ─────────────────────────────────
     implementation("ai.djl:api:0.27.0")
