@@ -45,6 +45,8 @@ class CameraActivity : AppCompatActivity() {
     @Volatile private var lastKnownDiag: String = ""
     // Latest inference-composed frame for screenshot / recording
     @Volatile private var latestComposed: Bitmap? = null
+    // Set by the screenshot button; the next inference frame composes + saves it.
+    @Volatile private var pendingShot: Boolean = false
 
     private val resolutions = listOf("480p" to Size(640, 480), "720p" to Size(1280, 720), "1080p" to Size(1920, 1080))
     private var resolutionIdx = 1
@@ -181,10 +183,13 @@ class CameraActivity : AppCompatActivity() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
-            val preview = Preview.Builder().build().also {
+            val targetSize = resolutions[resolutionIdx].second
+            // Give the preview the same target resolution as the analysis stream so both
+            // share an aspect ratio — otherwise FILL_CENTER crops them differently and the
+            // overlay boxes land slightly off the objects shown in the preview.
+            val preview = Preview.Builder().setTargetResolution(targetSize).build().also {
                 it.setSurfaceProvider(binding.previewView.surfaceProvider)
             }
-            val targetSize = resolutions[resolutionIdx].second
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(targetSize)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -256,17 +261,25 @@ class CameraActivity : AppCompatActivity() {
             lastKnownDiag = diag
             lastFps = 1000f / (System.currentTimeMillis() - t0).coerceAtLeast(1)
 
-            // Compose frame for screenshot / recording
-            val composed = composeFrame(bmp, rotation, isFront)
-            binding.overlay.drawBoxesOnBitmap(composed, dets, config.classNames)
-            latestComposed?.recycle()
-            latestComposed = composed
+            // Building the full-frame composited bitmap (rotate + draw boxes) is costly,
+            // so only do it when something actually consumes it: recording, smart mode,
+            // an MJPEG client, or a pending screenshot. When idle, skip it entirely —
+            // this is pure per-frame overhead that was dragging the FPS down.
+            val needComposite = smartMode || recorder?.recording == true ||
+                mjpegServer.running || pendingShot
+            if (needComposite) {
+                val composed = composeFrame(bmp, rotation, isFront)
+                binding.overlay.drawBoxesOnBitmap(composed, dets, config.classNames)
+                latestComposed?.recycle()
+                latestComposed = composed
 
-            // Feed video recorder
-            if (smartMode) {
-                ensureRecorderForSmart().feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.SMART)
-            } else {
-                recorder?.feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.ALWAYS)
+                if (smartMode) {
+                    ensureRecorderForSmart().feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.SMART)
+                } else {
+                    recorder?.feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.ALWAYS)
+                }
+
+                if (pendingShot) { pendingShot = false; saveSnapshot(composed) }
             }
 
             runOnUiThread {
@@ -305,27 +318,29 @@ class CameraActivity : AppCompatActivity() {
     // ── Screenshot ────────────────────────────────────────────────────────────
 
     private fun takeScreenshot() {
-        // Copy immediately on the UI thread so inference can recycle latestComposed freely
-        val snap = latestComposed?.copy(latestComposed!!.config, false) ?: run { toast("Нет кадра"); return }
-        inferenceExecutor.execute {
-            try {
-                val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, "YOLO_$ts.jpg")
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/YoloDetector")
-                }
-                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    contentResolver.openOutputStream(uri)?.use { snap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-                    runOnUiThread { toast("Скриншот сохранён") }
-                } else runOnUiThread { toast("Ошибка сохранения") }
-            } catch (e: Exception) {
-                Log.e("Camera", "screenshot", e)
-                runOnUiThread { toast("Ошибка скриншота") }
-            } finally {
-                snap.recycle()
+        // The composited frame isn't built every frame anymore (FPS optimisation), so
+        // ask the next inference frame to compose + save one.
+        pendingShot = true
+        toast("Скриншот будет сохранён")
+    }
+
+    /** Saves an already-composited (rotated, boxed) frame to the gallery. Runs on inferenceExecutor. */
+    private fun saveSnapshot(composed: Bitmap) {
+        try {
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "YOLO_$ts.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/YoloDetector")
             }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                contentResolver.openOutputStream(uri)?.use { composed.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                runOnUiThread { toast("Скриншот сохранён") }
+            } else runOnUiThread { toast("Ошибка сохранения") }
+        } catch (e: Exception) {
+            Log.e("Camera", "screenshot", e)
+            runOnUiThread { toast("Ошибка скриншота") }
         }
     }
 

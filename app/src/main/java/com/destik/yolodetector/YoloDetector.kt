@@ -9,7 +9,7 @@ class YoloDetector {
         out0: String, out1: String, out2: String
     ): Boolean
     external fun nativeDetect(bitmap: Bitmap, confThreshold: Float, nmsThreshold: Float, numThreads: Int): Array<Detection>
-    external fun nativeGetOutputNames(): Array<String>
+    external fun nativeGetOutputNames(paramPath: String): Array<String>
     external fun nativeGetDiagnostics(): String
     external fun nativeRelease()
 
@@ -21,7 +21,7 @@ class YoloDetector {
     fun detect(bitmap: Bitmap, config: ModelConfig): Array<Detection> =
         nativeDetect(bitmap, config.confThreshold, config.nmsThreshold, config.numThreads)
 
-    fun getOutputNames(): Array<String> = nativeGetOutputNames()
+    fun getOutputNames(config: ModelConfig): Array<String> = nativeGetOutputNames(config.paramPath)
     fun getDiagnostics(): String = nativeGetDiagnostics()
     fun release() = nativeRelease()
 

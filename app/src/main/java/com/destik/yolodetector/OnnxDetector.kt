@@ -3,11 +3,14 @@ package com.destik.yolodetector
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -16,20 +19,53 @@ class OnnxDetector(private val config: ModelConfig) {
     private val env = OrtEnvironment.getEnvironment()
     private var session: OrtSession? = null
     private var lastDiag = "onnx|init"
+    private var provider = "cpu"
+
+    // Reusable buffers — the detector runs single-threaded (inferenceExecutor),
+    // so we allocate once and reuse to avoid per-frame GC pressure.
+    private var padded: Bitmap? = null
+    private var pixels: IntArray? = null
+    private var floatArr: FloatArray? = null
+    private val srcPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val dstRect = RectF()
 
     fun init(): Boolean {
         return try {
             val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(config.numThreads)
-                try { addNnapi() } catch (_: Throwable) {}
+                setIntraOpNumThreads(config.numThreads.coerceIn(1, 8))
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+                setMemoryPatternOptimization(true)
+
+                if (config.useGPU) {
+                    // NNAPI (GPU/NPU). FP16 lets the driver use half precision.
+                    // Note: end-to-end / NMS-free models (with NMS/TopK ops) are
+                    // partitioned by NNAPI and are usually FASTER on CPU — see below.
+                    provider = try {
+                        addNnapi(EnumSet.of(NNAPIFlags.USE_FP16))
+                        "nnapi-fp16"
+                    } catch (_: Throwable) {
+                        addXnnpackOrCpu()
+                    }
+                } else {
+                    provider = addXnnpackOrCpu()
+                }
             }
             session = env.createSession(config.onnxPath, opts)
-            lastDiag = "onnx|ready"
+            lastDiag = "onnx|ready|$provider"
             true
         } catch (e: Exception) {
             lastDiag = "onnx|init_error|${e.message}"
             false
         }
+    }
+
+    /** Add XNNPACK CPU accelerator; returns provider tag, falling back to plain CPU. */
+    private fun OrtSession.SessionOptions.addXnnpackOrCpu(): String = try {
+        addXnnpack(mapOf("intra_op_num_threads" to config.numThreads.coerceIn(1, 8).toString()))
+        "xnnpack"
+    } catch (_: Throwable) {
+        "cpu"
     }
 
     fun detect(bitmap: Bitmap): Array<Detection> {
@@ -39,28 +75,32 @@ class OnnxDetector(private val config: ModelConfig) {
             val bmpW = bitmap.width
             val bmpH = bitmap.height
 
-            // Letterbox: scale to fit sz×sz, pad with gray 114
+            // Letterbox: scale to fit sz×sz, pad with gray 114 (matches YOLO training)
             val scale = min(sz.toFloat() / bmpW, sz.toFloat() / bmpH)
             val nw    = (bmpW * scale).roundToInt()
             val nh    = (bmpH * scale).roundToInt()
             val padX  = (sz - nw) / 2
             val padY  = (sz - nh) / 2
 
-            val padded = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888)
-            Canvas(padded).apply {
+            // Reusable padded canvas — recreate only if input size changed.
+            val pad = padded?.takeIf { it.width == sz && !it.isRecycled }
+                ?: Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888).also { padded = it }
+            Canvas(pad).apply {
                 drawColor(Color.rgb(114, 114, 114))
-                drawBitmap(Bitmap.createScaledBitmap(bitmap, nw, nh, true), padX.toFloat(), padY.toFloat(), Paint())
+                dstRect.set(padX.toFloat(), padY.toFloat(), (padX + nw).toFloat(), (padY + nh).toFloat())
+                drawBitmap(bitmap, null, dstRect, srcPaint)   // scales in one pass, no extra alloc
             }
-            val pixels = IntArray(sz * sz).also { padded.getPixels(it, 0, sz, 0, 0, sz, sz) }
-            padded.recycle()
 
             val n   = sz * sz
-            val arr = FloatArray(3 * n)
-            for (i in pixels.indices) {
-                val p = pixels[i]
-                arr[i]       = Color.red(p)   / 255f
-                arr[n + i]   = Color.green(p) / 255f
-                arr[2 * n + i] = Color.blue(p) / 255f
+            val px  = pixels?.takeIf { it.size == n } ?: IntArray(n).also { pixels = it }
+            pad.getPixels(px, 0, sz, 0, 0, sz, sz)
+
+            val arr = floatArr?.takeIf { it.size == 3 * n } ?: FloatArray(3 * n).also { floatArr = it }
+            for (i in 0 until n) {
+                val p = px[i]
+                arr[i]         = ((p ushr 16) and 0xFF) / 255f
+                arr[n + i]     = ((p ushr 8)  and 0xFF) / 255f
+                arr[2 * n + i] = ( p          and 0xFF) / 255f
             }
 
             val inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr),
@@ -90,7 +130,10 @@ class OnnxDetector(private val config: ModelConfig) {
         val A = shape[1].toInt()
         val B = shape[2].toInt()
 
-        return if ((B == 6 && A > 6) || (A == 6 && B > 6)) {
+        // NMS-free / end-to-end models emit 6 attributes (x1,y1,x2,y2,score,cls)
+        // with a small detection count; anchor-free (v8/v11) emit 4+nc attributes
+        // across thousands of anchors.
+        return if ((B == 6 && A in 7..2000) || (A == 6 && B in 7..2000)) {
             parseNmsFree(buf, A, B, sz, padX, padY, scale, bmpW, bmpH, ct)
         } else {
             parseAnchorFree(buf, A, B, sz, padX, padY, scale, bmpW, bmpH, ct)
@@ -101,7 +144,8 @@ class OnnxDetector(private val config: ModelConfig) {
         buf: FloatBuffer, A: Int, B: Int,
         sz: Int, padX: Int, padY: Int, scale: Float, bmpW: Int, bmpH: Int, ct: Float
     ): Array<Detection> {
-        val tr = (A == 6)
+        // Attributes (6) live on the smaller axis; detections on the larger one.
+        val tr = (A < B)
         val nd = if (tr) B else A
 
         // Auto-detect pixel vs normalised coordinates
@@ -134,7 +178,7 @@ class OnnxDetector(private val config: ModelConfig) {
                 confidence = score
             )
         }
-        lastDiag = "onnx|nms-free|${nd}|maxC:${"%.2f".format(maxC)}|dets:${dets.size}"
+        lastDiag = "onnx|nms-free|$nd|maxC:${"%.2f".format(maxC)}|dets:${dets.size}|$provider"
         return dets.toTypedArray()
     }
 
@@ -142,29 +186,32 @@ class OnnxDetector(private val config: ModelConfig) {
         buf: FloatBuffer, A: Int, B: Int,
         sz: Int, padX: Int, padY: Int, scale: Float, bmpW: Int, bmpH: Int, ct: Float
     ): Array<Detection> {
-        val nc  = config.numClasses
-        val tr  = (A == 4 + nc)
+        // Attributes (4+nc) live on the smaller axis; anchors on the larger one.
+        // Derive nc from the shape so a mis-configured numClasses can't swap the axes.
+        val tr  = (A < B)
         val nd  = if (tr) B else A
+        val attrs = if (tr) A else B
+        val nc  = (attrs - 4).coerceAtLeast(1)
 
         buf.rewind()
         val raw = mutableListOf<Detection>()
         for (i in 0 until nd) {
-            val cx = getN(tr, 0, nd, nc, i, buf)
-            val cy = getN(tr, 1, nd, nc, i, buf)
-            val bw = getN(tr, 2, nd, nc, i, buf)
-            val bh = getN(tr, 3, nd, nc, i, buf)
+            val cx = getN(tr, 0, nd, attrs, i, buf)
+            val cy = getN(tr, 1, nd, attrs, i, buf)
+            val bw = getN(tr, 2, nd, attrs, i, buf)
+            val bh = getN(tr, 3, nd, attrs, i, buf)
             if (bw <= 0f || bh <= 0f || cx.isNaN()) continue
             var best = ct; var cls = -1
             for (c in 0 until nc) {
-                val s = getN(tr, 4 + c, nd, nc, i, buf)
+                val s = getN(tr, 4 + c, nd, attrs, i, buf)
                 if (s > best) { best = s; cls = c }
             }
             if (cls < 0) continue
             raw += Detection(
-                x  = ((cx - bw * .5f) / sz * sz - padX) / (scale * bmpW),
-                y  = ((cy - bh * .5f) / sz * sz - padY) / (scale * bmpH),
-                w  = bw / sz * sz / (scale * bmpW),
-                h  = bh / sz * sz / (scale * bmpH),
+                x  = ((cx - bw * .5f) - padX) / (scale * bmpW),
+                y  = ((cy - bh * .5f) - padY) / (scale * bmpH),
+                w  = bw / (scale * bmpW),
+                h  = bh / (scale * bmpH),
                 label      = cls,
                 confidence = best
             )
@@ -181,20 +228,24 @@ class OnnxDetector(private val config: ModelConfig) {
                     keep[j] = false
             }
         }
-        lastDiag = "onnx|v8|${nd}|maxC:${"%.2f".format(raw.maxOfOrNull { it.confidence } ?: 0f)}|dets:${result.size}"
+        lastDiag = "onnx|v8|$nd|nc=$nc|maxC:${"%.2f".format(raw.maxOfOrNull { it.confidence } ?: 0f)}|dets:${result.size}|$provider"
         return result.toTypedArray()
     }
 
     fun getDiagnostics(): String = lastDiag
 
-    fun release() { session?.close(); session = null }
+    fun release() {
+        session?.close(); session = null
+        padded?.recycle(); padded = null
+        pixels = null; floatArr = null
+    }
 
     // Element access helpers
     private fun get6(tr: Boolean, attr: Int, nd: Int, i: Int, buf: FloatBuffer): Float =
         if (tr) buf[attr * nd + i] else buf[i * 6 + attr]
 
-    private fun getN(tr: Boolean, attr: Int, nd: Int, nc: Int, i: Int, buf: FloatBuffer): Float =
-        if (tr) buf[attr * nd + i] else buf[i * (4 + nc) + attr]
+    private fun getN(tr: Boolean, attr: Int, nd: Int, attrs: Int, i: Int, buf: FloatBuffer): Float =
+        if (tr) buf[attr * nd + i] else buf[i * attrs + attr]
 
     private fun iou(a: Detection, b: Detection): Float {
         val ix1 = maxOf(a.x, b.x);         val iy1 = maxOf(a.y, b.y)

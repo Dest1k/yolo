@@ -157,12 +157,12 @@ class MainActivity : AppCompatActivity() {
         binding.btnDetectOutputs.isEnabled = false
         binding.btnDetectOutputs.text = "Анализ..."
         executor.execute {
-            val ok = runCatching { detector.init(config) }.getOrDefault(false)
-            val names: Array<String> = if (ok) runCatching { detector.getOutputNames() }.getOrDefault(emptyArray()) else emptyArray()
+            // Parse the .param text file directly — no model/GPU load, so this can't
+            // crash even for models whose Vulkan path is unstable on this device.
+            val names: Array<String> = runCatching { detector.getOutputNames(config) }.getOrDefault(emptyArray())
             runOnUiThread {
                 binding.btnDetectOutputs.isEnabled = true
                 binding.btnDetectOutputs.text = "🔍 Определить выходы модели"
-                if (!ok) { toast("Ошибка загрузки модели"); return@runOnUiThread }
                 if (names.isEmpty()) { toast("Не удалось определить выходы (проверьте .param файл)"); return@runOnUiThread }
                 config = config.copy(
                     outputName0 = names.getOrElse(0) { "output0" },

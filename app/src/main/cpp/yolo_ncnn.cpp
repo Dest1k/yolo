@@ -103,32 +103,13 @@ static inline float safe_get(const ncnn::Mat& m, int row, int col){
     return m.row(row)[col];
 }
 
-// ── YOLOv10/v11 NMS-free ──────────────────────────────────────────────────────
-static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float ct){
-    ncnn::Extractor ex=g_net.create_extractor();
-    ex.input(g_input_name.c_str(),in);
-    ncnn::Mat raw;
-    if(ex.extract(g_out0.c_str(),raw)!=0){
-        g_diag="v10|extract FAILED";
-        LOGE("v10: extract '%s' failed",g_out0.c_str()); return;
-    }
-    ncnn::Mat out=squeeze2d(raw);
-    LOGD("v10 out: w=%d h=%d c=%d",out.w,out.h,out.c);
-    if(out.w==0||out.h==0){ g_diag="v10|empty output"; return; }
+// ── NMS-free parser (YOLOv10 / end-to-end exports): [N,6] = x1,y1,x2,y2,score,cls ──
+static void parse_nms_free(const ncnn::Mat& out, std::vector<Object>& objects, float ct){
+    // Attributes (6) live on the smaller axis; detections on the larger one.
+    bool tr = (out.h < out.w);
+    int  nd = tr ? out.w : out.h;
 
-    // Layout: [N,6] → w=6,h=N  or transposed [6,N] → w=N,h=6
-    bool tr=(out.w==6&&out.h>6) ? false
-           :(out.h==6&&out.w>6) ? true
-           :(out.w>=6)          ? false
-           :true;
-    int nd=tr?out.w:out.h;
-    int na=tr?out.h:out.w;
-    if(na<6){
-        char buf[128]; snprintf(buf,sizeof(buf),"v10|%dx%d|na=%d<6",out.h,out.w,na);
-        g_diag=buf; LOGE("v10: bad attr count %d",na); return;
-    }
-
-    // Determine pixel vs normalised by scanning all rows
+    // Determine pixel vs normalised by scanning rows
     bool pixel=false;
     for(int i=0;i<nd;i++){
         float x2=tr?safe_get(out,2,i):safe_get(out,i,2);
@@ -137,7 +118,6 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
     float sc=pixel?(1.f/g_input_size):1.f;
 
     float max_conf=0.f;
-    int   raw_count=0;
     for(int i=0;i<nd;i++){
         float x1   =tr?safe_get(out,0,i):safe_get(out,i,0);
         float y1   =tr?safe_get(out,1,i):safe_get(out,i,1);
@@ -146,7 +126,6 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
         float score=tr?safe_get(out,4,i):safe_get(out,i,4);
         float cid  =tr?safe_get(out,5,i):safe_get(out,i,5);
         if(is_bad(score)||is_bad(x1)||is_bad(y1)||is_bad(x2)||is_bad(y2)) continue;
-        raw_count++;
         if(score>max_conf) max_conf=score;
         if(score<ct||x2<=x1||y2<=y1) continue;
         int label=(cid>=0.f&&cid<65536.f)?(int)cid:0;
@@ -155,31 +134,24 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
         o.label=label; o.prob=score;
         objects.push_back(o);
     }
-
-    // Build diagnostic string visible on screen
     char buf[256];
-    snprintf(buf,sizeof(buf),
-             "v10|%dx%d|px:%d|maxC:%.2f|dets:%d",
-             out.h, out.w, pixel, max_conf, (int)objects.size());
+    snprintf(buf,sizeof(buf),"nms-free|%dx%d|px:%d|maxC:%.2f|dets:%d",
+             out.h,out.w,pixel,max_conf,(int)objects.size());
     g_diag=buf;
-    LOGD("%s",buf);
 }
 
-// ── YOLOv8/v9 anchor-free ────────────────────────────────────────────────────
-static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
-    ncnn::Extractor ex=g_net.create_extractor();
-    ex.input(g_input_name.c_str(),in);
-    ncnn::Mat raw;
-    if(ex.extract(g_out0.c_str(),raw)!=0){ g_diag="v8|extract FAILED"; return; }
-    ncnn::Mat out=squeeze2d(raw);
-    LOGD("v8 out: w=%d h=%d",out.w,out.h);
-    if(out.w==0||out.h==0){ g_diag="v8|empty"; return; }
-    bool t=(out.h==4+g_num_classes);
-    int nb=t?out.w:out.h, na=t?out.h:out.w;
+// ── Anchor-free parser (YOLOv8 / v9 / v11): [4+nc, N] ────────────────────────
+static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, float ct, float nt){
+    // Attributes (4+nc) live on the smaller axis; anchors on the larger one.
+    // Derive nc from the shape so a wrong numClasses can't swap the axes.
+    bool t  = (out.h < out.w);
+    int  nb = t ? out.w : out.h;   // anchors
+    int  na = t ? out.h : out.w;   // attributes = 4 + nc
+    int  nc = na - 4; if(nc < 1) nc = 1;
     float max_conf=0.f;
     for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
-        for(int c=0;c<g_num_classes&&(4+c)<na;c++){
+        for(int c=0;c<nc;c++){
             float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
             if(!is_bad(s)){
                 if(s>max_conf) max_conf=s;
@@ -199,8 +171,32 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
     }
     nms(objects,nt);
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|maxC:%.2f|dets:%d",out.h,out.w,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|maxC:%.2f|dets:%d",
+             out.h,out.w,nc,max_conf,(int)objects.size());
     g_diag=buf;
+}
+
+// ── Modern dispatch (v8/v9/v10/v11): pick parser from the actual output shape ──
+// This makes detection robust to a mismatched YOLO-version selection: a NMS-free
+// model has 6 attributes with a small detection count, while an anchor-free model
+// has 4+nc attributes across thousands of anchors.
+static void detect_modern(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
+    ncnn::Extractor ex=g_net.create_extractor();
+    ex.input(g_input_name.c_str(),in);
+    ncnn::Mat raw;
+    if(ex.extract(g_out0.c_str(),raw)!=0){
+        g_diag="extract FAILED '"+g_out0+"'";
+        LOGE("extract '%s' failed",g_out0.c_str()); return;
+    }
+    ncnn::Mat out=squeeze2d(raw);
+    LOGD("out: w=%d h=%d c=%d",out.w,out.h,out.c);
+    if(out.w==0||out.h==0){ g_diag="empty output"; return; }
+
+    int amin=std::min(out.w,out.h), amax=std::max(out.w,out.h);
+    if(amin<6){ char b[64]; snprintf(b,sizeof(b),"bad shape %dx%d",out.h,out.w); g_diag=b; return; }
+
+    if(amin==6 && amax<=2000) parse_nms_free(out,objects,ct);
+    else                      parse_anchor(out,objects,ct,nt);
 }
 
 // ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
@@ -262,7 +258,14 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     g_out0=gc(o0); g_out1=gc(o1); g_out2=gc(o2);
     std::string param=gc(pp), bin=gc(bp);
     g_param_path=param;
-    g_net.opt.use_vulkan_compute=(bool)gpu;
+
+    // Only enable Vulkan when a usable GPU is actually present — requesting it on
+    // a device/driver without one leads to a null-device crash at extract time.
+    bool use_gpu=false;
+#if NCNN_VULKAN
+    use_gpu=((bool)gpu && ncnn::get_gpu_count()>0);
+#endif
+    g_net.opt.use_vulkan_compute =use_gpu;
     g_net.opt.use_fp16_packed    =false;
     g_net.opt.use_fp16_storage   =false;
     g_net.opt.use_fp16_arithmetic=false;
@@ -270,16 +273,32 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  return JNI_FALSE; }
     ParamInfo pi=parse_param(g_param_path);
     g_input_name=pi.input_name;
+
+    // Auto-correct the output blob name for single-output models (v8/v9/v10/v11):
+    // catalog/UI defaults like "output0" often don't match the real blob ("out0").
+    if(g_yolo_version>=8 && !pi.output_names.empty()){
+        bool present=false;
+        for(const auto& n:pi.output_names) if(n==g_out0){ present=true; break; }
+        if(!present){
+            g_out0=pi.output_names.back();
+            LOGD("auto output blob → %s",g_out0.c_str());
+        }
+    }
     g_initialized=true;
     g_diag="init OK";
     LOGD("Init OK yolov%d input=%d nc=%d gpu=%d blob_in=%s out0=%s",
-         ver,isz,nc,(int)gpu,g_input_name.c_str(),g_out0.c_str());
+         ver,isz,nc,(int)use_gpu,g_input_name.c_str(),g_out0.c_str());
     return JNI_TRUE;
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env, jobject){
-    ParamInfo pi=parse_param(g_param_path);
+Java_com_destik_yolodetector_YoloDetector_nativeGetOutputNames(JNIEnv* env, jobject, jstring pp){
+    const char* c=env->GetStringUTFChars(pp,0);
+    std::string path(c?c:"");
+    env->ReleaseStringUTFChars(pp,c);
+    // Pure text parse of the .param file — no model/GPU load, so it cannot crash
+    // even for models whose Vulkan path is unstable on this device.
+    ParamInfo pi=parse_param(path.empty()?g_param_path:path);
     jclass sc=env->FindClass("java/lang/String");
     jobjectArray arr=env->NewObjectArray((jsize)pi.output_names.size(),sc,nullptr);
     for(size_t i=0;i<pi.output_names.size();i++)
@@ -339,9 +358,8 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     g_net.opt.num_threads=(int)nth;
 
     std::vector<Object> objs;
-    if     (g_yolo_version>=10) detect_v10(in,objs,ct);
-    else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
-    else                        detect_v5 (in,objs,ct,nt);
+    if(g_yolo_version>=8) detect_modern(in,objs,ct,nt);  // v8/v9/v10/v11 (auto layout)
+    else                  detect_v5    (in,objs,ct,nt);  // v5/v6/v7 anchor-based
 
     // Reverse letterbox: norm model coords → original frame norm coords
     const float fw=(float)w, fh=(float)h;
