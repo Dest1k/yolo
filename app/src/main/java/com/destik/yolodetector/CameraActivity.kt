@@ -305,7 +305,8 @@ class CameraActivity : AppCompatActivity() {
     // ── Screenshot ────────────────────────────────────────────────────────────
 
     private fun takeScreenshot() {
-        val snap = latestComposed ?: run { toast("Нет кадра"); return }
+        val cur = latestComposed
+        val snap = cur?.copy(cur.config, false) ?: run { toast("Нет кадра"); return }
         inferenceExecutor.execute {
             try {
                 val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())

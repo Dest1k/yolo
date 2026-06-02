@@ -67,7 +67,15 @@ class MainActivity : AppCompatActivity() {
         loadConfig()
 
         binding.btnSelectParam.setOnClickListener { pickParam.launch("*/*") }
+        binding.btnClearParam.setOnClickListener {
+            config.paramPath = ""; binding.tvParamFile.text = "Не выбран"
+            detectorReady = false; saveConfig(); refreshSummary()
+        }
         binding.btnSelectBin.setOnClickListener   { pickBin.launch("*/*") }
+        binding.btnClearBin.setOnClickListener {
+            config.binPath = ""; binding.tvBinFile.text = "Не выбран"
+            detectorReady = false; saveConfig(); refreshSummary()
+        }
         binding.btnSettings.setOnClickListener {
             settingsResult.launch(Intent(this, SettingsActivity::class.java)
                 .putExtra("config", Gson().toJson(config)))
@@ -76,6 +84,10 @@ class MainActivity : AppCompatActivity() {
             libraryResult.launch(Intent(this, ModelLibraryActivity::class.java))
         }
         binding.btnSelectOnnx.setOnClickListener { pickOnnx.launch("*/*") }
+        binding.btnClearOnnx.setOnClickListener {
+            config.onnxPath = ""; binding.tvOnnxFile.text = "Не выбран"
+            saveConfig(); refreshSummary()
+        }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
 
         // Stream URL field

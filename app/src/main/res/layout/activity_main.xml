@@ -35,6 +35,11 @@
                 android:text="Обзор" android:layout_marginStart="8dp"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                 android:textColor="@color/accent"/>
+            <Button android:id="@+id/btnClearParam"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="✕" android:layout_marginStart="4dp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/text_secondary"/>
         </LinearLayout>
 
         <!-- .bin -->
@@ -52,6 +57,11 @@
                 android:text="Обзор" android:layout_marginStart="8dp"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                 android:textColor="@color/accent"/>
+            <Button android:id="@+id/btnClearBin"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="✕" android:layout_marginStart="4dp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/text_secondary"/>
         </LinearLayout>
 
         <!-- Summary card -->
@@ -88,6 +98,11 @@
                 android:text="Обзор" android:layout_marginStart="8dp"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                 android:textColor="@color/accent"/>
+            <Button android:id="@+id/btnClearOnnx"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="✕" android:layout_marginStart="4dp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/text_secondary"/>
         </LinearLayout>
 
         <!-- Stream section -->

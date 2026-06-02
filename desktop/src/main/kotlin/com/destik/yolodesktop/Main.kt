@@ -27,17 +27,20 @@ private val BgSide    = Color(0xFF2A2A2A)
 private val BgCard    = Color(0xFF333333)
 private val TextSub   = Color(0xFFAAAAAA)
 
-fun main() = application {
-    val state       = remember { AppState() }
-    val windowState = rememberWindowState(width = 1300.dp, height = 820.dp)
-    Window(onCloseRequest = {
-        state.stop()
-        if (state.mjpegActive) state.mjpegServer.stop()
-        state.closeDetectors()
-        exitApplication()
-    }, title = "YOLO Detector", state = windowState) {
-        MaterialTheme(colorScheme = darkColorScheme()) {
-            AppScreen(state)
+fun main(args: Array<String>) {
+    if (args.contains("--headless")) { HeadlessRunner.run(args); return }
+    application {
+        val state       = remember { AppState() }
+        val windowState = rememberWindowState(width = 1300.dp, height = 820.dp)
+        Window(onCloseRequest = {
+            state.stop()
+            if (state.mjpegActive) state.mjpegServer.stop()
+            state.closeDetectors()
+            exitApplication()
+        }, title = "YOLO Detector", state = windowState) {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                AppScreen(state)
+            }
         }
     }
 }

@@ -55,8 +55,7 @@ class PtDetector {
     private fun resolveDevice(mode: GpuMode): Device {
         if (mode == GpuMode.CPU) return Device.cpu()
         return try {
-            val gpuCount = Device.getGpuCount()
-            if (gpuCount > 0) Device.gpu(0) else Device.cpu()
+            Device.gpu(0)
         } catch (_: Exception) {
             Device.cpu()
         }

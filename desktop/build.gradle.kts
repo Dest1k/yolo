@@ -3,13 +3,14 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 plugins {
     kotlin("jvm")
     id("org.jetbrains.compose")
-    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 val osName: String = System.getProperty("os.name").lowercase()
+val osArch: String = System.getProperty("os.arch").lowercase()
 val isMac     = osName.contains("mac")
 val isWindows = osName.contains("windows")
 val isLinux   = osName.contains("linux")
+val isArm64   = osArch == "aarch64" || osArch == "arm64"
 
 dependencies {
     implementation(compose.desktop.currentOs)
@@ -17,13 +18,10 @@ dependencies {
     implementation(compose.materialIconsExtended)
 
     // ── ONNX Runtime ───────────────────────────────────────────────────────────
-    // GPU variant on Linux/Windows: enables CUDA EP + DirectML EP at runtime.
-    // Falls back to CPU automatically when no compatible GPU/driver is present.
-    if (isMac) {
-        implementation("com.microsoft.onnxruntime:onnxruntime:1.18.0")
-    } else {
-        implementation("com.microsoft.onnxruntime:onnxruntime-gpu:1.18.0")
-    }
+    // The standard jar already includes CUDA EP + DirectML EP bindings.
+    // GPU providers activate at runtime when system CUDA/DirectML libs are present;
+    // fall back to CPU automatically when they are not. No separate -gpu artifact exists.
+    implementation("com.microsoft.onnxruntime:onnxruntime:1.18.0")
 
     // ── DJL PyTorch (.pt / TorchScript models) ─────────────────────────────────
     implementation("ai.djl:api:0.27.0")
@@ -31,9 +29,11 @@ dependencies {
 
     // CPU-only native for all platforms (always available fallback)
     when {
-        isLinux   -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-x86_64")
-        isWindows -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:win-x86_64")
-        isMac     -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-x86_64")
+        isLinux && isArm64  -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-aarch64")
+        isLinux             -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-x86_64")
+        isWindows           -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:win-x86_64")
+        isMac && isArm64    -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-aarch64")
+        isMac               -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-x86_64")
     }
     // CUDA 12.1 native (NVIDIA GPU — loaded automatically when CUDA is present)
     when {
@@ -53,6 +53,10 @@ dependencies {
         exclude(group = "org.bytedeco", module = "tesseract")
     }
     when {
+        isLinux && isArm64 -> {
+            runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:linux-arm64")
+            runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-arm64")
+        }
         isLinux   -> {
             runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:linux-x86_64")
             runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-x86_64")
@@ -61,13 +65,19 @@ dependencies {
             runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:windows-x86_64")
             runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:windows-x86_64")
         }
-        isMac     -> {
+        isMac && isArm64 -> {
             runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:macosx-arm64")
             runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:macosx-arm64")
+        }
+        isMac     -> {
+            runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:macosx-x86_64")
+            runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:macosx-x86_64")
         }
     }
 
     implementation("com.google.code.gson:gson:2.10.1")
+    // Provides Dispatchers.Main backed by Swing EDT (required for UI state mutations)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.7.3")
 }
 
 kotlin {
