@@ -160,15 +160,30 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
     }
     float cs = pixel ? (1.f/g_input_size) : 1.f;
 
-    float max_conf=0.f;
-    for(int i=0;i<nb;i++){
-        float ms=ct; int mc=-1;
+    // Detect raw logits: a properly exported head emits sigmoid-activated class
+    // scores in 0..1. If any sampled score is >1 or <0, the sigmoid was stripped
+    // during export → apply it ourselves, otherwise everything clears the
+    // threshold and we get a flood of garbage boxes (maxC like 19.26).
+    bool logits=false;
+    int sample = nb < 256 ? nb : 256;
+    for(int i=0;i<sample && !logits;i++)
         for(int c=0;c<nc;c++){
             float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
-            if(!is_bad(s)){
-                if(s>max_conf) max_conf=s;
-                if(s>ms){ ms=s; mc=c; }
-            }
+            if(!is_bad(s)&&(s>1.f||s<0.f)){ logits=true; break; }
+        }
+    // Compare in logit space to avoid a sigmoid (expf) per score across all
+    // anchors×classes; only the kept winner is converted back for display.
+    float ctc = ct; if(ctc<1e-4f) ctc=1e-4f; if(ctc>0.9999f) ctc=0.9999f;
+    float cmp = logits ? logf(ctc/(1.f-ctc)) : ct;
+
+    float max_raw=-1e30f;
+    for(int i=0;i<nb;i++){
+        float ms=cmp; int mc=-1;
+        for(int c=0;c<nc;c++){
+            float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
+            if(is_bad(s)) continue;
+            if(s>max_raw) max_raw=s;
+            if(s>ms){ ms=s; mc=c; }
         }
         if(mc<0) continue;
         float cx=t?safe_get(out,0,i):safe_get(out,i,0);
@@ -178,13 +193,15 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
         if(is_bad(cx)||is_bad(cy)||is_bad(bw)||is_bad(bh)||bw<=0||bh<=0) continue;
         Object o;
         o.x=(cx-bw*.5f)*cs; o.y=(cy-bh*.5f)*cs;
-        o.w=bw*cs; o.h=bh*cs; o.label=mc; o.prob=ms;
+        o.w=bw*cs; o.h=bh*cs; o.label=mc;
+        o.prob = logits ? sigmoid_f(ms) : ms;
         objects.push_back(o);
     }
     nms(objects,nt);
+    float max_conf = logits ? sigmoid_f(max_raw) : max_raw;
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|px:%d|maxC:%.2f|dets:%d",
-             out.h,out.w,nc,pixel,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|px:%d|sig:%d|maxC:%.2f|dets:%d",
+             out.h,out.w,nc,pixel,logits,max_conf,(int)objects.size());
     g_diag=buf;
 }
 
