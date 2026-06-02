@@ -86,9 +86,7 @@ compose.desktop {
             description    = "Real-time YOLO object detection"
             vendor         = "destik"
 
-            linux {
-                iconFile.set(project.file("src/main/resources/icon.png"))
-            }
+            // No custom icon shipped — jpackage uses its platform default.
             windows {
                 menuGroup   = "YoloDetector"
                 upgradeUuid = "4e3a2b1c-0f5d-4e7a-9b8c-2d3e4f5a6b7c"
