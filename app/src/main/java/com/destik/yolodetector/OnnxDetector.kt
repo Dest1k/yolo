@@ -163,19 +163,26 @@ class OnnxDetector(private val config: ModelConfig) {
         buf: FloatBuffer, A: Int, B: Int,
         sz: Int, padX: Int, padY: Int, scale: Float, bmpW: Int, bmpH: Int, ct: Float
     ): Array<Detection> {
-        // Auto-detect nc from shape: the smaller dimension is [4+nc], the larger is [nd]
-        // This avoids stride mismatch when config.numClasses doesn't match the model
         val tr = A < B
         val nc = (if (tr) A else B) - 4
         val nd = if (tr) B else A
 
+        // Auto-detect pixel vs normalised coordinates (same as parseNmsFree)
+        buf.rewind()
+        var pixelCoords = false
+        for (i in 0 until minOf(nd, 100)) {
+            val bwVal = getN(tr, 2, nd, nc, i, buf)
+            if (!bwVal.isNaN() && bwVal > 1.5f) { pixelCoords = true; break }
+        }
+        val cs = if (pixelCoords) 1f else sz.toFloat()
+
         buf.rewind()
         val raw = mutableListOf<Detection>()
         for (i in 0 until nd) {
-            val cx = getN(tr, 0, nd, nc, i, buf)
-            val cy = getN(tr, 1, nd, nc, i, buf)
-            val bw = getN(tr, 2, nd, nc, i, buf)
-            val bh = getN(tr, 3, nd, nc, i, buf)
+            val cx = getN(tr, 0, nd, nc, i, buf) * cs
+            val cy = getN(tr, 1, nd, nc, i, buf) * cs
+            val bw = getN(tr, 2, nd, nc, i, buf) * cs
+            val bh = getN(tr, 3, nd, nc, i, buf) * cs
             if (bw <= 0f || bh <= 0f || cx.isNaN()) continue
             var best = ct; var cls = -1
             for (c in 0 until nc) {
@@ -184,10 +191,10 @@ class OnnxDetector(private val config: ModelConfig) {
             }
             if (cls < 0) continue
             raw += Detection(
-                x  = ((cx - bw * .5f) / sz * sz - padX) / (scale * bmpW),
-                y  = ((cy - bh * .5f) / sz * sz - padY) / (scale * bmpH),
-                w  = bw / sz * sz / (scale * bmpW),
-                h  = bh / sz * sz / (scale * bmpH),
+                x  = (cx - bw * .5f - padX) / (scale * bmpW),
+                y  = (cy - bh * .5f - padY) / (scale * bmpH),
+                w  = bw / (scale * bmpW),
+                h  = bh / (scale * bmpH),
                 label      = cls,
                 confidence = best
             )
@@ -204,7 +211,7 @@ class OnnxDetector(private val config: ModelConfig) {
                     keep[j] = false
             }
         }
-        lastDiag = "onnx|v8|${nd}|maxC:${"%.2f".format(raw.maxOfOrNull { it.confidence } ?: 0f)}|dets:${result.size}"
+        lastDiag = "onnx|v8|${nd}|px=${pixelCoords}|maxC:${"%.2f".format(raw.maxOfOrNull { it.confidence } ?: 0f)}|dets:${result.size}"
         return result.toTypedArray()
     }
 

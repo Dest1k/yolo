@@ -165,7 +165,7 @@ static void detect_v10(const ncnn::Mat& in, std::vector<Object>& objects, float 
     LOGD("%s",buf);
 }
 
-// ── YOLOv8/v9 anchor-free ────────────────────────────────────────────────────
+// ── YOLOv8/v9/v11 anchor-free ────────────────────────────────────────────────
 static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
     ncnn::Extractor ex=g_net.create_extractor();
     ex.input(g_input_name.c_str(),in);
@@ -177,8 +177,17 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
     // Auto-detect nc from shape: smaller dim = [4+nc], larger = nd (proposals)
     bool t = (out.h < out.w);  // t=true: layout [4+nc, nd]
     int nc = (t ? out.h : out.w) - 4;
-    int nb = t ? out.w : out.h;  // number of proposals
+    int nb = t ? out.w : out.h;
     if(nc <= 0 || nb <= 0){ g_diag="v8|bad shape"; return; }
+
+    // Auto-detect pixel vs normalised coordinates (same logic as detect_v10)
+    bool pixelCoords = false;
+    for(int i=0;i<std::min(nb,100);i++){
+        float w_val = t ? safe_get(out,2,i) : safe_get(out,i,2);
+        if(!is_bad(w_val) && w_val > 1.5f){ pixelCoords = true; break; }
+    }
+    float cs = pixelCoords ? 1.0f : (float)g_input_size;
+
     float max_conf=0.f;
     for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
@@ -190,10 +199,10 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
             }
         }
         if(mc<0) continue;
-        float cx=t?safe_get(out,0,i):safe_get(out,i,0);
-        float cy=t?safe_get(out,1,i):safe_get(out,i,1);
-        float bw=t?safe_get(out,2,i):safe_get(out,i,2);
-        float bh=t?safe_get(out,3,i):safe_get(out,i,3);
+        float cx=(t?safe_get(out,0,i):safe_get(out,i,0))*cs;
+        float cy=(t?safe_get(out,1,i):safe_get(out,i,1))*cs;
+        float bw=(t?safe_get(out,2,i):safe_get(out,i,2))*cs;
+        float bh=(t?safe_get(out,3,i):safe_get(out,i,3))*cs;
         if(is_bad(cx)||is_bad(cy)||is_bad(bw)||is_bad(bh)||bw<=0||bh<=0) continue;
         Object o;
         o.x=(cx-bw*.5f)/g_input_size; o.y=(cy-bh*.5f)/g_input_size;
@@ -202,7 +211,7 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
     }
     nms(objects,nt);
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|maxC:%.2f|dets:%d",out.h,out.w,nc,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|px=%d|maxC:%.2f|dets:%d",out.h,out.w,nc,(int)pixelCoords,max_conf,(int)objects.size());
     g_diag=buf;
 }
 
@@ -343,24 +352,10 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     g_net.opt.num_threads = (int)nth;
 
     std::vector<Object> objs;
-    if (g_yolo_version >= 10) {
-        // Auto-detect NMS-free [N,6] vs anchor-free [4+nc,N] (v11 NCNN uses v8 format)
-        ncnn::Extractor ex_peek = g_net.create_extractor();
-        ex_peek.input(g_input_name.c_str(), in);
-        ncnn::Mat raw_peek;
-        bool is_nms_free = false;
-        if (ex_peek.extract(g_out0.c_str(), raw_peek) == 0) {
-            ncnn::Mat p = squeeze2d(raw_peek);
-            // NMS-free layout has exactly 6 attributes; anchor-free has 4+nc (>=8400 proposals)
-            bool tr_p = (p.h==6&&p.w>6);
-            int na_p  = tr_p ? p.h : p.w;
-            is_nms_free = (na_p == 6);
-        }
-        if (is_nms_free) detect_v10(in, objs, ct);
-        else             detect_v8 (in, objs, ct, nt);
-    }
-    else if(g_yolo_version>= 8) detect_v8 (in,objs,ct,nt);
-    else                        detect_v5 (in,objs,ct,nt);
+    // v10 = NMS-free [N,6]; v11 uses anchor-free format same as v8/v9
+    if     (g_yolo_version == 10) detect_v10(in,objs,ct);
+    else if(g_yolo_version >= 8)  detect_v8 (in,objs,ct,nt);
+    else                          detect_v5 (in,objs,ct,nt);
 
     // Reverse letterbox: norm model coords → original frame norm coords
     const float fw=(float)w, fh=(float)h;
