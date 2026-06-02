@@ -33,7 +33,7 @@ jobs:
 
       - name: Install NDK and CMake
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+          sdkmanager --install "ndk;27.0.11939216" "cmake;3.22.1"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
 
       - name: Cache NCNN
