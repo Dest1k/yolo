@@ -25,15 +25,31 @@ class OnnxDetector(private val config: ModelConfig) {
 
     fun init(): Boolean {
         return try {
+            var activeEP = "CPU"
             val opts = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(config.numThreads)
-                // NNAPI: hardware ML accelerator (Snapdragon NPU etc.)
-                try { addNnapi() } catch (_: Throwable) {}
-                // XNNPACK: optimized SIMD CPU inference (~2× faster on ARM vs plain CPU)
-                try { addXnnpack(mapOf("intra_op_num_threads" to config.numThreads.toString())) } catch (_: Throwable) {}
+                // Graph-level optimisation (fuse ops etc.) — always beneficial
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+
+                if (config.useGPU) {
+                    // NNAPI: Qualcomm/ARM NPU/DSP/GPU (Android 8.1+, API 27+)
+                    // USE_FP16 (0x001) allows fp16 relaxation — enables NPU path on most SoCs
+                    try {
+                        addNnapi(0x001L)  // NNAPIFlags.USE_FP16
+                        activeEP = "NNAPI"
+                    } catch (_: Throwable) {
+                        // Device doesn't support NNAPI or flag rejected — XNNPACK will handle it
+                    }
+                }
+                // XNNPACK: SIMD-optimised CPU inference; always registered as fallback
+                // Handles ops NNAPI can't, and is sole provider when GPU is off
+                try {
+                    addXnnpack(mapOf("intra_op_num_threads" to config.numThreads.toString()))
+                    if (activeEP == "CPU") activeEP = "XNNPACK"
+                } catch (_: Throwable) {}
             }
             session = env.createSession(config.onnxPath, opts)
-            lastDiag = "onnx|ready"
+            lastDiag = "onnx|ready|ep=$activeEP"
             true
         } catch (e: Exception) {
             lastDiag = "onnx|init_error|${e.message}"
