@@ -1,9 +1,14 @@
 package com.destik.yolodetector
 
+import android.content.ContentValues
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
+import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.*
@@ -11,7 +16,11 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.destik.yolodetector.databinding.ActivityCameraBinding
 import com.google.gson.Gson
-import java.util.concurrent.ExecutorService
+import java.io.File
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.text.SimpleDateFormat
+import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -21,40 +30,145 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var config: ModelConfig
     private val ncnnDetector = YoloDetector()
     private var onnxDetector: OnnxDetector? = null
-    private lateinit var executor: ExecutorService
-    private val processing = AtomicBoolean(false)
+
+    // Stream executor: runs at full camera FPS, handles compositing + MJPEG push
+    private val streamExecutor    = Executors.newSingleThreadExecutor()
+    // Inference executor: runs YOLO, may skip frames when busy
+    private val inferenceExecutor = Executors.newSingleThreadExecutor()
+    private val inferencing = AtomicBoolean(false)
+
     private var lastFps = 0f
     private var lensFacing = CameraSelector.LENS_FACING_BACK
+
+    // Last known detections — written by inferenceExecutor, read by streamExecutor
+    @Volatile private var lastKnownDets: Array<Detection> = emptyArray()
+    @Volatile private var lastKnownDiag: String = ""
+    // Latest inference-composed frame for screenshot / recording
+    @Volatile private var latestComposed: Bitmap? = null
+
+    private val resolutions = listOf("480p" to Size(640, 480), "720p" to Size(1280, 720), "1080p" to Size(1920, 1080))
+    private var resolutionIdx = 1
+
+    private var recorder: VideoRecorder? = null
+    private var smartMode = false
+
+    private val mjpegServer = MjpegServer(port = 8080)
+    private var mjpegInput: MjpegInput? = null
+    private val streamMode get() = config.streamUrl.isNotEmpty()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityCameraBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        config = Gson().fromJson(
-            intent.getStringExtra("config") ?: "{}",
-            ModelConfig::class.java
-        )
-        executor = Executors.newSingleThreadExecutor()
+        config = Gson().fromJson(intent.getStringExtra("config") ?: "{}", ModelConfig::class.java)
 
-        executor.execute {
-            val ok = if (config.engine == "onnx") {
+        inferenceExecutor.execute {
+            val hasModel = config.streamUrl.isEmpty() ||
+                (config.engine == "onnx" && config.onnxPath.isNotEmpty()) ||
+                (config.engine != "onnx" && config.paramPath.isNotEmpty())
+
+            val ok = if (!hasModel) true   // stream without model: still show frames
+            else if (config.engine == "onnx") {
                 onnxDetector = OnnxDetector(config)
                 runCatching { onnxDetector!!.init() }.getOrDefault(false)
             } else {
                 runCatching { ncnnDetector.init(config) }.getOrDefault(false)
             }
             runOnUiThread {
-                if (ok) startCamera()
-                else {
-                    Toast.makeText(this, "Ошибка загрузки модели", Toast.LENGTH_LONG).show()
-                    finish()
+                if (ok) {
+                    if (streamMode) startStreamInput() else startCamera()
+                } else {
+                    Toast.makeText(this, "Ошибка загрузки модели", Toast.LENGTH_LONG).show(); finish()
                 }
             }
         }
 
         binding.fabSettings.setOnClickListener { showSettingsSheet() }
-        binding.btnFlip.setOnClickListener { flipCamera() }
+        binding.btnFlip.setOnClickListener { if (!streamMode) flipCamera() }
+        // Hide camera-only controls when using stream input
+        if (streamMode) {
+            binding.btnFlip.visibility = View.GONE
+            binding.btnResolution.visibility = View.GONE
+            binding.previewView.visibility = View.GONE
+            binding.streamView.visibility = View.VISIBLE
+        }
+        binding.btnScreenshot.setOnClickListener { takeScreenshot() }
+        binding.btnRecord.setOnClickListener { toggleRecording() }
+        binding.btnSmartRecord.setOnClickListener { toggleSmartMode() }
+        binding.btnResolution.setOnClickListener { cycleResolution() }
+        binding.btnStream.setOnClickListener { toggleStream() }
+        updateRecordingUI()
+    }
+
+    // ── Stream ────────────────────────────────────────────────────────────────
+
+    private fun toggleStream() {
+        if (mjpegServer.running) {
+            mjpegServer.stop()
+            binding.tvStreamUrl.visibility = View.GONE
+            binding.btnStream.backgroundTintList = null
+            toast("Стрим остановлен")
+        } else {
+            try {
+                mjpegServer.start()
+                val ip = getLocalIpAddress() ?: "?"
+                val url = "http://$ip:${mjpegServer.port}/stream"
+                binding.tvStreamUrl.text = "📡 $url"
+                binding.tvStreamUrl.visibility = View.VISIBLE
+                binding.btnStream.backgroundTintList =
+                    ContextCompat.getColorStateList(this, android.R.color.holo_green_dark)
+                toast("Стрим: $url")
+            } catch (e: Exception) {
+                toast("Ошибка стрима: ${e.message}")
+            }
+        }
+    }
+
+    private fun getLocalIpAddress(): String? {
+        return try {
+            NetworkInterface.getNetworkInterfaces()?.toList()
+                ?.filter { it.isUp && !it.isLoopback }
+                ?.flatMap { it.inetAddresses.toList() }
+                ?.firstOrNull { !it.isLoopbackAddress && it is Inet4Address }
+                ?.hostAddress
+        } catch (e: Exception) { null }
+    }
+
+    // ── Stream input ──────────────────────────────────────────────────────────
+
+    private fun startStreamInput() {
+        val input = MjpegInput(config.streamUrl).also { mjpegInput = it }
+        input.start(
+            onFrame = { bmp ->
+                // Update ImageView with raw frame on UI thread
+                runOnUiThread { binding.streamView.setImageBitmap(bmp) }
+                // Submit inference if not already running
+                if (inferencing.compareAndSet(false, true)) {
+                    val copy = bmp.copy(bmp.config, false)
+                    inferenceExecutor.execute {
+                        runInference(copy, rotation = 0, isFront = false,
+                            imgW = copy.width, imgH = copy.height)
+                    }
+                }
+                // Update overlay aspect ratio
+                runOnUiThread {
+                    binding.overlay.setImageAspect(bmp.width.toFloat() / bmp.height.toFloat())
+                }
+            },
+            onError = { msg ->
+                runOnUiThread { binding.overlay.setDebugLine("⚠ $msg") }
+            }
+        )
+    }
+
+    // ── Camera ────────────────────────────────────────────────────────────────
+
+    private fun cycleResolution() {
+        if (recorder?.recording == true) { toast("Остановите запись перед сменой разрешения"); return }
+        resolutionIdx = (resolutionIdx + 1) % resolutions.size
+        binding.btnResolution.text = resolutions[resolutionIdx].first
+        startCamera()
     }
 
     private fun flipCamera() {
@@ -67,126 +181,246 @@ class CameraActivity : AppCompatActivity() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
-
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(binding.previewView.surfaceProvider)
             }
-
+            val targetSize = resolutions[resolutionIdx].second
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(1280, 720))
+                .setTargetResolution(targetSize)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
 
             val isFront = (lensFacing == CameraSelector.LENS_FACING_FRONT)
 
-            analysis.setAnalyzer(executor) { proxy ->
-                if (!processing.compareAndSet(false, true)) {
-                    proxy.close(); return@setAnalyzer
-                }
-
+            // Stream thread: runs at full camera FPS
+            analysis.setAnalyzer(streamExecutor) { proxy ->
                 val rotation = proxy.imageInfo.rotationDegrees
-                val rawW     = proxy.width
-                val rawH     = proxy.height
+                val rawW = proxy.width; val rawH = proxy.height
 
-                val bmp: Bitmap = try {
-                    proxy.toBitmap()
-                } catch (e: Exception) {
-                    Log.e("Camera", "toBitmap failed", e)
-                    proxy.close(); processing.set(false)
-                    return@setAnalyzer
+                val bmp: Bitmap = try { proxy.toBitmap() }
+                catch (e: Exception) {
+                    Log.e("Camera", "toBitmap", e); proxy.close(); return@setAnalyzer
+                }
+                proxy.close()   // release immediately after copy
+
+                // Push to MJPEG at full camera FPS using last known detections
+                // JPEG encoding is skipped entirely if no clients are connected
+                if (mjpegServer.running) {
+                    val streamFrame = composeFrame(bmp, rotation, isFront)
+                    binding.overlay.drawBoxesOnBitmap(streamFrame, lastKnownDets, config.classNames)
+                    mjpegServer.pushFrame(streamFrame)
+                    streamFrame.recycle()
                 }
 
-                try {
-                    val t0 = System.currentTimeMillis()
-
-                    val rawDets: Array<Detection> = try {
-                        if (config.engine == "onnx")
-                            onnxDetector?.detect(bmp) ?: emptyArray()
-                        else
-                            ncnnDetector.detect(bmp, config)
-                    } catch (e: Exception) {
-                        Log.e("Camera", "detect error", e); emptyArray()
-                    }
-
-                    val diag = try {
-                        if (config.engine == "onnx") onnxDetector?.getDiagnostics() ?: ""
-                        else ncnnDetector.getDiagnostics()
-                    } catch (_: Exception) { "" }
-
-                    var dets = rotateDetections(rawDets, rotation)
-                    if (isFront) {
-                        dets = dets.map {
-                            Detection(1f - it.x - it.w, it.y, it.w, it.h, it.label, it.confidence)
-                        }.toTypedArray()
-                    }
-
+                // Submit inference if not already running; otherwise drop this frame
+                if (inferencing.compareAndSet(false, true)) {
                     val imgW = if (rotation == 90 || rotation == 270) rawH else rawW
                     val imgH = if (rotation == 90 || rotation == 270) rawW else rawH
-
-                    val dt = System.currentTimeMillis() - t0
-                    lastFps = if (dt > 0) 1000f / dt else lastFps
-
-                    // Debug line: "rot=90 | v10|300x6|px:1|maxC:0.87|dets:3"
-                    val debugLine = "rot=${rotation}° | $diag"
-
-                    runOnUiThread {
-                        binding.overlay.setImageAspect(imgW.toFloat() / imgH.toFloat())
-                        binding.overlay.setDebugLine(debugLine)
-                        binding.overlay.update(dets, config.classNames, lastFps)
+                    inferenceExecutor.execute {
+                        runInference(bmp, rotation, isFront, imgW, imgH)
                     }
-                } catch (e: Exception) {
-                    Log.e("Camera", "frame error", e)
-                } finally {
+                } else {
                     bmp.recycle()
-                    proxy.close()
-                    processing.set(false)
                 }
             }
 
             runCatching { provider.unbindAll() }
             provider.bindToLifecycle(
-                this,
-                CameraSelector.Builder().requireLensFacing(lensFacing).build(),
+                this, CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                 preview, analysis
             )
         }, ContextCompat.getMainExecutor(this))
     }
 
-    /**
-     * Rotate detection boxes (normalised 0..1) by [degrees] CW to match display orientation.
-     * 90° CW: point (x,y) → (y, 1-x);  box (x,y,w,h) → (y, 1-x-w, h, w)
-     */
+    private fun runInference(bmp: Bitmap, rotation: Int, isFront: Boolean, imgW: Int, imgH: Int) {
+        try {
+            val t0 = System.currentTimeMillis()
+
+            val rawDets: Array<Detection> = runCatching {
+                if (config.engine == "onnx") onnxDetector?.detect(bmp) ?: emptyArray()
+                else ncnnDetector.detect(bmp, config)
+            }.getOrDefault(emptyArray())
+
+            val diag = runCatching {
+                if (config.engine == "onnx") onnxDetector?.getDiagnostics() ?: ""
+                else ncnnDetector.getDiagnostics()
+            }.getOrDefault("")
+
+            var dets = rotateDetections(rawDets, rotation)
+            if (isFront) dets = dets.map {
+                Detection(1f - it.x - it.w, it.y, it.w, it.h, it.label, it.confidence)
+            }.toTypedArray()
+
+            lastKnownDets = dets
+            lastKnownDiag = diag
+            lastFps = 1000f / (System.currentTimeMillis() - t0).coerceAtLeast(1)
+
+            // Compose frame for screenshot / recording
+            val composed = composeFrame(bmp, rotation, isFront)
+            binding.overlay.drawBoxesOnBitmap(composed, dets, config.classNames)
+            latestComposed?.recycle()
+            latestComposed = composed
+
+            // Feed video recorder
+            if (smartMode) {
+                ensureRecorderForSmart().feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.SMART)
+            } else {
+                recorder?.feedFrame(composed, dets.isNotEmpty(), VideoRecorder.Mode.ALWAYS)
+            }
+
+            runOnUiThread {
+                binding.overlay.setImageAspect(imgW.toFloat() / imgH.toFloat())
+                binding.overlay.setDebugLine("rot=${rotation}° | $diag")
+                binding.overlay.update(dets, config.classNames, lastFps)
+                updateRecordingUI()
+                if (mjpegServer.running) {
+                    val n = mjpegServer.clientCount()
+                    val base = binding.tvStreamUrl.text.toString().substringBefore(" (")
+                    binding.tvStreamUrl.text = if (n > 0) "$base ($n клиент${clientsSuffix(n)})" else base
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("Camera", "inference", e)
+        } finally {
+            bmp.recycle()
+            inferencing.set(false)
+        }
+    }
+
+    private fun clientsSuffix(n: Int) = when {
+        n % 10 == 1 && n % 100 != 11 -> ""
+        n % 10 in 2..4 && n % 100 !in 12..14 -> "а"
+        else -> "ов"
+    }
+
+    private fun composeFrame(raw: Bitmap, rotation: Int, isFront: Boolean): Bitmap {
+        val matrix = Matrix().apply {
+            postRotate(rotation.toFloat())
+            if (isFront) postScale(-1f, 1f, raw.width / 2f, raw.height / 2f)
+        }
+        return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+    }
+
+    // ── Screenshot ────────────────────────────────────────────────────────────
+
+    private fun takeScreenshot() {
+        val snap = latestComposed ?: run { toast("Нет кадра"); return }
+        inferenceExecutor.execute {
+            try {
+                val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "YOLO_$ts.jpg")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/YoloDetector")
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri)?.use { snap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                    runOnUiThread { toast("Скриншот сохранён") }
+                } else runOnUiThread { toast("Ошибка сохранения") }
+            } catch (e: Exception) {
+                Log.e("Camera", "screenshot", e)
+                runOnUiThread { toast("Ошибка скриншота") }
+            }
+        }
+    }
+
+    // ── Recording ─────────────────────────────────────────────────────────────
+
+    private fun toggleRecording() {
+        if (smartMode) { toast("Выключите умный режим для ручной записи"); return }
+        val rec = recorder
+        if (rec?.recording == true) {
+            inferenceExecutor.execute {
+                val file = rec.stop()
+                runOnUiThread {
+                    updateRecordingUI()
+                    if (file != null) saveVideoToGallery(file) else toast("Ошибка записи")
+                }
+            }
+        } else {
+            val w = (latestComposed?.width ?: 720).let { if (it % 2 == 0) it else it - 1 }
+            val h = (latestComposed?.height ?: 1280).let { if (it % 2 == 0) it else it - 1 }
+            val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            recorder = VideoRecorder(w, h, File(dir, "YOLO_$ts.mp4")).also { it.start() }
+            updateRecordingUI()
+        }
+    }
+
+    private fun toggleSmartMode() {
+        if (recorder?.recording == true) { toast("Остановите запись для смены режима"); return }
+        smartMode = !smartMode
+        if (!smartMode) inferenceExecutor.execute { recorder?.release(); recorder = null }
+        updateRecordingUI()
+    }
+
+    private fun ensureRecorderForSmart(): VideoRecorder {
+        recorder?.let { return it }
+        val w = (latestComposed?.width ?: 720).let { if (it % 2 == 0) it else it - 1 }
+        val h = (latestComposed?.height ?: 1280).let { if (it % 2 == 0) it else it - 1 }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return VideoRecorder(w, h, File(dir, "YOLO_$ts.mp4")).also { recorder = it }
+    }
+
+    private fun updateRecordingUI() {
+        val isRecording = recorder?.recording == true
+        binding.tvRecIndicator.visibility = if (isRecording) View.VISIBLE else View.GONE
+        binding.btnRecord.backgroundTintList = ContextCompat.getColorStateList(
+            this, if (isRecording) android.R.color.holo_red_light else R.color.card_bg)
+        binding.btnSmartRecord.backgroundTintList = ContextCompat.getColorStateList(
+            this, if (smartMode) android.R.color.holo_orange_light else R.color.card_bg)
+    }
+
+    private fun saveVideoToGallery(file: File) {
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/YoloDetector")
+            }
+            val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                file.delete(); toast("Видео сохранено")
+            } else toast("Ошибка сохранения видео")
+        } catch (e: Exception) { toast("Видео: ${file.absolutePath}") }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     private fun rotateDetections(dets: Array<Detection>, degrees: Int): Array<Detection> =
         when (degrees) {
-            // 90° CW:  (px,py)→(1-py,px)  ∴ box(x,y,w,h)→(1-y-h, x,   h, w)
-            90  -> dets.map { Detection(1f - it.y - it.h, it.x,             it.h, it.w, it.label, it.confidence) }.toTypedArray()
-            180 -> dets.map { Detection(1f - it.x - it.w, 1f - it.y - it.h, it.w, it.h, it.label, it.confidence) }.toTypedArray()
-            // 270° CW: (px,py)→(py,1-px)  ∴ box(x,y,w,h)→(y,   1-x-w, h, w)
-            270 -> dets.map { Detection(it.y,             1f - it.x - it.w, it.h, it.w, it.label, it.confidence) }.toTypedArray()
+            90  -> dets.map { Detection(1f - it.y - it.h, it.x,              it.h, it.w, it.label, it.confidence) }.toTypedArray()
+            180 -> dets.map { Detection(1f - it.x - it.w, 1f - it.y - it.h,  it.w, it.h, it.label, it.confidence) }.toTypedArray()
+            270 -> dets.map { Detection(it.y,              1f - it.x - it.w,  it.h, it.w, it.label, it.confidence) }.toTypedArray()
             else -> dets
         }
 
     private fun showSettingsSheet() {
         SettingsSheet(config) { updated ->
             config = updated
-            executor.execute {
-                ncnnDetector.release()
-                onnxDetector?.release()
+            inferenceExecutor.execute {
+                ncnnDetector.release(); onnxDetector?.release()
                 if (config.engine == "onnx") {
-                    onnxDetector = OnnxDetector(config)
-                    runCatching { onnxDetector!!.init() }
-                } else {
-                    runCatching { ncnnDetector.init(config) }
-                }
+                    onnxDetector = OnnxDetector(config); runCatching { onnxDetector!!.init() }
+                } else runCatching { ncnnDetector.init(config) }
             }
         }.show(supportFragmentManager, "settings")
     }
 
+    private fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+
     override fun onDestroy() {
         super.onDestroy()
-        executor.shutdown()
-        ncnnDetector.release()
-        onnxDetector?.release()
+        mjpegInput?.stop()
+        mjpegServer.stop()
+        inferenceExecutor.execute { recorder?.release() }
+        streamExecutor.shutdown()
+        inferenceExecutor.shutdown()
+        ncnnDetector.release(); onnxDetector?.release()
+        latestComposed?.recycle()
     }
 }

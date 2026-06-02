@@ -11,29 +11,149 @@
         android:layout_height="match_parent"
         app:scaleType="fillCenter" />
 
+    <!-- Stream input view (visible when using network stream instead of camera) -->
+    <ImageView
+        android:id="@+id/streamView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:background="#000"
+        android:visibility="gone" />
+
     <com.destik.yolodetector.DetectionOverlayView
         android:id="@+id/overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/fabSettings"
+    <!-- Top bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <!-- Row 1: REC indicator + controls -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/tvRecIndicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#BB000000"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="4dp"
+                android:text="● REC"
+                android:textColor="#FF4444"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
+
+            <Button
+                android:id="@+id/btnStream"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="MJPEG"
+                android:textSize="11sp"
+                android:paddingHorizontal="10dp" />
+
+            <Button
+                android:id="@+id/btnResolution"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="720p"
+                android:textSize="11sp"
+                android:paddingHorizontal="10dp" />
+        </LinearLayout>
+
+        <!-- Row 2: Stream URL (visible only when streaming) -->
+        <TextView
+            android:id="@+id/tvStreamUrl"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="#BB000000"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="4dp"
+            android:textColor="#00E676"
+            android:textSize="13sp"
+            android:typeface="monospace"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- Bottom-right column: screenshot, record, settings -->
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
-        android:layout_margin="20dp"
-        android:src="@android:drawable/ic_menu_preferences"
-        app:backgroundTint="@color/accent"
-        app:tint="@color/bg_dark" />
+        android:orientation="vertical"
+        android:layout_margin="12dp"
+        android:gravity="end">
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/btnFlip"
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnScreenshot"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:src="@android:drawable/ic_menu_camera"
+            app:backgroundTint="@color/card_bg"
+            app:tint="@color/text_primary"
+            app:fabSize="mini" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnRecord"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:src="@android:drawable/presence_video_online"
+            app:backgroundTint="@color/card_bg"
+            app:tint="@color/text_primary"
+            app:fabSize="mini" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabSettings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@android:drawable/ic_menu_preferences"
+            app:backgroundTint="@color/accent"
+            app:tint="@color/bg_dark" />
+    </LinearLayout>
+
+    <!-- Bottom-left column: smart mode, flip -->
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|start"
-        android:layout_margin="20dp"
-        android:src="@android:drawable/ic_menu_rotate"
-        app:backgroundTint="@color/card_bg"
-        app:tint="@color/text_primary" />
+        android:orientation="vertical"
+        android:layout_margin="12dp"
+        android:gravity="start">
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnSmartRecord"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:src="@android:drawable/ic_menu_search"
+            app:backgroundTint="@color/card_bg"
+            app:tint="@color/text_primary"
+            app:fabSize="mini" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnFlip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@android:drawable/ic_menu_rotate"
+            app:backgroundTint="@color/card_bg"
+            app:tint="@color/text_primary" />
+    </LinearLayout>
 
 </FrameLayout>
