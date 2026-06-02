@@ -22,10 +22,6 @@ class MjpegServer(val port: Int = 8080) {
     private val acceptThread = Executors.newSingleThreadExecutor()
     private val clientPool  = Executors.newCachedThreadPool()
 
-    // Limit MJPEG to ~15 fps regardless of analysis frame rate
-    private val frameIntervalMs = 66L
-    private var lastFrameMs = 0L
-
     fun start() {
         if (running) return
         running = true
@@ -56,12 +52,14 @@ class MjpegServer(val port: Int = 8080) {
         Log.d(TAG, "MJPEG server stopped")
     }
 
-    /** Call this from the analysis/camera thread with each composed frame. */
+    fun hasClients(): Boolean = clientCount.get() > 0
+
+    /**
+     * Push a frame. JPEG encoding happens here, on the caller's thread.
+     * No-op if no clients are connected (zero overhead).
+     */
     fun pushFrame(bitmap: Bitmap, quality: Int = 55) {
-        if (!running) return
-        val now = System.currentTimeMillis()
-        if (now - lastFrameMs < frameIntervalMs) return
-        lastFrameMs = now
+        if (!running || !hasClients()) return
         val baos = ByteArrayOutputStream(64 * 1024)
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)
         latestJpeg.set(baos.toByteArray())
@@ -73,7 +71,6 @@ class MjpegServer(val port: Int = 8080) {
         Log.d(TAG, "client connected: ${socket.inetAddress.hostAddress}")
         try {
             val inp = socket.getInputStream().bufferedReader()
-            // Drain the HTTP request line + headers
             var line = inp.readLine()
             while (!line.isNullOrEmpty()) line = inp.readLine()
 
@@ -89,21 +86,17 @@ class MjpegServer(val port: Int = 8080) {
             var lastSent: ByteArray? = null
             while (running && !socket.isClosed) {
                 val frame = latestJpeg.get()
-                if (frame == null || frame === lastSent) {
-                    Thread.sleep(20); continue
-                }
+                if (frame == null || frame === lastSent) { Thread.sleep(5); continue }
                 lastSent = frame
                 try {
                     out.write("----mjpeg\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n")
                     out.write(frame)
                     out.write("\r\n")
                     out.flush()
-                } catch (e: Exception) {
-                    break
-                }
+                } catch (e: Exception) { break }
             }
         } catch (e: Exception) {
-            Log.d(TAG, "client ${socket.inetAddress.hostAddress} disconnected: ${e.message}")
+            Log.d(TAG, "client ${socket.inetAddress.hostAddress} done: ${e.message}")
         } finally {
             clientCount.decrementAndGet()
             clients.remove(socket)
