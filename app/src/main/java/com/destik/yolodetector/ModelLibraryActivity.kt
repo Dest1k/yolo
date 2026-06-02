@@ -18,6 +18,7 @@ import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -83,28 +84,90 @@ class ModelLibraryActivity : AppCompatActivity() {
     private suspend fun downloadFile(urlStr: String, dest: File, onProgress: suspend (Int) -> Unit): Boolean =
         withContext(Dispatchers.IO) {
             runCatching {
-                val conn = URL(urlStr).openConnection() as HttpURLConnection
-                conn.connectTimeout = 15_000
-                conn.readTimeout    = 60_000
-                conn.instanceFollowRedirects = true
-                conn.connect()
-                if (conn.responseCode !in 200..299) return@runCatching false
-                val total = conn.contentLengthLong
-                var done  = 0L
-                conn.inputStream.use { inp ->
-                    FileOutputStream(dest).use { out ->
-                        val buf = ByteArray(32 * 1024)
-                        var n: Int
-                        while (inp.read(buf).also { n = it } != -1) {
-                            out.write(buf, 0, n)
-                            done += n
-                            if (total > 0) onProgress((done * 100 / total).toInt())
-                        }
-                    }
-                }
-                true
+                val realUrl = resolveLfsUrl(urlStr)
+                streamToFile(realUrl, dest, onProgress)
             }.getOrDefault(false)
         }
+
+    /** If the URL points to a Git LFS pointer, resolve it via the LFS batch API. */
+    private fun resolveLfsUrl(urlStr: String): String {
+        // First, do a HEAD request or small fetch to detect LFS pointer
+        val probe = URL(urlStr).openConnection() as HttpURLConnection
+        probe.connectTimeout = 15_000
+        probe.readTimeout    = 10_000
+        probe.instanceFollowRedirects = true
+        probe.setRequestProperty("User-Agent", "YoloDetector/1.0")
+        probe.connect()
+        if (probe.responseCode !in 200..299) return urlStr
+        val contentType = probe.contentType ?: ""
+        val contentLen  = probe.contentLengthLong
+        // LFS pointer files are small plain-text files (< 300 bytes)
+        if (contentLen in 1..512 || contentType.startsWith("text/plain")) {
+            val text = probe.inputStream.bufferedReader().readText()
+            if (text.startsWith("version https://git-lfs.github.com")) {
+                // Parse OID and size from pointer
+                val oid  = Regex("oid sha256:([0-9a-f]+)").find(text)?.groupValues?.get(1) ?: return urlStr
+                val size = Regex("size (\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                return fetchLfsBatchUrl(urlStr, oid, size) ?: urlStr
+            }
+        }
+        probe.disconnect()
+        return urlStr  // not LFS, return as-is
+    }
+
+    /** Call GitHub LFS batch API to get the real download URL for an object. */
+    private fun fetchLfsBatchUrl(originalUrl: String, oid: String, size: Long): String? {
+        // Derive batch API URL from raw URL
+        // https://raw.githubusercontent.com/OWNER/REPO/BRANCH/path  →
+        // https://github.com/OWNER/REPO.git/info/lfs/objects/batch
+        val m = Regex("https://raw\\.githubusercontent\\.com/([^/]+/[^/]+)/").find(originalUrl)
+            ?: return null
+        val repoPath = m.groupValues[1]
+        val batchUrl = "https://github.com/$repoPath.git/info/lfs/objects/batch"
+
+        val body = """{"operation":"download","transfers":["basic"],"objects":[{"oid":"$oid","size":$size}]}"""
+        val conn = URL(batchUrl).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/vnd.git-lfs+json")
+        conn.setRequestProperty("Accept",       "application/vnd.git-lfs+json")
+        conn.setRequestProperty("User-Agent",   "YoloDetector/1.0")
+        conn.connectTimeout = 15_000
+        conn.readTimeout    = 15_000
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        if (conn.responseCode !in 200..299) return null
+        val resp = conn.inputStream.bufferedReader().readText()
+        return runCatching {
+            JSONObject(resp)
+                .getJSONArray("objects").getJSONObject(0)
+                .getJSONObject("actions").getJSONObject("download")
+                .getString("href")
+        }.getOrNull()
+    }
+
+    private fun streamToFile(urlStr: String, dest: File, onProgress: suspend (Int) -> Unit): Boolean {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = 30_000
+        conn.readTimeout    = 120_000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "YoloDetector/1.0")
+        conn.connect()
+        if (conn.responseCode !in 200..299) return false
+        val total = conn.contentLengthLong
+        var done  = 0L
+        conn.inputStream.use { inp ->
+            FileOutputStream(dest).use { out ->
+                val buf = ByteArray(32 * 1024)
+                var n: Int
+                while (inp.read(buf).also { n = it } != -1) {
+                    out.write(buf, 0, n)
+                    done += n
+                    if (total > 0) kotlinx.coroutines.runBlocking { onProgress((done * 100 / total).toInt()) }
+                }
+            }
+        }
+        return true
+    }
 
     private fun returnModel(entry: ModelEntry) {
         val (paramFile, binFile) = localFiles(entry)

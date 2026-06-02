@@ -78,9 +78,13 @@ class MainActivity : AppCompatActivity() {
         binding.btnSelectOnnx.setOnClickListener { pickOnnx.launch("*/*") }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
         binding.btnStartCamera.setOnClickListener {
-            if (config.paramPath.isEmpty() || config.binPath.isEmpty()) {
-                toast("Выберите .param и .bin файлы")
-            } else { saveConfig(); checkCameraAndLaunch() }
+            if (config.engine == "onnx") {
+                if (config.onnxPath.isEmpty()) toast("Выберите .onnx файл")
+                else { saveConfig(); checkCameraAndLaunch() }
+            } else {
+                if (config.paramPath.isEmpty() || config.binPath.isEmpty()) toast("Выберите .param и .bin файлы")
+                else { saveConfig(); checkCameraAndLaunch() }
+            }
         }
         refreshSummary()
     }
