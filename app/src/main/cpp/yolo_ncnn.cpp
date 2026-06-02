@@ -148,6 +148,18 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
     int  nb = t ? out.w : out.h;   // anchors
     int  na = t ? out.h : out.w;   // attributes = 4 + nc
     int  nc = na - 4; if(nc < 1) nc = 1;
+
+    // Detect whether box coords are in pixels (0..input_size) or already
+    // normalized (0..1). Scan the width attribute across anchors: any value > 2
+    // means pixel space. Without this, a model emitting normalized coords gets
+    // its boxes divided by input_size → microscopic → clipped away ("no boxes").
+    bool pixel=false;
+    for(int i=0;i<nb;i++){
+        float w=t?safe_get(out,2,i):safe_get(out,i,2);
+        if(!is_bad(w)&&w>2.f){ pixel=true; break; }
+    }
+    float cs = pixel ? (1.f/g_input_size) : 1.f;
+
     float max_conf=0.f;
     for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
@@ -165,14 +177,14 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
         float bh=t?safe_get(out,3,i):safe_get(out,i,3);
         if(is_bad(cx)||is_bad(cy)||is_bad(bw)||is_bad(bh)||bw<=0||bh<=0) continue;
         Object o;
-        o.x=(cx-bw*.5f)/g_input_size; o.y=(cy-bh*.5f)/g_input_size;
-        o.w=bw/g_input_size; o.h=bh/g_input_size; o.label=mc; o.prob=ms;
+        o.x=(cx-bw*.5f)*cs; o.y=(cy-bh*.5f)*cs;
+        o.w=bw*cs; o.h=bh*cs; o.label=mc; o.prob=ms;
         objects.push_back(o);
     }
     nms(objects,nt);
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|maxC:%.2f|dets:%d",
-             out.h,out.w,nc,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|px:%d|maxC:%.2f|dets:%d",
+             out.h,out.w,nc,pixel,max_conf,(int)objects.size());
     g_diag=buf;
 }
 

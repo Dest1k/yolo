@@ -22,6 +22,8 @@ import java.net.NetworkInterface
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CameraActivity : AppCompatActivity() {
@@ -148,9 +150,13 @@ class CameraActivity : AppCompatActivity() {
                 // Submit inference if not already running
                 if (inferencing.compareAndSet(false, true)) {
                     val copy = bmp.copy(bmp.config, false)
-                    inferenceExecutor.execute {
-                        runInference(copy, rotation = 0, isFront = false,
-                            imgW = copy.width, imgH = copy.height)
+                    try {
+                        inferenceExecutor.execute {
+                            runInference(copy, rotation = 0, isFront = false,
+                                imgW = copy.width, imgH = copy.height)
+                        }
+                    } catch (e: RejectedExecutionException) {
+                        inferencing.set(false); copy.recycle()
                     }
                 }
                 // Update overlay aspect ratio
@@ -222,8 +228,12 @@ class CameraActivity : AppCompatActivity() {
                 if (inferencing.compareAndSet(false, true)) {
                     val imgW = if (rotation == 90 || rotation == 270) rawH else rawW
                     val imgH = if (rotation == 90 || rotation == 270) rawW else rawH
-                    inferenceExecutor.execute {
-                        runInference(bmp, rotation, isFront, imgW, imgH)
+                    try {
+                        inferenceExecutor.execute {
+                            runInference(bmp, rotation, isFront, imgW, imgH)
+                        }
+                    } catch (e: RejectedExecutionException) {   // executor shutting down (leaving camera)
+                        inferencing.set(false); bmp.recycle()
                     }
                 } else {
                     bmp.recycle()
@@ -259,7 +269,8 @@ class CameraActivity : AppCompatActivity() {
 
             lastKnownDets = dets
             lastKnownDiag = diag
-            lastFps = 1000f / (System.currentTimeMillis() - t0).coerceAtLeast(1)
+            val infMs = (System.currentTimeMillis() - t0).coerceAtLeast(1)
+            lastFps = 1000f / infMs
 
             // Building the full-frame composited bitmap (rotate + draw boxes) is costly,
             // so only do it when something actually consumes it: recording, smart mode,
@@ -284,7 +295,7 @@ class CameraActivity : AppCompatActivity() {
 
             runOnUiThread {
                 binding.overlay.setImageAspect(imgW.toFloat() / imgH.toFloat())
-                binding.overlay.setDebugLine("rot=${rotation}° | $diag")
+                binding.overlay.setDebugLine("rot=${rotation}° | ${infMs}ms | $diag")
                 binding.overlay.update(dets, config.classNames, lastFps)
                 updateRecordingUI()
                 if (mjpegServer.running) {
@@ -435,10 +446,21 @@ class CameraActivity : AppCompatActivity() {
         super.onDestroy()
         mjpegInput?.stop()
         mjpegServer.stop()
-        inferenceExecutor.execute { recorder?.release() }
-        streamExecutor.shutdown()
+        // Stop feeding new frames first so nothing new is submitted for inference.
+        streamExecutor.shutdownNow()
+        // Tear down native detectors + bitmaps ON the inference thread, so release()
+        // (which clears the native ncnn net / recycles bitmaps) can never run while a
+        // detect() is still in flight on that same thread. Doing it on the main thread
+        // was a use-after-free → native crash when leaving the camera with Back.
+        runCatching {
+            inferenceExecutor.execute {
+                runCatching { recorder?.release() }
+                runCatching { ncnnDetector.release() }
+                runCatching { onnxDetector?.release() }
+                runCatching { latestComposed?.recycle() }
+            }
+        }
         inferenceExecutor.shutdown()
-        ncnnDetector.release(); onnxDetector?.release()
-        latestComposed?.recycle()
+        runCatching { inferenceExecutor.awaitTermination(2, TimeUnit.SECONDS) }
     }
 }

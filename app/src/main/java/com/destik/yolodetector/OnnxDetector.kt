@@ -71,6 +71,7 @@ class OnnxDetector(private val config: ModelConfig) {
     fun detect(bitmap: Bitmap): Array<Detection> {
         val sess = session ?: return emptyArray<Detection>().also { lastDiag = "onnx|no_session" }
         return try {
+            val tPre0 = System.currentTimeMillis()
             val sz   = config.inputSize
             val bmpW = bitmap.width
             val bmpH = bitmap.height
@@ -106,11 +107,18 @@ class OnnxDetector(private val config: ModelConfig) {
             val inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr),
                 longArrayOf(1L, 3L, sz.toLong(), sz.toLong()))
 
+            val preMs = System.currentTimeMillis() - tPre0
             val inputName = sess.inputNames.first()
+            val tRun0 = System.currentTimeMillis()
             sess.run(mapOf(inputName to inputTensor)).use { results ->
                 inputTensor.close()
+                val runMs = System.currentTimeMillis() - tRun0
                 (results.first().value as OnnxTensor).use { out ->
-                    postprocess(out, sz, padX, padY, scale, bmpW, bmpH)
+                    val dets = postprocess(out, sz, padX, padY, scale, bmpW, bmpH)
+                    // pre = letterbox+normalize, run = the actual model. If run >> pre,
+                    // the model itself is the bottleneck (e.g. in-graph NMS), not our code.
+                    lastDiag = "$lastDiag|pre:${preMs}ms|run:${runMs}ms"
+                    dets
                 }
             }
         } catch (e: Exception) {

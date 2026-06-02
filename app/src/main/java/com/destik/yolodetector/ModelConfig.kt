@@ -9,7 +9,10 @@ data class ModelConfig(
     var confThreshold: Float = 0.15f,
     var nmsThreshold: Float = 0.45f,
     var numThreads: Int = 8,
-    var useGPU: Boolean = true,
+    // Default OFF: ncnn-Vulkan crashes on some models (e.g. YOLOv11) on certain
+    // devices, and for end-to-end / NMS-free ONNX models NNAPI is slower than
+    // CPU+XNNPACK. Users can opt back into GPU in settings.
+    var useGPU: Boolean = false,
     var outputName0: String = "output0",
     var outputName1: String = "output1",
     var outputName2: String = "output2",
