@@ -1,88 +1,88 @@
 # YOLO Detector
 
-Real-time object detection on **Android** and **Desktop** (Linux / Windows / macOS).  
-Load any YOLOv5/v8/v10 model in NCNN or ONNX/PT format, point it at a camera or MJPEG stream, and get live bounding boxes with per-class counters at full camera framerate.
+Детекция объектов в реальном времени на **Android** и **Desktop** (Linux / Windows / macOS).  
+Загрузи любую модель YOLOv5/v8/v10 в формате NCNN, ONNX или PT, направь на камеру или MJPEG-поток — и получи живые боксы с счётчиком объектов по классам на полной частоте кадров.
 
 ---
 
-## Highlights
+## Ключевые фишки
 
-### Live MJPEG stream server
-Toggle an HTTP server straight from the camera screen.  
-Any browser, VLC, or another instance of this app can open `http://<device-IP>:8080` and see the annotated video in real time.  
-Frame compositing (drawing boxes) happens on every captured frame — the server runs at the full camera capture rate (~30 fps) regardless of how fast inference is.
+### MJPEG-сервер (трансляция с боксами)
+Прямо из экрана камеры можно включить HTTP-сервер.  
+Любой браузер, VLC или другой экземпляр приложения открывает `http://<IP-устройства>:8080` и видит аннотированное видео в реальном времени.  
+Наложение боксов происходит на каждом захваченном кадре — сервер работает на полной скорости камеры (~30 fps) независимо от того, как быстро работает нейросеть.
 
-### MJPEG stream input
-Instead of the phone camera you can feed the app any HTTP MJPEG stream (e.g. an IP camera, another phone, or a desktop webcam server).  
-The same YOLO inference pipeline runs on the incoming frames — useful for processing a fixed camera without carrying a phone.
+### Входящий MJPEG-поток
+Вместо камеры телефона можно подать любой HTTP MJPEG-поток (IP-камера, другой телефон, веб-камера с компьютера).  
+Тот же пайплайн инференса обрабатывает входящие кадры — удобно, когда нужно анализировать стационарную камеру без участия телефона.
 
-### Smart recording
-Two video-recording modes:
-- **Always** — records continuously while the button is active.
-- **Smart** — starts automatically the moment any object is detected; stops 3 seconds after the last detection disappears. No manual intervention needed.
+### Умная запись (Smart Record)
+Два режима видеозаписи:
+- **Always** — пишет непрерывно пока кнопка активна.
+- **Smart** — стартует автоматически в момент появления любого объекта, останавливается через 3 секунды после того, как объекты пропали. Никакого ручного управления.
 
-### GPU acceleration on Desktop
-The desktop app tries GPU execution providers in order at startup:
-1. **CUDA** (NVIDIA on Linux / Windows)
-2. **DirectML** (AMD or NVIDIA on Windows)
-3. **CPU fallback** — always works, no special drivers needed
+### GPU-ускорение на Desktop
+Десктопное приложение перебирает провайдеры выполнения по порядку при запуске:
+1. **CUDA** — NVIDIA на Linux / Windows
+2. **DirectML** — AMD или NVIDIA на Windows
+3. **CPU** — всегда работает, никаких специальных драйверов
 
-You can pin a specific mode (AUTO / CUDA / DirectML / CPU) from the sidebar. The active provider is shown after the model loads.
+Режим можно зафиксировать вручную (AUTO / CUDA / DirectML / CPU) в боковой панели. После загрузки модели показывается активный провайдер.
 
-### PyTorch `.pt` model support (Desktop)
-Alongside ONNX, the desktop app loads TorchScript-exported `.pt` files via DJL.  
-Both YOLOv5 anchor-free output `[1, N, 4+C]` and YOLOv10 NMS-free output `[1, N, 6]` are supported.
+### Поддержка PyTorch `.pt` моделей (Desktop)
+Помимо ONNX, десктопное приложение загружает TorchScript-экспортированные `.pt` файлы через DJL.  
+Поддерживаются YOLOv5 anchor-free выход `[1, N, 4+C]` и YOLOv10 NMS-free выход `[1, N, 6]`.
 
 ---
 
-## Feature matrix
+## Что где работает
 
-| Feature | Android | Desktop |
-|---------|:-------:|:-------:|
-| Live camera / webcam | ✓ | ✓ |
-| MJPEG stream input | ✓ | ✓ |
-| MJPEG stream output server | ✓ | ✓ |
-| NCNN inference (CPU + Vulkan GPU) | ✓ | — |
-| ONNX Runtime inference | ✓ | ✓ |
+| Возможность | Android | Desktop |
+|-------------|:-------:|:-------:|
+| Камера / веб-камера | ✓ | ✓ |
+| Входящий MJPEG-поток | ✓ | ✓ |
+| Исходящий MJPEG-сервер | ✓ | ✓ |
+| NCNN-инференс (CPU + Vulkan GPU) | ✓ | — |
+| ONNX Runtime | ✓ | ✓ |
 | PyTorch TorchScript (`.pt`) | — | ✓ |
-| CUDA / DirectML GPU (desktop) | — | ✓ |
-| Screenshot with bounding boxes | ✓ | ✓ |
-| Video recording — Always mode | ✓ | — |
-| Video recording — Smart mode | ✓ | — |
-| Per-class object counter | ✓ | ✓ |
-| Model library (auto-download) | ✓ | — |
-| Camera resolution switcher | ✓ | — |
+| GPU: CUDA / DirectML | — | ✓ |
+| Скриншот с боксами | ✓ | ✓ |
+| Видеозапись — Always | ✓ | — |
+| Видеозапись — Smart | ✓ | — |
+| Счётчик объектов по классам | ✓ | ✓ |
+| Библиотека моделей (авто-загрузка) | ✓ | — |
+| Переключение разрешения камеры | ✓ | — |
 
 ---
 
-## Supported model formats
+## Поддерживаемые форматы моделей
 
-### NCNN — Android only
-- `.param` + `.bin` file pair
+### NCNN — только Android
+- Пара файлов `.param` + `.bin`
 - YOLOv5 (anchor-based), YOLOv8 (anchor-free), YOLOv10 (NMS-free)
-- CPU or GPU (Vulkan) via NCNN native library
+- CPU или GPU (Vulkan) через нативную библиотеку NCNN
 
 ### ONNX — Android + Desktop
-- Single `.onnx` file
-- NMS-free output shape `[1, N, 6]` (YOLOv10 style)
-- Android: NNAPI acceleration available
-- Desktop: CUDA EP (NVIDIA) + DirectML EP (AMD/NVIDIA Windows); auto CPU fallback
+- Один файл `.onnx`
+- NMS-free выход формата `[1, N, 6]` (стиль YOLOv10)
+- Android: доступно ускорение через NNAPI
+- Desktop: CUDA EP (NVIDIA) + DirectML EP (AMD/NVIDIA Windows); автоматический откат на CPU
 
-### PyTorch TorchScript — Desktop only
-- Single `.pt` file exported with `model.export(format="torchscript")`
-- YOLOv5 output `[1, N, 4+C]` and YOLOv10 output `[1, N, 6]`
-- GPU via CUDA 12.1 (NVIDIA); CPU fallback
+### PyTorch TorchScript — только Desktop
+- Один файл `.pt`, экспортированный через `model.export(format="torchscript")`
+- YOLOv5 выход `[1, N, 4+C]` и YOLOv10 выход `[1, N, 6]`
+- GPU через CUDA 12.1 (NVIDIA); откат на CPU
 
 ---
 
 ## Android
 
-### Requirements
+### Требования
 - Android 8.0+ (API 26)
-- Camera permission (for camera mode)
-- Network permission (for stream input/output)
+- Разрешение камеры (для режима камеры)
+- Разрешение сети (для работы со стримами)
 
-### Build
+### Сборка
 ```bash
 git clone https://github.com/dest1k/yolo.git
 cd yolo
@@ -90,65 +90,65 @@ cd yolo
 # APK → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Usage
+### Использование
 
-1. **Load a model**
-   - Tap **Библиотека моделей** to download a preset NCNN model, or
-   - Tap **Обзор** next to `.param` / `.bin` for NCNN files, or
-   - Tap **Обзор** next to ONNX for a `.onnx` file
+1. **Загрузи модель**
+   - Нажми **Библиотека моделей** — скачать готовую NCNN-модель одним тапом, или
+   - **Обзор** рядом с `.param` / `.bin` для NCNN-файлов, или
+   - **Обзор** рядом с ONNX для `.onnx`-файла
 
-2. **Configure** via **Настройки модели**:
-   - YOLO version (v5 / v8 / v10), input size, class count
-   - Confidence & NMS thresholds, CPU threads, GPU toggle
-   - Output layer names (or auto-detect with **Определить выходы**)
+2. **Настрой** через **Настройки модели**:
+   - Версия YOLO (v5 / v8 / v10), размер входа, количество классов
+   - Пороги Confidence и NMS, количество потоков CPU, GPU
+   - Имена выходных слоёв (или автоопределение через **Определить выходы**)
 
-3. **Stream input** (optional) — enter an HTTP MJPEG URL in the stream field to use a network camera instead of the built-in camera
+3. **Входящий стрим** (опционально) — введи HTTP MJPEG URL в поле стрима, чтобы использовать сетевую камеру вместо встроенной
 
-4. Tap **Запустить камеру** (or **Запустить стрим**)
+4. Нажми **Запустить камеру** (или **Запустить стрим**)
 
-### In-camera controls
+### Управление в режиме камеры
 
-| Button | Function |
+| Кнопка | Действие |
 |--------|----------|
-| **MJPEG** | Start / stop the built-in MJPEG server. URL shown below the button. |
-| **720p** | Cycle camera resolution: 480p → 720p → 1080p |
-| 📷 FAB | Save current annotated frame to gallery |
-| 🎥 FAB | Start / stop **Always** recording |
-| ⚙ FAB | Open settings mid-session |
-| 🔍 FAB (bottom-left) | Toggle **Smart record** mode |
-| ↔ FAB | Flip front / back camera |
+| **MJPEG** | Включить / выключить встроенный MJPEG-сервер. URL отображается под кнопкой. |
+| **720p** | Переключить разрешение: 480p → 720p → 1080p |
+| 📷 FAB | Сохранить текущий кадр с боксами в галерею |
+| 🎥 FAB | Начать / остановить запись (режим Always) |
+| ⚙ FAB | Открыть настройки прямо во время работы |
+| 🔍 FAB (слева внизу) | Включить / выключить режим Smart Record |
+| ↔ FAB | Переключить фронтальную / основную камеру |
 
 ---
 
 ## Desktop
 
-### Requirements
+### Требования
 - JDK 17+
-- Linux x86-64, Windows x86-64, or macOS
+- Linux x86-64, Windows x86-64 или macOS
 
-### Build & run
+### Сборка и запуск
 ```bash
-# Run from source
+# Запуск из исходников
 ./gradlew :desktop:run
 
-# Package installer for current OS
+# Упаковать установщик для текущей ОС
 ./gradlew :desktop:packageDeb      # Linux  → desktop/build/compose/binaries/main/deb/
 ./gradlew :desktop:packageMsi      # Windows → desktop/build/compose/binaries/main/msi/
 ./gradlew :desktop:packageDmg      # macOS   → desktop/build/compose/binaries/main/dmg/
 ```
 
-### Usage
+### Использование
 
-1. Pick **model type** — ONNX or PT
-2. **Browse** to your model file
-3. Set **video source** — webcam index (0 = default) or `http://…` MJPEG URL
-4. Choose **GPU mode** — AUTO tries CUDA then DirectML then CPU
-5. Adjust input size, confidence, class count
-6. Click **Start** — active execution provider shown in sidebar
-7. **MJPEG** — toggle the built-in server on port 8080 to share the annotated video
-8. **Screenshot** — save current annotated frame as PNG
+1. Выбери **тип модели** — ONNX или PT
+2. **Browse** — укажи файл модели
+3. Укажи **источник видео** — индекс веб-камеры (0 = по умолчанию) или `http://…` MJPEG URL
+4. Выбери **режим GPU** — AUTO пробует CUDA, потом DirectML, потом CPU
+5. Настрой размер входа, confidence, количество классов
+6. Нажми **Start** — активный провайдер отображается в боковой панели
+7. **MJPEG** — запустить встроенный сервер на порту 8080 для трансляции аннотированного видео
+8. **Screenshot** — сохранить текущий кадр как PNG
 
-Export a compatible ONNX model:
+Экспорт совместимой ONNX-модели:
 ```python
 from ultralytics import YOLO
 model = YOLO("yolov10n.pt")
@@ -159,49 +159,49 @@ model.export(format="onnx", imgsz=640, simplify=True)
 
 ## GitHub Actions (CI)
 
-Three jobs run on every push:
+Три задачи запускаются на каждый пуш:
 
-| Job | Runner | Artifact |
-|-----|--------|----------|
+| Задача | Раннер | Артефакт |
+|--------|--------|----------|
 | `build-android` | ubuntu-latest | `app-debug.apk`, `app-release-unsigned.apk` |
 | `build-desktop-linux` | ubuntu-latest | `YoloDetector_1.0.0_amd64.deb` |
 | `build-desktop-windows` | windows-latest | `YoloDetector-1.0.0.msi` |
 
-Artifacts are retained 30 days — downloadable from the **Actions** tab without building locally.
+Артефакты хранятся 30 дней — скачиваются из вкладки **Actions** без локальной сборки.
 
 ---
 
-## Architecture notes
+## Как это устроено
 
-### Android inference pipeline
+### Пайплайн инференса Android
 ```
-CameraX ImageAnalysis frame
-  ├── streamExecutor   → composeFrame() + draw last known dets → MjpegServer.pushFrame()   [~30 fps]
-  └── inferenceExecutor → YOLO / ONNX inference → update lastKnownDets                     [inference rate]
+Кадр CameraX ImageAnalysis
+  ├── streamExecutor   → composeFrame() + нарисовать последние боксы → MjpegServer.pushFrame()   [~30 fps]
+  └── inferenceExecutor → YOLO / ONNX инференс → обновить lastKnownDets                          [скорость инференса]
 ```
-MJPEG output runs at full capture rate; inference rate is decoupled and does not throttle the stream.
+MJPEG-сервер работает на полной скорости захвата; инференс выполняется независимо и не замедляет трансляцию.
 
-### MJPEG server
-`MjpegServer` runs a plain `ServerSocket`. Each client gets its own thread from a cached pool. `pushFrame()` encodes JPEG once into an `AtomicReference<ByteArray>`; every client thread reads the latest frame independently — zero per-client encoding overhead.
+### MJPEG-сервер
+`MjpegServer` использует обычный `ServerSocket`. Каждый клиент обслуживается в отдельном потоке из кэшированного пула. `pushFrame()` кодирует JPEG один раз в `AtomicReference<ByteArray>` — каждый клиентский поток читает последний кадр независимо, без лишнего кодирования.
 
-### Letterbox preprocessing
-Frames are padded with gray (114) to a square matching the model's input size. Detection coordinates are un-letterboxed back to original pixel space before display.
-
----
-
-## Permissions (Android)
-
-| Permission | Reason |
-|-----------|--------|
-| `CAMERA` | Live camera capture |
-| `WRITE_EXTERNAL_STORAGE` | Screenshots / videos on Android ≤ 9 |
-| `READ_MEDIA_VIDEO` | Access saved videos on Android 13+ |
-| `INTERNET` | MJPEG stream input and output |
-| `ACCESS_NETWORK_STATE` / `ACCESS_WIFI_STATE` | Detect device IP for stream URL display |
+### Letterbox-предобработка
+Кадры дополняются серым цветом (114) до квадрата, соответствующего размеру входа модели. Координаты детекций обратно преобразуются в пиксельное пространство оригинального кадра перед отображением.
 
 ---
 
-## Model sources
+## Разрешения (Android)
 
-- [nihui/ncnn-assets](https://github.com/nihui/ncnn-assets/tree/master/models) — ready-to-use NCNN models (downloadable in-app via model library)
-- [Ultralytics](https://docs.ultralytics.com/) — export any model: `yolo export model=yolov8n.pt format=ncnn` or `format=onnx`
+| Разрешение | Назначение |
+|-----------|------------|
+| `CAMERA` | Захват с камеры |
+| `WRITE_EXTERNAL_STORAGE` | Скриншоты / видео на Android ≤ 9 |
+| `READ_MEDIA_VIDEO` | Доступ к сохранённым видео на Android 13+ |
+| `INTERNET` | Входящий и исходящий MJPEG-стрим |
+| `ACCESS_NETWORK_STATE` / `ACCESS_WIFI_STATE` | Определение IP устройства для отображения URL стрима |
+
+---
+
+## Источники моделей
+
+- [nihui/ncnn-assets](https://github.com/nihui/ncnn-assets/tree/master/models) — готовые NCNN-модели (загружаются прямо из приложения через библиотеку моделей)
+- [Ultralytics](https://docs.ultralytics.com/) — экспорт любой модели: `yolo export model=yolov8n.pt format=ncnn` или `format=onnx`
