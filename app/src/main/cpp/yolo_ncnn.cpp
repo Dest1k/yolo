@@ -174,12 +174,15 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
     ncnn::Mat out=squeeze2d(raw);
     LOGD("v8 out: w=%d h=%d",out.w,out.h);
     if(out.w==0||out.h==0){ g_diag="v8|empty"; return; }
-    bool t=(out.h==4+g_num_classes);
-    int nb=t?out.w:out.h, na=t?out.h:out.w;
+    // Auto-detect nc from shape: smaller dim = [4+nc], larger = nd (proposals)
+    bool t = (out.h < out.w);  // t=true: layout [4+nc, nd]
+    int nc = (t ? out.h : out.w) - 4;
+    int nb = t ? out.w : out.h;  // number of proposals
+    if(nc <= 0 || nb <= 0){ g_diag="v8|bad shape"; return; }
     float max_conf=0.f;
     for(int i=0;i<nb;i++){
         float ms=ct; int mc=-1;
-        for(int c=0;c<g_num_classes&&(4+c)<na;c++){
+        for(int c=0;c<nc;c++){
             float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
             if(!is_bad(s)){
                 if(s>max_conf) max_conf=s;
@@ -199,7 +202,7 @@ static void detect_v8(const ncnn::Mat& in, std::vector<Object>& objects, float c
     }
     nms(objects,nt);
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|maxC:%.2f|dets:%d",out.h,out.w,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|maxC:%.2f|dets:%d",out.h,out.w,nc,max_conf,(int)objects.size());
     g_diag=buf;
 }
 
@@ -263,10 +266,10 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     std::string param=gc(pp), bin=gc(bp);
     g_param_path=param;
     g_net.opt.use_vulkan_compute  =(bool)gpu;
-    // fp16 gives ~2× speedup on ARM with minimal accuracy loss for YOLO
-    g_net.opt.use_fp16_packed     =!gpu;
-    g_net.opt.use_fp16_storage    =!gpu;
-    g_net.opt.use_fp16_arithmetic =!gpu;
+    // fp16 gives ~2× speedup on both CPU (NEON) and Vulkan GPU
+    g_net.opt.use_fp16_packed     =true;
+    g_net.opt.use_fp16_storage    =true;
+    g_net.opt.use_fp16_arithmetic =true;
     if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); return JNI_FALSE; }
     if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  return JNI_FALSE; }
     ParamInfo pi=parse_param(g_param_path);

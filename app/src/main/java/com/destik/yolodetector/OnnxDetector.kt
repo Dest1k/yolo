@@ -26,23 +26,18 @@ class OnnxDetector(private val config: ModelConfig) {
     fun init(): Boolean {
         return try {
             val threads = Runtime.getRuntime().availableProcessors()
-            var activeEP = "CPU"
             val opts = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(threads)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-
                 if (!config.cpuOnly) {
-                    // NNAPI: routes to NPU/DSP/GPU depending on SoC (Qualcomm, MediaTek, etc.)
-                    try { addNnapi(); activeEP = "NNAPI" } catch (_: Throwable) {}
+                    // XNNPACK: SIMD-optimised CPU kernels, no data-transfer overhead.
+                    // Registered before NNAPI so XNNPACK handles ops first; NNAPI subgraph
+                    // overhead on devices with partial op coverage hurts more than it helps.
+                    try { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) } catch (_: Throwable) {}
                 }
-                // XNNPACK: SIMD-optimised CPU kernels — always beneficial, even as NNAPI fallback
-                try {
-                    addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
-                    if (activeEP == "CPU") activeEP = "XNNPACK"
-                } catch (_: Throwable) {}
             }
             session = env.createSession(config.onnxPath, opts)
-            lastDiag = "onnx|ready|ep=$activeEP|t=$threads"
+            lastDiag = "onnx|ready|t=$threads|${if (config.cpuOnly) "cpu-only" else "xnnpack"}"
             true
         } catch (e: Exception) {
             lastDiag = "onnx|init_error|${e.message}"
