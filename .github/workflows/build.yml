@@ -41,17 +41,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/cpp/ncnn
-          key: ncnn-20240102-android-vulkan
+          key: ncnn-20241226-android-vulkan
 
       - name: Download NCNN
         if: steps.cache-ncnn.outputs.cache-hit != 'true'
         run: |
-          wget -q https://github.com/Tencent/ncnn/releases/download/20240102/ncnn-20240102-android-vulkan.zip -O ncnn.zip
+          wget -q https://github.com/Tencent/ncnn/releases/download/20241226/ncnn-20241226-android-vulkan.zip -O ncnn.zip
           unzip -q ncnn.zip
           mkdir -p app/src/main/cpp/ncnn
-          cp -r ncnn-20240102-android-vulkan/arm64-v8a   app/src/main/cpp/ncnn/
-          cp -r ncnn-20240102-android-vulkan/armeabi-v7a app/src/main/cpp/ncnn/
-          rm -rf ncnn.zip ncnn-20240102-android-vulkan
+          cp -r ncnn-20241226-android-vulkan/arm64-v8a   app/src/main/cpp/ncnn/
+          cp -r ncnn-20241226-android-vulkan/armeabi-v7a app/src/main/cpp/ncnn/
+          rm -rf ncnn.zip ncnn-20241226-android-vulkan
 
       - name: Cache Gradle
         uses: actions/cache@v4
