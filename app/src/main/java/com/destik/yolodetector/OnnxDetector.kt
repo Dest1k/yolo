@@ -169,9 +169,11 @@ class OnnxDetector(private val config: ModelConfig) {
         buf: FloatBuffer, A: Int, B: Int,
         sz: Int, padX: Int, padY: Int, scale: Float, bmpW: Int, bmpH: Int, ct: Float
     ): Array<Detection> {
-        val nc  = config.numClasses
-        val tr  = (A == 4 + nc)
-        val nd  = if (tr) B else A
+        // Auto-detect nc from shape: the smaller dimension is [4+nc], the larger is [nd]
+        // This avoids stride mismatch when config.numClasses doesn't match the model
+        val tr = A < B
+        val nc = (if (tr) A else B) - 4
+        val nd = if (tr) B else A
 
         buf.rewind()
         val raw = mutableListOf<Detection>()
