@@ -1,6 +1,7 @@
 package com.destik.yolodesktop
 
 import ai.djl.Device
+import ai.djl.engine.Engine
 import ai.djl.ndarray.NDList
 import ai.djl.ndarray.types.Shape
 import ai.djl.translate.Batchifier
@@ -55,7 +56,7 @@ class PtDetector {
     private fun resolveDevice(mode: GpuMode): Device {
         if (mode == GpuMode.CPU) return Device.cpu()
         return try {
-            val gpuCount = Device.getGpuCount()
+            val gpuCount = Engine.getInstance().gpuCount
             if (gpuCount > 0) Device.gpu(0) else Device.cpu()
         } catch (_: Exception) {
             Device.cpu()
