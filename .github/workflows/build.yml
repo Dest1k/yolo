@@ -153,17 +153,18 @@ jobs:
           key: gradle-desktop-windows-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-desktop-windows-
 
-      # jpackage --type msi needs the WiX 3 toolset (candle.exe/light.exe), which
-      # is no longer preinstalled on the windows-latest runner image.
-      - name: Install WiX Toolset
-        run: choco install wixtoolset -y --no-progress
+      # Build the portable app-image (jpackage --type app-image) instead of the
+      # MSI installer. The Compose plugin downloads its own WiX 3.11, so WiX was
+      # never missing — the MSI step fails inside jpackage with an error GitHub
+      # never surfaces (written to jpackage-*-err.txt). The app-image needs no
+      # installer tooling (createRuntimeImage already succeeds) and is a directly
+      # runnable Windows build.
+      - name: Build Desktop app-image
+        run: .\gradlew.bat :desktop:createDistributable --stacktrace
 
-      - name: Build Desktop .msi
-        run: .\gradlew.bat :desktop:packageMsi --stacktrace
-
-      - name: Upload Windows .msi
+      - name: Upload Windows app-image
         uses: actions/upload-artifact@v4
         with:
-          name: yolo-detector-windows-msi
-          path: desktop/build/compose/binaries/main/msi/*.msi
+          name: yolo-detector-windows
+          path: desktop/build/compose/binaries/main/app/**
           retention-days: 30
