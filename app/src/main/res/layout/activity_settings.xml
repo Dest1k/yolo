@@ -97,29 +97,21 @@
             android:max="100" android:progressTint="@color/accent"
             android:layout_marginBottom="16dp"/>
 
-        <!-- Threads -->
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="4dp">
-            <TextView android:layout_width="0dp" android:layout_height="wrap_content"
-                android:layout_weight="1" android:text="CPU потоки"
-                android:textColor="@color/text_secondary" android:textSize="13sp"/>
-            <TextView android:id="@+id/tvThreadsVal"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:textColor="@color/accent" android:textStyle="bold"/>
-        </LinearLayout>
-        <SeekBar android:id="@+id/seekThreads"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:progressTint="@color/accent" android:layout_marginBottom="16dp"/>
-
-        <!-- GPU -->
+        <!-- CPU only -->
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:layout_marginBottom="16dp"
             android:gravity="center_vertical">
-            <TextView android:layout_width="0dp" android:layout_height="wrap_content"
-                android:layout_weight="1" android:text="Использовать GPU (Vulkan)"
-                android:textColor="@color/text_primary"/>
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Только CPU"
+                    android:textColor="@color/text_primary" android:textSize="15sp"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="По умолчанию: GPU/NPU + все ядра CPU автоматически"
+                    android:textColor="@color/text_secondary" android:textSize="12sp"/>
+            </LinearLayout>
             <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchGpu"
+                android:id="@+id/switchCpuOnly"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:thumbTint="@color/accent"/>
         </LinearLayout>

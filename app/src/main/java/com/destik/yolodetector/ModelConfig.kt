@@ -8,13 +8,12 @@ data class ModelConfig(
     var numClasses: Int = 80,
     var confThreshold: Float = 0.15f,
     var nmsThreshold: Float = 0.45f,
-    var numThreads: Int = 8,
-    var useGPU: Boolean = true,
+    var cpuOnly: Boolean = false,
     var outputName0: String = "output0",
     var outputName1: String = "output1",
     var outputName2: String = "output2",
     var classNames: List<String> = emptyList(),
     var onnxPath: String = "",
-    var engine: String = "ncnn",   // "ncnn" or "onnx"
-    var streamUrl: String = ""     // if non-empty, use network stream instead of camera
+    var engine: String = "ncnn",
+    var streamUrl: String = ""
 )

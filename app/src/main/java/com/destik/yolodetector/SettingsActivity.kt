@@ -41,12 +41,7 @@ class SettingsActivity : AppCompatActivity() {
         binding.tvNmsVal.text = "%.2f".format(config.nmsThreshold)
         binding.seekNms.setOnSeekBarChangeListener(simpleSeek { binding.tvNmsVal.text = "%.2f".format(it / 100f) })
 
-        binding.seekThreads.max = 7
-        binding.seekThreads.progress = config.numThreads - 1
-        binding.tvThreadsVal.text = config.numThreads.toString()
-        binding.seekThreads.setOnSeekBarChangeListener(simpleSeek { binding.tvThreadsVal.text = (it + 1).toString() })
-
-        binding.switchGpu.isChecked = config.useGPU
+        binding.switchCpuOnly.isChecked = config.cpuOnly
         binding.etInputSize.setText(config.inputSize.toString())
         binding.etNumClasses.setText(config.numClasses.toString())
         binding.etOut0.setText(config.outputName0)
@@ -56,7 +51,6 @@ class SettingsActivity : AppCompatActivity() {
         if (config.engine == "onnx") binding.rbOnnx.isChecked = true
         else binding.rbNcnn.isChecked = true
 
-        // YOLO version radio
         when {
             config.yoloVersion >= 10 -> binding.rbV10.isChecked = true
             config.yoloVersion >= 8  -> binding.rbV8.isChecked  = true
@@ -89,8 +83,7 @@ class SettingsActivity : AppCompatActivity() {
             engine        = if (binding.rbOnnx.isChecked) "onnx" else "ncnn",
             confThreshold = binding.seekConf.progress / 100f,
             nmsThreshold  = binding.seekNms.progress / 100f,
-            numThreads    = binding.seekThreads.progress + 1,
-            useGPU        = binding.switchGpu.isChecked,
+            cpuOnly       = binding.switchCpuOnly.isChecked,
             inputSize     = binding.etInputSize.text.toString().toIntOrNull() ?: config.inputSize,
             numClasses    = binding.etNumClasses.text.toString().toIntOrNull() ?: config.numClasses,
             outputName0   = binding.etOut0.text.toString().trim(),

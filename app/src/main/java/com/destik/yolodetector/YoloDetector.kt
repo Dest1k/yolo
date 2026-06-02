@@ -15,11 +15,12 @@ class YoloDetector {
 
     fun init(config: ModelConfig): Boolean =
         nativeInit(config.paramPath, config.binPath,
-            config.yoloVersion, config.inputSize, config.numClasses, config.useGPU,
+            config.yoloVersion, config.inputSize, config.numClasses, !config.cpuOnly,
             config.outputName0, config.outputName1, config.outputName2)
 
     fun detect(bitmap: Bitmap, config: ModelConfig): Array<Detection> =
-        nativeDetect(bitmap, config.confThreshold, config.nmsThreshold, config.numThreads)
+        nativeDetect(bitmap, config.confThreshold, config.nmsThreshold,
+            Runtime.getRuntime().availableProcessors())
 
     fun getOutputNames(): Array<String> = nativeGetOutputNames()
     fun getDiagnostics(): String = nativeGetDiagnostics()

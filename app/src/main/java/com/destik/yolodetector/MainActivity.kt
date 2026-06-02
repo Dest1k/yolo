@@ -201,7 +201,7 @@ class MainActivity : AppCompatActivity() {
         val streamUrl = config.streamUrl
         binding.tvSummary.text = buildString {
             append("YOLO v${config.yoloVersion}  |  ${config.inputSize}×${config.inputSize}  |  ${config.numClasses} классов\n")
-            append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  Thr: ${config.numThreads}  ${if (config.useGPU) "GPU" else "CPU"}\n")
+            append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  ${if (config.cpuOnly) "CPU-only" else "GPU+CPU авто"}\n")
             append("out0: ${config.outputName0}")
             if (streamUrl.isNotEmpty()) append("\n📡 Поток: $streamUrl")
         }

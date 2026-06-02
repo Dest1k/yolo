@@ -36,12 +36,7 @@ class SettingsSheet(
         b.tvNmsVal.text = "%.2f".format(config.nmsThreshold)
         b.seekNms.setOnSeekBarChangeListener(seek { b.tvNmsVal.text = "%.2f".format(it / 100f) })
 
-        b.seekThreads.max = 7
-        b.seekThreads.progress = config.numThreads - 1
-        b.tvThreadsVal.text = config.numThreads.toString()
-        b.seekThreads.setOnSeekBarChangeListener(seek { b.tvThreadsVal.text = (it + 1).toString() })
-
-        b.switchGpu.isChecked = config.useGPU
+        b.switchCpuOnly.isChecked = config.cpuOnly
         b.etInputSize.setText(config.inputSize.toString())
         b.etNumClasses.setText(config.numClasses.toString())
         b.etOut0.setText(config.outputName0)
@@ -64,8 +59,7 @@ class SettingsSheet(
         config = config.copy(
             confThreshold = b.seekConf.progress / 100f,
             nmsThreshold  = b.seekNms.progress / 100f,
-            numThreads    = b.seekThreads.progress + 1,
-            useGPU        = b.switchGpu.isChecked,
+            cpuOnly       = b.switchCpuOnly.isChecked,
             inputSize     = b.etInputSize.text.toString().toIntOrNull() ?: config.inputSize,
             numClasses    = b.etNumClasses.text.toString().toIntOrNull() ?: config.numClasses,
             outputName0   = b.etOut0.text.toString().trim(),

@@ -55,24 +55,14 @@
         android:layout_height="wrap_content" android:max="100"
         android:progressTint="@color/accent" android:layout_marginBottom="12dp"/>
 
-    <!-- Threads -->
-    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
-        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
-            android:layout_weight="1" android:text="CPU потоки" android:textColor="@color/text_secondary"/>
-        <TextView android:id="@+id/tvThreadsVal" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:textColor="@color/accent" android:textStyle="bold"/>
-    </LinearLayout>
-    <SeekBar android:id="@+id/seekThreads" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:progressTint="@color/accent"
-        android:layout_marginBottom="12dp"/>
-
-    <!-- GPU -->
+    <!-- CPU only -->
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginBottom="8dp">
         <TextView android:layout_width="0dp" android:layout_height="wrap_content"
-            android:layout_weight="1" android:text="GPU (Vulkan)" android:textColor="@color/text_primary"/>
+            android:layout_weight="1" android:text="Только CPU (без GPU/NPU)"
+            android:textColor="@color/text_primary"/>
         <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchGpu" android:layout_width="wrap_content"
+            android:id="@+id/switchCpuOnly" android:layout_width="wrap_content"
             android:layout_height="wrap_content" android:thumbTint="@color/accent"/>
     </LinearLayout>
 
