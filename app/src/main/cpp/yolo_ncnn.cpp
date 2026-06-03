@@ -10,6 +10,7 @@
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <signal.h>
 
 #include "net.h"
 
@@ -18,6 +19,27 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 struct Object { float x,y,w,h; int label; float prob; };
+
+// ── Native crash diagnostics ─────────────────────────────────────────────────
+// A native (SIGSEGV/SIGABRT/…) crash produces no Java stack trace, so we track
+// the current native stage and print it from a signal handler. With
+// `adb logcat -s YoloNCNN` the line "NATIVE CRASH … stage=…" pinpoints where it
+// died (e.g. init:load_model vs detect:extract) for otherwise-undebuggable
+// models like YOLOv11.
+static const char* volatile g_stage = "idle";
+static struct sigaction g_old_sa[64];
+static void crash_handler(int sig, siginfo_t* si, void* uc){
+    LOGE("NATIVE CRASH: signal=%d stage=%s", sig, g_stage ? g_stage : "?");
+    if(sig>=0 && sig<64 && g_old_sa[sig].sa_sigaction)
+        g_old_sa[sig].sa_sigaction(sig, si, uc);   // chain → system tombstone/backtrace
+    else { signal(sig, SIG_DFL); raise(sig); }
+}
+static void install_crash_handler(){
+    struct sigaction sa; memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler; sa.sa_flags = SA_SIGINFO; sigemptyset(&sa.sa_mask);
+    int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+    for(int s : sigs) sigaction(s, &sa, &g_old_sa[s]);
+}
 
 static ncnn::Net  g_net;
 static bool       g_initialized  = false;
@@ -295,11 +317,22 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
     use_gpu=((bool)gpu && ncnn::get_gpu_count()>0);
 #endif
     g_net.opt.use_vulkan_compute =use_gpu;
-    g_net.opt.use_fp16_packed    =false;
-    g_net.opt.use_fp16_storage   =false;
-    g_net.opt.use_fp16_arithmetic=false;
-    if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); return JNI_FALSE; }
-    if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  return JNI_FALSE; }
+    // fp16 on CPU: storage halves memory bandwidth, arithmetic ~doubles conv
+    // throughput on ARMv8.2+/ARMv9 (Oryon / Snapdragon). ncnn auto-falls back to
+    // fp32 on CPUs without FEAT_FP16, so it's a free win where supported.
+    g_net.opt.use_fp16_packed    =true;
+    g_net.opt.use_fp16_storage   =true;
+    g_net.opt.use_fp16_arithmetic=true;
+    g_net.opt.use_packing_layout =true;
+
+    static bool s_handler=false;
+    if(!s_handler){ install_crash_handler(); s_handler=true; }
+
+    g_stage="init:load_param";
+    if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); g_stage="idle"; return JNI_FALSE; }
+    g_stage="init:load_model";
+    if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  g_stage="idle"; return JNI_FALSE; }
+    g_stage="init:parse";
     ParamInfo pi=parse_param(g_param_path);
     g_input_name=pi.input_name;
 
@@ -314,6 +347,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         }
     }
     g_initialized=true;
+    g_stage="idle";
     g_diag="init OK";
     LOGD("Init OK yolov%d input=%d nc=%d gpu=%d blob_in=%s out0=%s",
          ver,isz,nc,(int)use_gpu,g_input_name.c_str(),g_out0.c_str());
@@ -387,8 +421,10 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
     g_net.opt.num_threads=(int)nth;
 
     std::vector<Object> objs;
+    g_stage="detect:extract";
     if(g_yolo_version>=8) detect_modern(in,objs,ct,nt);  // v8/v9/v10/v11 (auto layout)
     else                  detect_v5    (in,objs,ct,nt);  // v5/v6/v7 anchor-based
+    g_stage="idle";
 
     // Reverse letterbox: norm model coords → original frame norm coords
     const float fw=(float)w, fh=(float)h;
