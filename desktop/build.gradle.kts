@@ -10,6 +10,36 @@ val isMac     = osName.contains("mac")
 val isWindows = osName.contains("windows")
 val isLinux   = osName.contains("linux")
 
+// Architecture matters for single-board computers: Raspberry Pi / Orange Pi /
+// Rock Pi run aarch64 Linux, where the x86_64 OpenCV / ffmpeg / PyTorch natives
+// won't load at all (no webcam, no .pt). Resolve the right native classifier from
+// the build host so `:desktop:run` / packaging on an ARM board pulls ARM binaries.
+val osArch: String = System.getProperty("os.arch").lowercase()
+val isArm64   = osArch.contains("aarch64") || osArch.contains("arm64")
+val isArm32   = !isArm64 && (osArch.contains("arm") || osArch.startsWith("aarch"))
+
+// JavaCV / bytedeco platform classifier (opencv, ffmpeg).
+val bytedecoPlatform: String = when {
+    isLinux && isArm64   -> "linux-arm64"
+    isLinux && isArm32   -> "linux-armhf"
+    isLinux              -> "linux-x86_64"
+    isWindows            -> "windows-x86_64"
+    isMac && isArm64     -> "macosx-arm64"
+    isMac                -> "macosx-x86_64"
+    else                 -> "linux-x86_64"
+}
+// DJL PyTorch native classifier (CPU). DJL ships linux-aarch64 for ARM boards.
+val djlPlatform: String = when {
+    isLinux && isArm64   -> "linux-aarch64"
+    isLinux              -> "linux-x86_64"
+    isWindows            -> "win-x86_64"
+    isMac && isArm64     -> "osx-aarch64"
+    isMac                -> "osx-x86_64"
+    else                 -> "linux-x86_64"
+}
+// CUDA only exists on x86_64 Linux/Windows — never on ARM single-board computers.
+val cudaSupported = (isLinux || isWindows) && !isArm64 && !isArm32
+
 dependencies {
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
@@ -25,16 +55,13 @@ dependencies {
     implementation("ai.djl:api:0.27.0")
     implementation("ai.djl.pytorch:pytorch-engine:0.27.0")
 
-    // CPU-only native for all platforms (always available fallback)
-    when {
-        isLinux   -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-x86_64")
-        isWindows -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:win-x86_64")
-        isMac     -> runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-x86_64")
-    }
-    // CUDA 12.1 native (NVIDIA GPU — loaded automatically when CUDA is present)
-    when {
-        isLinux   -> runtimeOnly("ai.djl.pytorch:pytorch-native-cu121:2.1.1:linux-x86_64")
-        isWindows -> runtimeOnly("ai.djl.pytorch:pytorch-native-cu121:2.1.1:win-x86_64")
+    // CPU-only native for the host architecture (always-available fallback,
+    // including aarch64 boards).
+    runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:$djlPlatform")
+    // CUDA 12.1 native (NVIDIA GPU — x86_64 only; skipped on ARM boards).
+    if (cudaSupported) {
+        val cudaPlatform = if (isWindows) "win-x86_64" else "linux-x86_64"
+        runtimeOnly("ai.djl.pytorch:pytorch-native-cu121:2.1.1:$cudaPlatform")
     }
 
     // ── JavaCV for webcam (OpenCV grabber) ─────────────────────────────────────
@@ -48,20 +75,8 @@ dependencies {
         exclude(group = "org.bytedeco", module = "leptonica")
         exclude(group = "org.bytedeco", module = "tesseract")
     }
-    when {
-        isLinux   -> {
-            runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:linux-x86_64")
-            runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:linux-x86_64")
-        }
-        isWindows -> {
-            runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:windows-x86_64")
-            runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:windows-x86_64")
-        }
-        isMac     -> {
-            runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:macosx-arm64")
-            runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:macosx-arm64")
-        }
-    }
+    runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:$bytedecoPlatform")
+    runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:$bytedecoPlatform")
 
     implementation("com.google.code.gson:gson:2.10.1")
     // Provides Dispatchers.Main backed by Swing EDT (required for UI state mutations)
