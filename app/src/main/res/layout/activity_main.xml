@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg_dark">
@@ -13,57 +14,45 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="YOLO NCNN Detector"
+            android:text="YOLO Detector"
             android:textSize="26sp"
             android:textColor="@color/accent"
             android:textStyle="bold"
             android:gravity="center"
-            android:layout_marginBottom="24dp" />
+            android:layout_marginBottom="6dp" />
 
-        <!-- .param -->
-        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Model .param" android:textColor="@color/text_secondary" android:textSize="13sp"/>
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="12dp">
-            <TextView android:id="@+id/tvParamFile"
-                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
-                android:text="Не выбран" android:textColor="@color/text_primary"
-                android:background="@drawable/bg_field" android:padding="10dp"
-                android:singleLine="true" android:ellipsize="start"/>
-            <Button android:id="@+id/btnSelectParam"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Обзор" android:layout_marginStart="8dp"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:textColor="@color/accent"/>
-        </LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Детекция объектов в реальном времени"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:gravity="center"
+            android:layout_marginBottom="22dp" />
 
-        <!-- .bin -->
-        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Model .bin" android:textColor="@color/text_secondary" android:textSize="13sp"/>
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="20dp">
-            <TextView android:id="@+id/tvBinFile"
-                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
-                android:text="Не выбран" android:textColor="@color/text_primary"
-                android:background="@drawable/bg_field" android:padding="10dp"
-                android:singleLine="true" android:ellipsize="start"/>
-            <Button android:id="@+id/btnSelectBin"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Обзор" android:layout_marginStart="8dp"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:textColor="@color/accent"/>
-        </LinearLayout>
+        <!-- Primary action: pick a ready model -->
+        <Button android:id="@+id/btnModelLibrary"
+            android:layout_width="match_parent" android:layout_height="56dp"
+            android:text="📦 Библиотека моделей"
+            android:layout_marginBottom="6dp"
+            android:backgroundTint="@color/accent"
+            android:textColor="@color/bg_dark"
+            android:textStyle="bold" android:textSize="16sp"/>
+        <TextView
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Рекомендуется: скачайте готовую модель в один тап — параметры настроятся автоматически"
+            android:textColor="@color/text_secondary" android:textSize="12sp"
+            android:layout_marginBottom="18dp"/>
 
         <!-- Summary card -->
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginBottom="20dp"
-            app:cardBackgroundColor="@color/card_bg" app:cardCornerRadius="12dp"
-            xmlns:app="http://schemas.android.com/apk/res-auto">
+            android:layout_marginBottom="18dp"
+            app:cardBackgroundColor="@color/card_bg" app:cardCornerRadius="12dp">
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:orientation="vertical" android:padding="16dp">
                 <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:text="Параметры" android:textColor="@color/accent"
+                    android:text="Текущая модель" android:textColor="@color/accent"
                     android:textSize="14sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
                 <TextView android:id="@+id/tvSummary"
                     android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -72,30 +61,12 @@
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
-        <!-- ONNX section -->
-        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="ONNX Runtime (NMS-free, NNAPI)" android:textColor="@color/text_secondary"
-            android:textSize="13sp" android:layout_marginTop="8dp"/>
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="20dp">
-            <TextView android:id="@+id/tvOnnxFile"
-                android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
-                android:text="Не выбран" android:textColor="@color/text_primary"
-                android:background="@drawable/bg_field" android:padding="10dp"
-                android:singleLine="true" android:ellipsize="start"/>
-            <Button android:id="@+id/btnSelectOnnx"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Обзор" android:layout_marginStart="8dp"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:textColor="@color/accent"/>
-        </LinearLayout>
-
         <!-- Stream section -->
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Сетевой поток (MJPEG HTTP)" android:textColor="@color/text_secondary"
-            android:textSize="13sp" android:layout_marginTop="8dp"/>
+            android:text="Сетевой поток вместо камеры (MJPEG HTTP)" android:textColor="@color/text_secondary"
+            android:textSize="13sp"/>
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="horizontal" android:layout_marginBottom="20dp">
+            android:orientation="horizontal" android:layout_marginBottom="18dp">
             <EditText android:id="@+id/etStreamUrl"
                 android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
                 android:hint="http://192.168.x.x:8080/stream"
@@ -111,37 +82,95 @@
                 android:textColor="@color/text_secondary"/>
         </LinearLayout>
 
-        <!-- Model library button -->
-        <Button android:id="@+id/btnModelLibrary"
-            android:layout_width="match_parent" android:layout_height="48dp"
-            android:text="Библиотека моделей"
-            android:layout_marginBottom="12dp"
-            android:backgroundTint="@color/accent"
-            android:textColor="@color/bg_dark"
-            android:textStyle="bold"/>
-
-        <!-- Detect outputs button -->
-        <Button android:id="@+id/btnDetectOutputs"
-            android:layout_width="match_parent" android:layout_height="48dp"
-            android:text="🔍 Определить выходы модели"
-            android:enabled="false"
-            android:layout_marginBottom="8dp"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:textColor="@color/accent"/>
-
-        <Button android:id="@+id/btnSettings"
-            android:layout_width="match_parent" android:layout_height="48dp"
-            android:text="Настройки модели"
-            android:layout_marginBottom="10dp"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:textColor="@color/accent"/>
-
+        <!-- Primary launch -->
         <Button android:id="@+id/btnStartCamera"
             android:layout_width="match_parent" android:layout_height="56dp"
             android:text="Запустить камеру"
             android:enabled="false"
             android:backgroundTint="@color/accent"
             android:textColor="@color/bg_dark"
-            android:textStyle="bold" android:textSize="16sp"/>
+            android:textStyle="bold" android:textSize="16sp"
+            android:layout_marginBottom="20dp"/>
+
+        <!-- Advanced toggle -->
+        <Button android:id="@+id/btnToggleAdvanced"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="⚙ Расширенное (своя модель)"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:textColor="@color/text_secondary"/>
+
+        <!-- Advanced section: manual model loading, hidden by default -->
+        <LinearLayout android:id="@+id/advancedSection"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:visibility="gone"
+            android:layout_marginTop="12dp">
+
+            <!-- .param -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="NCNN .param" android:textColor="@color/text_secondary" android:textSize="13sp"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginBottom="12dp">
+                <TextView android:id="@+id/tvParamFile"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="Не выбран" android:textColor="@color/text_primary"
+                    android:background="@drawable/bg_field" android:padding="10dp"
+                    android:singleLine="true" android:ellipsize="start"/>
+                <Button android:id="@+id/btnSelectParam"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Обзор" android:layout_marginStart="8dp"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:textColor="@color/accent"/>
+            </LinearLayout>
+
+            <!-- .bin -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="NCNN .bin" android:textColor="@color/text_secondary" android:textSize="13sp"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginBottom="16dp">
+                <TextView android:id="@+id/tvBinFile"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="Не выбран" android:textColor="@color/text_primary"
+                    android:background="@drawable/bg_field" android:padding="10dp"
+                    android:singleLine="true" android:ellipsize="start"/>
+                <Button android:id="@+id/btnSelectBin"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Обзор" android:layout_marginStart="8dp"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:textColor="@color/accent"/>
+            </LinearLayout>
+
+            <!-- ONNX section -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="ONNX Runtime (NMS-free / v8, NNAPI)" android:textColor="@color/text_secondary"
+                android:textSize="13sp"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginBottom="16dp">
+                <TextView android:id="@+id/tvOnnxFile"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="Не выбран" android:textColor="@color/text_primary"
+                    android:background="@drawable/bg_field" android:padding="10dp"
+                    android:singleLine="true" android:ellipsize="start"/>
+                <Button android:id="@+id/btnSelectOnnx"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Обзор" android:layout_marginStart="8dp"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:textColor="@color/accent"/>
+            </LinearLayout>
+
+            <!-- Detect outputs button -->
+            <Button android:id="@+id/btnDetectOutputs"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:text="🔍 Определить выходы модели"
+                android:enabled="false"
+                android:layout_marginBottom="8dp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/accent"/>
+
+            <Button android:id="@+id/btnSettings"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:text="Настройки модели"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:textColor="@color/accent"/>
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>

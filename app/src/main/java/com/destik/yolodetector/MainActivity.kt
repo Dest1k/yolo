@@ -77,6 +77,13 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSelectOnnx.setOnClickListener { pickOnnx.launch("*/*") }
         binding.btnDetectOutputs.setOnClickListener { analyzeModel() }
+        binding.btnToggleAdvanced.setOnClickListener {
+            val show = binding.advancedSection.visibility != android.view.View.VISIBLE
+            binding.advancedSection.visibility =
+                if (show) android.view.View.VISIBLE else android.view.View.GONE
+            binding.btnToggleAdvanced.text =
+                if (show) "⚙ Скрыть расширенное" else "⚙ Расширенное (своя модель)"
+        }
 
         // Stream URL field
         binding.etStreamUrl.setOnEditorActionListener { _, actionId, _ ->

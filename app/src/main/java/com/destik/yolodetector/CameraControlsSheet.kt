@@ -58,7 +58,7 @@ class CameraControlsSheet(private val camera: Camera) : BottomSheetDialogFragmen
             setPadding(px(20), px(16), px(20), px(24))
         }
 
-        root.addView(TextView(context).apply {
+        root.addView(TextView(requireContext()).apply {
             text = "Управление камерой"; setTextColor(accent); textSize = 18f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, px(8))
@@ -140,21 +140,21 @@ class CameraControlsSheet(private val camera: Camera) : BottomSheetDialogFragmen
         }
 
         // ── Reset to full auto ─────────────────────────────────────────────────
-        root.addView(Button(context).apply {
+        root.addView(Button(requireContext()).apply {
             text = "Сбросить (авто)"
             setBackgroundColor(0xFF333333.toInt()); setTextColor(Color.WHITE)
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp.topMargin = px(12); layoutParams = lp
             setOnClickListener {
                 manualAe = false; manualAf = false; iso = null; exposureNs = null; focusDist = null
-                runCatching { c2Control.captureRequestOptions = CaptureRequestOptions.Builder().build() }
+                runCatching { c2Control.setCaptureRequestOptions(CaptureRequestOptions.Builder().build()) }
                 runCatching { camera.cameraControl.setExposureCompensationIndex(0) }
                 dismiss()
             }
         })
 
         if (!hasManualSensor && minFocus <= 0f) {
-            root.addView(TextView(context).apply {
+            root.addView(TextView(requireContext()).apply {
                 text = "Эта камера не поддерживает ручные ISO/выдержку/фокус — доступны зум и яркость."
                 setTextColor(sub); textSize = 12f; setPadding(0, px(12), 0, 0)
             })
@@ -181,7 +181,7 @@ class CameraControlsSheet(private val camera: Camera) : BottomSheetDialogFragmen
             } else {
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             }
-            c2Control.captureRequestOptions = b.build()
+            c2Control.setCaptureRequestOptions(b.build())
         }
     }
 
@@ -193,12 +193,12 @@ class CameraControlsSheet(private val camera: Camera) : BottomSheetDialogFragmen
         else "1/${(1.0 / sec).roundToInt()} s"
     }
 
-    private fun label(text: String): TextView = TextView(context).apply {
+    private fun label(text: String): TextView = TextView(requireContext()).apply {
         setTextColor(sub); textSize = 13f; this.text = text
         setPadding(0, (8 * resources.displayMetrics.density).roundToInt(), 0, 0)
     }
 
-    private fun seekBar(): SeekBar = SeekBar(context).apply {
+    private fun seekBar(): SeekBar = SeekBar(requireContext()).apply {
         max = 100; progressTintList = android.content.res.ColorStateList.valueOf(accent)
         thumbTintList = android.content.res.ColorStateList.valueOf(accent)
     }
