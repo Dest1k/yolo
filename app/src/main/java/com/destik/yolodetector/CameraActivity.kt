@@ -41,6 +41,7 @@ class CameraActivity : AppCompatActivity() {
 
     private var lastFps = 0f
     private var lensFacing = CameraSelector.LENS_FACING_BACK
+    private var camera: Camera? = null
 
     // Last known detections — written by inferenceExecutor, read by streamExecutor
     @Volatile private var lastKnownDets: Array<Detection> = emptyArray()
@@ -90,10 +91,16 @@ class CameraActivity : AppCompatActivity() {
 
         binding.fabSettings.setOnClickListener { showSettingsSheet() }
         binding.btnFlip.setOnClickListener { if (!streamMode) flipCamera() }
+        binding.btnManual.setOnClickListener {
+            val cam = camera
+            if (cam == null) toast("Камера ещё не готова")
+            else CameraControlsSheet(cam).show(supportFragmentManager, "camControls")
+        }
         // Hide camera-only controls when using stream input
         if (streamMode) {
             binding.btnFlip.visibility = View.GONE
             binding.btnResolution.visibility = View.GONE
+            binding.btnManual.visibility = View.GONE
             binding.previewView.visibility = View.GONE
             binding.streamView.visibility = View.VISIBLE
         }
@@ -241,7 +248,7 @@ class CameraActivity : AppCompatActivity() {
             }
 
             runCatching { provider.unbindAll() }
-            provider.bindToLifecycle(
+            camera = provider.bindToLifecycle(
                 this, CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                 preview, analysis
             )
@@ -405,16 +412,26 @@ class CameraActivity : AppCompatActivity() {
 
     private fun saveVideoToGallery(file: File) {
         try {
-            val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/YoloDetector")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                // API 29+: write into the OS-standard Downloads collection via MediaStore.
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+                    put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/YoloDetector")
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                    file.delete(); toast("Видео сохранено в Downloads/YoloDetector")
+                } else toast("Ошибка сохранения видео")
+            } else {
+                // Legacy: copy straight into the public Downloads directory.
+                val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val dir = File(dl, "YoloDetector").also { it.mkdirs() }
+                val dest = File(dir, file.name)
+                file.inputStream().use { inp -> dest.outputStream().use { inp.copyTo(it) } }
+                file.delete(); toast("Видео сохранено: ${dest.absolutePath}")
             }
-            val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            if (uri != null) {
-                contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-                file.delete(); toast("Видео сохранено")
-            } else toast("Ошибка сохранения видео")
         } catch (e: Exception) { toast("Видео: ${file.absolutePath}") }
     }
 

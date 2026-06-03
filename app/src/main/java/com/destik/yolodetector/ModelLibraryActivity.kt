@@ -209,15 +209,27 @@ class ModelLibraryActivity : AppCompatActivity() {
 
     private fun returnModel(entry: ModelEntry) {
         val (paramFile, binFile) = localFiles(entry)
+        // Use ~half the cores (min 2, max 6): on big.LITTLE single-board boards and
+        // phones, oversubscribing past the big cluster spills onto the slow LITTLE
+        // cores and actually drops inference FPS, so we cap rather than max out.
+        val cores = Runtime.getRuntime().availableProcessors()
+        val threads = (cores / 2).coerceIn(2, 6)
         val config = ModelConfig(
-            paramPath   = paramFile.absolutePath,
-            binPath     = binFile.absolutePath,
-            yoloVersion = entry.yoloVersion,
-            numClasses  = entry.numClasses,
-            inputSize   = entry.inputSize,
-            outputName0 = entry.outputName0,
-            outputName1 = entry.outputName1,
-            outputName2 = entry.outputName2
+            paramPath     = paramFile.absolutePath,
+            binPath       = binFile.absolutePath,
+            yoloVersion   = entry.yoloVersion,
+            numClasses    = entry.numClasses,
+            inputSize     = entry.inputSize,
+            outputName0   = entry.outputName0,
+            outputName1   = entry.outputName1,
+            outputName2   = entry.outputName2,
+            // Tuned defaults so the model works well immediately — no manual setup.
+            confThreshold = entry.confThreshold,
+            nmsThreshold  = entry.nmsThreshold,
+            numThreads    = threads,
+            classNames    = CocoLabels.NAMES,
+            engine        = "ncnn",
+            useGPU        = false
         )
         setResult(Activity.RESULT_OK, Intent().putExtra("config", Gson().toJson(config)))
         finish()

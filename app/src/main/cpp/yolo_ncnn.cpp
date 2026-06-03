@@ -170,14 +170,96 @@ static void parse_nms_free(const ncnn::Mat& out, std::vector<Object>& objects, f
     g_diag=buf;
 }
 
-// ── Anchor-free parser (YOLOv8 / v9 / v11): [4+nc, N] ────────────────────────
-static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, float ct, float nt){
-    // Attributes (4+nc) live on the smaller axis; anchors on the larger one.
-    // Derive nc from the shape so a wrong numClasses can't swap the axes.
+// ── Raw DFL head parser (YOLOv8 / v9 / v11 ncnn pnnx export): [64+nc, N] ──────
+// The nihui/ncnn-assets v8/v11 models output the *undecoded* detect head:
+// 64 box channels (4 sides × 16 DFL bins) + nc class logits, across the canonical
+// 3-level anchor grid (strides 8/16/32). We must DFL-decode the box distances and
+// sigmoid the class logits ourselves — the old parser treated all 144 channels as
+// "4 box + 140 classes" → garbage coords → every box clipped away ("no boxes").
+static void parse_dfl(const ncnn::Mat& out, std::vector<Object>& objects, float ct, float nt, int nc){
+    const bool t  = (out.h < out.w);
+    const int  nb = t ? out.w : out.h;   // anchors
+    const int  reg = 64;                 // 4 sides × 16 DFL bins
+
+    // Build the canonical 3-level grid (strides 8/16/32) for the input size.
+    // If it doesn't match the anchor count, derive the size from nb so a custom
+    // input size still decodes: nb = (1 + 1/4 + 1/16)·(isz/8)² = 21·isz²/1024.
+    const int strides[3] = {8, 16, 32};
+    int isz = g_input_size;
+    int total = 0; for(int s : strides){ int g = isz / s; total += g * g; }
+    if(total != nb){
+        int d = (int)lroundf(sqrtf((float)nb * 1024.f / 21.f));
+        d = (d / 32) * 32; if(d < 32) d = 32;
+        isz = d; total = 0; for(int s : strides){ int g = isz / s; total += g * g; }
+    }
+    const float norm = (float)isz;
+
+    // Class scores are raw logits → compare in logit space, sigmoid only winners.
+    float ctc = ct; if(ctc < 1e-4f) ctc = 1e-4f; if(ctc > 0.9999f) ctc = 0.9999f;
+    const float cmp = logf(ctc / (1.f - ctc));
+
+    float max_conf = 0.f;
+    int anc = 0;
+    for(int lvl = 0; lvl < 3 && anc < nb; lvl++){
+        const int st = strides[lvl];
+        const int g  = isz / st;
+        for(int gy = 0; gy < g && anc < nb; gy++)
+        for(int gx = 0; gx < g && anc < nb; gx++){
+            const int i = anc++;
+            // Grab the contiguous attribute row once per anchor for the common
+            // (non-transposed) layout — avoids a per-element row()/bounds-check in
+            // the hottest loop, which matters on weak single-board-computer CPUs.
+            const float* row = (!t && i < out.h) ? out.row(i) : nullptr;
+            auto AT = [&](int attr) -> float { return row ? row[attr] : safe_get(out, attr, i); };
+            // ── class gate (cheap; runs for every anchor) ──
+            float best = cmp; int bc = -1;
+            for(int c = 0; c < nc; c++){
+                float s = AT(reg + c);
+                if(s > best){ best = s; bc = c; }
+            }
+            if(bc < 0) continue;                       // nothing over threshold here
+            // ── DFL decode (expensive; only for survivors) ──
+            float d[4];
+            for(int side = 0; side < 4; side++){
+                float mx = -1e30f;
+                for(int b = 0; b < 16; b++){ float v = AT(side*16 + b); if(v > mx) mx = v; }
+                float sum = 0.f, acc = 0.f;
+                for(int b = 0; b < 16; b++){
+                    float e = expf(AT(side*16 + b) - mx); sum += e; acc += e * b;
+                }
+                d[side] = sum > 0.f ? acc / sum : 0.f;
+            }
+            float cx = gx + 0.5f, cy = gy + 0.5f;
+            float x1 = (cx - d[0]) * st, y1 = (cy - d[1]) * st;
+            float x2 = (cx + d[2]) * st, y2 = (cy + d[3]) * st;
+            if(is_bad(x1)||is_bad(y1)||is_bad(x2)||is_bad(y2)||x2<=x1||y2<=y1) continue;
+            float conf = sigmoid_f(best);
+            if(conf > max_conf) max_conf = conf;
+            Object o;
+            o.x = x1 / norm; o.y = y1 / norm; o.w = (x2 - x1) / norm; o.h = (y2 - y1) / norm;
+            o.label = bc; o.prob = conf;
+            objects.push_back(o);
+        }
+    }
+    nms(objects, nt);
+    char buf[256];
+    snprintf(buf, sizeof(buf), "v8-dfl|%dx%d|nc=%d|isz=%d|maxC:%.2f|dets:%d",
+             out.h, out.w, nc, isz, max_conf, (int)objects.size());
+    g_diag = buf;
+}
+
+// ── Anchor-free parser (already-decoded boxes): [4(+1)+nc, N] ─────────────────
+// Handles models whose export *already* decoded the boxes to pixel xywh, with an
+// optional objectness channel (YOLOv6-style 4+1+nc). `nc`/`has_obj` come from the
+// dispatcher (driven by the configured class count); negative nc means "infer".
+static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, float ct, float nt,
+                         int nc_in = -1, bool has_obj = false){
+    // Attributes live on the smaller axis; anchors on the larger one.
     bool t  = (out.h < out.w);
     int  nb = t ? out.w : out.h;   // anchors
-    int  na = t ? out.h : out.w;   // attributes = 4 + nc
-    int  nc = na - 4; if(nc < 1) nc = 1;
+    int  na = t ? out.h : out.w;   // attributes
+    int  off = has_obj ? 5 : 4;    // first class channel
+    int  nc = nc_in > 0 ? nc_in : (na - off); if(nc < 1) nc = 1;
 
     // Detect whether box coords are in pixels (0..input_size) or already
     // normalized (0..1). Scan the width attribute across anchors: any value > 2
@@ -198,7 +280,7 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
     int sample = nb < 256 ? nb : 256;
     for(int i=0;i<sample && !logits;i++)
         for(int c=0;c<nc;c++){
-            float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
+            float s=t?safe_get(out,off+c,i):safe_get(out,i,off+c);
             if(!is_bad(s)&&(s>1.f||s<0.f)){ logits=true; break; }
         }
     // Compare in logit space to avoid a sigmoid (expf) per score across all
@@ -210,12 +292,21 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
     for(int i=0;i<nb;i++){
         float ms=cmp; int mc=-1;
         for(int c=0;c<nc;c++){
-            float s=t?safe_get(out,4+c,i):safe_get(out,i,4+c);
+            float s=t?safe_get(out,off+c,i):safe_get(out,i,off+c);
             if(is_bad(s)) continue;
             if(s>max_raw) max_raw=s;
             if(s>ms){ ms=s; mc=c; }
         }
         if(mc<0) continue;
+        float prob = logits ? sigmoid_f(ms) : ms;
+        if(has_obj){
+            // Objectness scales every class equally, so it doesn't change the argmax;
+            // apply it only to the kept winner and re-threshold in probability space.
+            float obj=t?safe_get(out,4,i):safe_get(out,i,4);
+            if(is_bad(obj)) continue;
+            prob *= (logits ? sigmoid_f(obj) : obj);
+            if(prob < ct) continue;
+        }
         float cx=t?safe_get(out,0,i):safe_get(out,i,0);
         float cy=t?safe_get(out,1,i):safe_get(out,i,1);
         float bw=t?safe_get(out,2,i):safe_get(out,i,2);
@@ -224,14 +315,14 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
         Object o;
         o.x=(cx-bw*.5f)*cs; o.y=(cy-bh*.5f)*cs;
         o.w=bw*cs; o.h=bh*cs; o.label=mc;
-        o.prob = logits ? sigmoid_f(ms) : ms;
+        o.prob = prob;
         objects.push_back(o);
     }
     nms(objects,nt);
     float max_conf = logits ? sigmoid_f(max_raw) : max_raw;
     char buf[256];
-    snprintf(buf,sizeof(buf),"v8|%dx%d|nc=%d|px:%d|sig:%d|maxC:%.2f|dets:%d",
-             out.h,out.w,nc,pixel,logits,max_conf,(int)objects.size());
+    snprintf(buf,sizeof(buf),"v8-dec|%dx%d|nc=%d|obj:%d|px:%d|sig:%d|maxC:%.2f|dets:%d",
+             out.h,out.w,nc,(int)has_obj,pixel,logits,max_conf,(int)objects.size());
     g_diag=buf;
 }
 
@@ -254,8 +345,22 @@ static void detect_modern(const ncnn::Mat& in, std::vector<Object>& objects, flo
     int amin=std::min(out.w,out.h), amax=std::max(out.w,out.h);
     if(amin<6){ char b[64]; snprintf(b,sizeof(b),"bad shape %dx%d",out.h,out.w); g_diag=b; return; }
 
-    if(amin==6 && amax<=2000) parse_nms_free(out,objects,ct);
-    else                      parse_anchor(out,objects,ct,nt);
+    // amin = attributes per anchor, amax = anchor count. Pick the parser from how
+    // the attribute count relates to the configured class count:
+    //   nc+6/nc... small  → NMS-free [N,6]   (YOLOv10 end-to-end)
+    //   nc+64             → raw DFL head      (YOLOv8 / v9 / v11 ncnn export)  ← fixes "no boxes"
+    //   nc+5              → decoded + objectness (YOLOv6-style)
+    //   nc+4              → decoded anchor-free
+    // Falls back to structure when the class count is mis-set.
+    const int na = amin;
+    const int nc = g_num_classes;
+    if(amin==6 && amax<=2000)        { parse_nms_free(out,objects,ct); return; }
+    if(nc>0 && na==nc+64)            { parse_dfl   (out,objects,ct,nt,nc);           return; }
+    if(nc>0 && na==nc+5)             { parse_anchor(out,objects,ct,nt,nc,true);      return; }
+    if(nc>0 && na==nc+4)             { parse_anchor(out,objects,ct,nt,nc,false);     return; }
+    // class count unknown / mismatched: infer from the attribute count.
+    if(na>=65)                       { parse_dfl   (out,objects,ct,nt,na-64);        return; }
+    parse_anchor(out,objects,ct,nt,na-4,false);
 }
 
 // ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
@@ -370,6 +475,20 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         if(!present){
             g_out0=pi.output_names.back();
             LOGD("auto output blob → %s",g_out0.c_str());
+        }
+    } else if(g_yolo_version<8 && !pi.output_names.empty()){
+        // Anchor-based v5/v6/v7 have up to 3 outputs (strides 8/16/32). Catalog/UI
+        // defaults like "output"/"output1"/"output2" often don't match the real
+        // blob names (e.g. nihui yolov5s uses out0/out1/out2). Remap by file order
+        // — otherwise every extract() fails and no boxes are ever produced.
+        bool present=false;
+        for(const auto& n:pi.output_names) if(n==g_out0){ present=true; break; }
+        if(!present){
+            const auto& on=pi.output_names;
+            if(on.size()>0) g_out0=on[0];
+            if(on.size()>1) g_out1=on[1];
+            if(on.size()>2) g_out2=on[2];
+            LOGD("auto v5 output blobs → %s %s %s",g_out0.c_str(),g_out1.c_str(),g_out2.c_str());
         }
     }
     g_initialized=true;

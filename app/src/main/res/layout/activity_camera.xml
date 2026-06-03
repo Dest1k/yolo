@@ -138,6 +138,16 @@
         android:gravity="start">
 
         <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnManual"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:src="@android:drawable/ic_menu_manage"
+            app:backgroundTint="@color/card_bg"
+            app:tint="@color/text_primary"
+            app:fabSize="mini" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
             android:id="@+id/btnSmartRecord"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
