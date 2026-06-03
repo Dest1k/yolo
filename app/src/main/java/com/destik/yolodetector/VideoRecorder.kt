@@ -12,8 +12,12 @@ import java.nio.ByteBuffer
 class VideoRecorder(
     val width: Int,
     val height: Int,
-    private val outputFile: File,
-    private val frameRate: Int = 15
+    private val newFile: () -> File,
+    private val frameRate: Int = 15,
+    // Invoked when SMART mode auto-stops a segment, so the caller can export the
+    // finished clip (e.g. to Downloads). Without this the file was finalised in a
+    // private dir and silently lost — smart recordings never reached the gallery.
+    private val onAutoStop: ((File?) -> Unit)? = null
 ) {
     enum class Mode { ALWAYS, SMART }
 
@@ -25,6 +29,9 @@ class VideoRecorder(
     private var videoTrack = -1
     private var frameCount = 0L
     private var muxerStarted = false
+    // A fresh output file is taken from newFile() on every start(), so each SMART
+    // segment gets its own timestamped clip instead of overwriting the previous.
+    private var outputFile: File? = null
 
     var recording = false; private set
     private var noDetectionFrames = 0
@@ -32,7 +39,8 @@ class VideoRecorder(
 
     fun start() {
         if (recording) return
-        outputFile.parentFile?.mkdirs()
+        val out = newFile().also { outputFile = it }
+        out.parentFile?.mkdirs()
         try {
             // Ensure even dimensions (AVC requirement)
             val w = width and 1.inv()
@@ -47,9 +55,9 @@ class VideoRecorder(
                 it.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 it.start()
             }
-            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             frameCount = 0L; muxerStarted = false; recording = true; noDetectionFrames = 0
-            Log.d(TAG, "started → ${outputFile.name}")
+            Log.d(TAG, "started → ${out.name}")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e); releaseInternal()
         }
@@ -61,7 +69,7 @@ class VideoRecorder(
         return try {
             drain(eos = true)
             muxer?.stop()
-            outputFile.takeIf { it.exists() && it.length() > 1024 }
+            outputFile?.takeIf { it.exists() && it.length() > 1024 }
         } catch (e: Exception) {
             Log.e(TAG, "stop error", e); null
         } finally {
@@ -78,7 +86,11 @@ class VideoRecorder(
                     if (!recording) start()
                 } else {
                     if (!recording) return false
-                    if (++noDetectionFrames > SMART_STOP_FRAMES) { stop(); return false }
+                    if (++noDetectionFrames > SMART_STOP_FRAMES) {
+                        val finished = stop()
+                        onAutoStop?.invoke(finished)
+                        return false
+                    }
                 }
             }
             Mode.ALWAYS -> if (!recording) return false

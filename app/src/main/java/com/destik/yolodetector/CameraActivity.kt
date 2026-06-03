@@ -378,11 +378,16 @@ class CameraActivity : AppCompatActivity() {
         } else {
             val w = (latestComposed?.width ?: 720).let { if (it % 2 == 0) it else it - 1 }
             val h = (latestComposed?.height ?: 1280).let { if (it % 2 == 0) it else it - 1 }
-            val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
-            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            recorder = VideoRecorder(w, h, File(dir, "YOLO_$ts.mp4")).also { it.start() }
+            recorder = VideoRecorder(w, h, newFile = { newRecordingFile() }).also { it.start() }
             updateRecordingUI()
         }
+    }
+
+    /** A fresh timestamped clip in the app's private movies dir (then exported to Downloads). */
+    private fun newRecordingFile(): File {
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return File(dir, "YOLO_$ts.mp4")
     }
 
     private fun toggleSmartMode() {
@@ -396,9 +401,13 @@ class CameraActivity : AppCompatActivity() {
         recorder?.let { return it }
         val w = (latestComposed?.width ?: 720).let { if (it % 2 == 0) it else it - 1 }
         val h = (latestComposed?.height ?: 1280).let { if (it % 2 == 0) it else it - 1 }
-        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        return VideoRecorder(w, h, File(dir, "YOLO_$ts.mp4")).also { recorder = it }
+        // Each detection segment gets its own file (newFile), and when smart mode
+        // auto-stops a segment we export the finished clip to Downloads.
+        return VideoRecorder(
+            w, h,
+            newFile = { newRecordingFile() },
+            onAutoStop = { file -> if (file != null) saveVideoToGallery(file) }
+        ).also { recorder = it }
     }
 
     private fun updateRecordingUI() {
