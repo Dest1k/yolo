@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <signal.h>
+#include <setjmp.h>
 
 #include "net.h"
 
@@ -28,8 +29,15 @@ struct Object { float x,y,w,h; int label; float prob; };
 // models like YOLOv11.
 static const char* volatile g_stage = "idle";
 static struct sigaction g_old_sa[64];
+// When a guarded region (model load / inference) is active, a fatal signal is
+// recovered via siglongjmp instead of killing the process — so an incompatible
+// model (e.g. the library YOLOv11 that null-derefs inside ncnn's loader) fails
+// gracefully instead of crashing the whole app.
+static sigjmp_buf       g_jmp;
+static volatile sig_atomic_t g_guarded = 0;
 static void crash_handler(int sig, siginfo_t* si, void* uc){
     LOGE("NATIVE CRASH: signal=%d stage=%s", sig, g_stage ? g_stage : "?");
+    if(g_guarded){ g_guarded = 0; siglongjmp(g_jmp, sig); }   // recover
     if(sig>=0 && sig<64 && g_old_sa[sig].sa_sigaction)
         g_old_sa[sig].sa_sigaction(sig, si, uc);   // chain → system tombstone/backtrace
     else { signal(sig, SIG_DFL); raise(sig); }
@@ -41,7 +49,7 @@ static void install_crash_handler(){
     for(int s : sigs) sigaction(s, &sa, &g_old_sa[s]);
 }
 
-static ncnn::Net  g_net;
+static ncnn::Net* g_net = new ncnn::Net();
 static bool       g_initialized  = false;
 static int        g_num_classes  = 80;
 static int        g_input_size   = 640;
@@ -232,7 +240,7 @@ static void parse_anchor(const ncnn::Mat& out, std::vector<Object>& objects, flo
 // model has 6 attributes with a small detection count, while an anchor-free model
 // has 4+nc attributes across thousands of anchors.
 static void detect_modern(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
-    ncnn::Extractor ex=g_net.create_extractor();
+    ncnn::Extractor ex=g_net->create_extractor();
     ex.input(g_input_name.c_str(),in);
     ncnn::Mat raw;
     if(ex.extract(g_out0.c_str(),raw)!=0){
@@ -282,7 +290,7 @@ static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<
     }
 }
 static void detect_v5(const ncnn::Mat& in, std::vector<Object>& o, float ct, float nt){
-    ncnn::Extractor ex=g_net.create_extractor();
+    ncnn::Extractor ex=g_net->create_extractor();
     ex.input(g_input_name.c_str(),in);
     const char* n[]={g_out0.c_str(),g_out1.c_str(),g_out2.c_str()};
     const int st[]={8,16,32};
@@ -300,7 +308,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         JNIEnv* env, jobject,
         jstring pp, jstring bp, jint ver, jint isz, jint nc, jboolean gpu,
         jstring o0, jstring o1, jstring o2){
-    if(g_initialized){ g_net.clear(); g_initialized=false; }
+    if(g_initialized){ g_net->clear(); g_initialized=false; }
     g_yolo_version=(int)ver; g_input_size=(int)isz; g_num_classes=(int)nc;
     auto gc=[&](jstring s)->std::string{
         const char* c=env->GetStringUTFChars(s,0); std::string r(c);
@@ -316,22 +324,40 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
 #if NCNN_VULKAN
     use_gpu=((bool)gpu && ncnn::get_gpu_count()>0);
 #endif
-    g_net.opt.use_vulkan_compute =use_gpu;
+    g_net->opt.use_vulkan_compute =use_gpu;
     // fp16 on CPU: storage halves memory bandwidth, arithmetic ~doubles conv
     // throughput on ARMv8.2+/ARMv9 (Oryon / Snapdragon). ncnn auto-falls back to
     // fp32 on CPUs without FEAT_FP16, so it's a free win where supported.
-    g_net.opt.use_fp16_packed    =true;
-    g_net.opt.use_fp16_storage   =true;
-    g_net.opt.use_fp16_arithmetic=true;
-    g_net.opt.use_packing_layout =true;
+    g_net->opt.use_fp16_packed    =true;
+    g_net->opt.use_fp16_storage   =true;
+    g_net->opt.use_fp16_arithmetic=true;
+    g_net->opt.use_packing_layout =true;
+    // Run INT8-quantized models (ncnn2int8) natively — uses Oryon i8mm/dotprod
+    // for another ~1.5-2x over fp16 on CPU. Harmless for fp32 models.
+    g_net->opt.use_int8_inference =true;
 
     static bool s_handler=false;
     if(!s_handler){ install_crash_handler(); s_handler=true; }
 
+    // Guard the loader: some model files null-deref inside ncnn (e.g. the library
+    // YOLOv11). If that happens, the signal handler siglongjmp's back here; we
+    // abandon the half-built (possibly corrupt) net and report failure instead of
+    // taking the whole app down.
+    if(sigsetjmp(g_jmp, 1) != 0){
+        g_guarded = 0;
+        g_net = new ncnn::Net();            // leak the corrupt one; fresh net for next time
+        g_initialized = false;
+        g_diag = std::string("load CRASHED @ ") + (g_stage ? g_stage : "?");
+        LOGE("recovered from native crash during model load");
+        g_stage = "idle";
+        return JNI_FALSE;
+    }
+    g_guarded = 1;
     g_stage="init:load_param";
-    if(g_net.load_param(param.c_str())!=0){ LOGE("load_param failed"); g_stage="idle"; return JNI_FALSE; }
+    if(g_net->load_param(param.c_str())!=0){ g_guarded=0; LOGE("load_param failed"); g_stage="idle"; return JNI_FALSE; }
     g_stage="init:load_model";
-    if(g_net.load_model(bin.c_str())  !=0){ LOGE("load_model failed");  g_stage="idle"; return JNI_FALSE; }
+    if(g_net->load_model(bin.c_str())  !=0){ g_guarded=0; LOGE("load_model failed");  g_stage="idle"; return JNI_FALSE; }
+    g_guarded = 0;
     g_stage="init:parse";
     ParamInfo pi=parse_param(g_param_path);
     g_input_name=pi.input_name;
@@ -418,7 +444,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
     const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
-    g_net.opt.num_threads=(int)nth;
+    g_net->opt.num_threads=(int)nth;
 
     std::vector<Object> objs;
     g_stage="detect:extract";
@@ -453,7 +479,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
 JNIEXPORT void JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeRelease(JNIEnv*, jobject){
-    if(g_initialized){ g_net.clear(); g_initialized=false; }
+    if(g_initialized){ g_net->clear(); g_initialized=false; }
 }
 
 } // extern "C"
