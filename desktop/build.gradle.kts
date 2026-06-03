@@ -28,14 +28,17 @@ val bytedecoPlatform: String = when {
     isMac                -> "macosx-x86_64"
     else                 -> "linux-x86_64"
 }
-// DJL PyTorch native classifier (CPU). DJL ships linux-aarch64 for ARM boards.
-val djlPlatform: String = when {
-    isLinux && isArm64   -> "linux-aarch64"
-    isLinux              -> "linux-x86_64"
-    isWindows            -> "win-x86_64"
-    isMac && isArm64     -> "osx-aarch64"
-    isMac                -> "osx-x86_64"
-    else                 -> "linux-x86_64"
+// DJL PyTorch CPU native dependency for the host platform. NOTE: on aarch64 Linux
+// DJL ships PyTorch only under the `-precxx11` module (the plain pytorch-native-cpu
+// has no linux-aarch64 classifier), so single-board boards need that artifact —
+// using the wrong one fails dependency resolution before the build even starts.
+val djlTorchDep: String = when {
+    isLinux && isArm64 -> "ai.djl.pytorch:pytorch-native-cpu-precxx11:2.1.1:linux-aarch64"
+    isLinux            -> "ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-x86_64"
+    isWindows          -> "ai.djl.pytorch:pytorch-native-cpu:2.1.1:win-x86_64"
+    isMac && isArm64   -> "ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-aarch64"
+    isMac              -> "ai.djl.pytorch:pytorch-native-cpu:2.1.1:osx-x86_64"
+    else               -> "ai.djl.pytorch:pytorch-native-cpu:2.1.1:linux-x86_64"
 }
 // CUDA only exists on x86_64 Linux/Windows — never on ARM single-board computers.
 val cudaSupported = (isLinux || isWindows) && !isArm64 && !isArm32
@@ -56,8 +59,8 @@ dependencies {
     implementation("ai.djl.pytorch:pytorch-engine:0.27.0")
 
     // CPU-only native for the host architecture (always-available fallback,
-    // including aarch64 boards).
-    runtimeOnly("ai.djl.pytorch:pytorch-native-cpu:2.1.1:$djlPlatform")
+    // including aarch64 boards — see djlTorchDep for the precxx11 caveat).
+    runtimeOnly(djlTorchDep)
     // CUDA 12.1 native (NVIDIA GPU — x86_64 only; skipped on ARM boards).
     if (cudaSupported) {
         val cudaPlatform = if (isWindows) "win-x86_64" else "linux-x86_64"
