@@ -14,7 +14,9 @@ import java.util.concurrent.CountDownLatch
  * model), so it slots cleanly into a systemd unit:
  *   YOLO_MODEL       path to model file (.onnx or .pt)        [required]
  *   YOLO_MODEL_TYPE  onnx | pt              (default: inferred from extension)
- *   YOLO_SOURCE      webcam index "0"/"1"… or http MJPEG URL  (default: "0")
+ *   YOLO_SOURCE      "0"/"1"… USB webcam, "rpicam" for a Pi CSI camera, or an
+ *                    http MJPEG URL                           (default: "0")
+ *   YOLO_CAM_W/H/FPS rpicam capture geometry           (default: 1280x720@15)
  *   YOLO_INPUT       model input size                         (default: 320)
  *   YOLO_CLASSES     number of classes                        (default: 80)
  *   YOLO_CONF        confidence threshold 0..1                (default: 0.25)

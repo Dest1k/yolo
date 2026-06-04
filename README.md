@@ -196,7 +196,8 @@ GUI и дисплей не нужны. После старта в консоль
 |---|---|---|
 | `YOLO_MODEL` | путь к модели `.onnx` или `.pt` | **обязательна** |
 | `YOLO_MODEL_TYPE` | `onnx` или `pt` | определяется по расширению |
-| `YOLO_SOURCE` | индекс USB-камеры (`0`, `1`, …) или `http://…` MJPEG URL | `0` |
+| `YOLO_SOURCE` | `0`/`1`… USB-камера, `rpicam` для CSI-камеры Raspberry Pi, или `http://…` MJPEG URL | `0` |
+| `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | геометрия захвата для `rpicam` | `1280` / `720` / `15` |
 | `YOLO_INPUT` | размер входа модели | `320` |
 | `YOLO_CLASSES` | число классов | `80` |
 | `YOLO_CONF` | порог уверенности `0..1` | `0.25` |
@@ -208,6 +209,13 @@ GUI и дисплей не нужны. После старта в консоль
 YOLO_MODEL=/home/pi/models/yolov10n.onnx YOLO_SOURCE=0 YOLO_INPUT=320 \
   ./gradlew :desktop:runHeadless
 ```
+
+**CSI-камера Raspberry Pi** (ленточный шлейф, модули на OV5647 / IMX219 и т.п.) не
+видна как `/dev/videoN`, поэтому индекс `0` для неё не работает. Поставь
+`YOLO_SOURCE=rpicam` — приложение возьмёт поток через `rpicam-vid`. Нужны
+`rpicam-apps` (`sudo apt install -y rpicam-apps`) и работающая камера
+(`rpicam-hello --list-cameras` должна её показать). На Pi 5 старым модулям нужен
+переходной шлейф 22-pin → 15-pin.
 
 ### Автозапуск при включении платы (systemd)
 

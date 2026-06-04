@@ -36,11 +36,76 @@ class VideoInput(
     }
 
     private fun loop() {
-        if (source.startsWith("http", ignoreCase = true)) {
-            runMjpegLoop()
-        } else {
-            runWebcamLoop()
+        when {
+            source.startsWith("http", ignoreCase = true) -> runMjpegLoop()
+            // CSI ribbon camera on a Raspberry Pi (libcamera stack): not a V4L2
+            // /dev/videoN device, so OpenCV can't open it by index. Stream it via
+            // rpicam-vid (MJPEG) and parse the JPEG frames from its stdout.
+            source.equals("rpicam", true) || source.equals("libcamera", true) ||
+                source.equals("csi", true) -> runRpicamLoop()
+            else -> runWebcamLoop()
         }
+    }
+
+    /** Raspberry Pi CSI camera via rpicam-vid / libcamera-vid → MJPEG on stdout. */
+    private fun runRpicamLoop() {
+        val w   = System.getenv("YOLO_CAM_W")?.toIntOrNull()   ?: 1280
+        val h   = System.getenv("YOLO_CAM_H")?.toIntOrNull()   ?: 720
+        val fps = System.getenv("YOLO_CAM_FPS")?.toIntOrNull() ?: 15
+        val args = listOf(
+            "-t", "0", "--codec", "mjpeg", "--nopreview",
+            "--width", "$w", "--height", "$h", "--framerate", "$fps", "-o", "-"
+        )
+        var proc: Process? = null
+        try {
+            proc = startFirstAvailable(listOf("rpicam-vid", "libcamera-vid"), args) ?: run {
+                onError("rpicam-vid / libcamera-vid not found — install with: sudo apt install -y rpicam-apps")
+                return
+            }
+            // Drain stderr so the process never blocks on a full error pipe.
+            val errStream = proc.errorStream
+            Thread { runCatching { errStream.bufferedReader().forEachLine { } } }
+                .apply { isDaemon = true; start() }
+
+            val inp = proc.inputStream.buffered(1 shl 16)
+            val frame = ByteArrayOutputStream(1 shl 18)
+            var prev = -1
+            var inFrame = false
+            while (running.get() && !Thread.currentThread().isInterrupted) {
+                val b = inp.read()
+                if (b == -1) break
+                if (!inFrame) {
+                    if (prev == 0xFF && b == 0xD8) {        // JPEG start-of-image
+                        inFrame = true; frame.reset(); frame.write(0xFF); frame.write(0xD8)
+                    }
+                } else {
+                    frame.write(b)
+                    if (prev == 0xFF && b == 0xD9) {        // JPEG end-of-image
+                        val img = javax.imageio.ImageIO.read(frame.toByteArray().inputStream())
+                        if (img != null) onFrame(ensureRgb(img))
+                        inFrame = false
+                    }
+                }
+                prev = b
+            }
+        } catch (e: InterruptedException) {
+            // normal stop
+        } catch (e: Exception) {
+            if (running.get()) onError("CSI camera error: ${e.message}")
+        } finally {
+            runCatching { proc?.destroy() }
+        }
+    }
+
+    /** Tries each binary name in turn; returns the first that starts, or null. */
+    private fun startFirstAvailable(bins: List<String>, args: List<String>): Process? {
+        for (bin in bins) {
+            val p = runCatching {
+                ProcessBuilder(listOf(bin) + args).redirectErrorStream(false).start()
+            }.getOrNull()
+            if (p != null) return p
+        }
+        return null
     }
 
     private fun runWebcamLoop() {
