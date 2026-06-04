@@ -80,6 +80,11 @@ dependencies {
     }
     runtimeOnly("org.bytedeco:opencv:4.9.0-1.5.10:$bytedecoPlatform")
     runtimeOnly("org.bytedeco:ffmpeg:6.1.1-1.5.10:$bytedecoPlatform")
+    // OpenCV's native loads OpenBLAS at runtime (jniopenblas_nolapack); its native
+    // is NOT pulled transitively by the classified opencv artifact, so add it
+    // explicitly for the host platform — otherwise the webcam grabber crashes with
+    // UnsatisfiedLinkError on boards/machines that don't have OpenBLAS preinstalled.
+    runtimeOnly("org.bytedeco:openblas:0.3.26-1.5.10:$bytedecoPlatform")
 
     implementation("com.google.code.gson:gson:2.10.1")
     // Provides Dispatchers.Main backed by Swing EDT (required for UI state mutations)
