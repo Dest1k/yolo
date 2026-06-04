@@ -19,5 +19,15 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "YoloDetector"
-include ':app'
+
+// The Android app module (:app) needs the Android SDK just to *configure*. On a
+// machine without it — e.g. a Raspberry Pi running only the desktop / headless
+// build — including :app makes every Gradle invocation fail with "SDK location
+// not found", even for :desktop tasks. So only include :app when an SDK is
+// actually present. CI runners ship the SDK preinstalled (ANDROID_HOME set), so
+// the Android build is unaffected.
+def androidHome = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+if ((androidHome != null && !androidHome.trim().isEmpty()) || file('local.properties').exists()) {
+    include ':app'
+}
 include ':desktop'
