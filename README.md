@@ -202,7 +202,8 @@ GUI и дисплей не нужны. После старта в консоль
 | `YOLO_MODEL` | путь к модели `.onnx` или `.pt` | **обязательна** |
 | `YOLO_MODEL_TYPE` | `onnx` или `pt` | определяется по расширению |
 | `YOLO_SOURCE` | `0`/`1`… USB-камера, `rpicam` для CSI-камеры Raspberry Pi, или `http://…` MJPEG URL | `0` |
-| `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | геометрия захвата для `rpicam` | `640` / `480` / `30` |
+| `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | разрешение и FPS захвата (для всех источников: USB и `rpicam`) | `1280` / `720` / `30` |
+| `YOLO_JPEG_Q` | качество MJPEG-потока `1..100` | `80` |
 | `YOLO_TRACK` | `on` / `off` — IoU-трекинг и удержание рамок | `on` |
 | `YOLO_INPUT` | размер входа модели | `320` |
 | `YOLO_CLASSES` | число классов | `80` |

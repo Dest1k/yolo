@@ -49,12 +49,7 @@ class VideoInput(
 
     /** Raspberry Pi CSI camera via rpicam-vid / libcamera-vid → MJPEG on stdout. */
     private fun runRpicamLoop() {
-        // Lighter defaults for single-board CPUs: lower resolution = less JPEG
-        // encode + network = lower latency; higher FPS keeps the stream smooth
-        // (detection is decoupled and runs as fast as it can regardless).
-        val w   = System.getenv("YOLO_CAM_W")?.toIntOrNull()   ?: 640
-        val h   = System.getenv("YOLO_CAM_H")?.toIntOrNull()   ?: 480
-        val fps = System.getenv("YOLO_CAM_FPS")?.toIntOrNull() ?: 30
+        val w = camW(); val h = camH(); val fps = camFps()
         val args = listOf(
             "-t", "0", "--codec", "mjpeg", "--nopreview",
             "--width", "$w", "--height", "$h", "--framerate", "$fps", "-o", "-"
@@ -111,9 +106,19 @@ class VideoInput(
         return null
     }
 
+    // Requested capture geometry — applies to every source type. Decoupled
+    // inference means a higher resolution costs only JPEG encode/bandwidth, not
+    // detection FPS, so a decent default is affordable.
+    private fun camW()   = System.getenv("YOLO_CAM_W")?.toIntOrNull()   ?: 1280
+    private fun camH()   = System.getenv("YOLO_CAM_H")?.toIntOrNull()   ?: 720
+    private fun camFps() = System.getenv("YOLO_CAM_FPS")?.toIntOrNull() ?: 30
+
     private fun runWebcamLoop() {
         val idx = source.toIntOrNull() ?: 0
         val grabber = OpenCVFrameGrabber(idx)
+        grabber.imageWidth  = camW()
+        grabber.imageHeight = camH()
+        grabber.frameRate   = camFps().toDouble()
         try {
             grabber.start()
             val converter = Java2DFrameConverter()

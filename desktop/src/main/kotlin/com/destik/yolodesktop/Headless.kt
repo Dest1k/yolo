@@ -21,7 +21,8 @@ import java.util.concurrent.atomic.AtomicReference
  *   YOLO_MODEL_TYPE  onnx | pt              (default: inferred from extension)
  *   YOLO_SOURCE      "0"/"1"… USB webcam, "rpicam" for a Pi CSI camera, or an
  *                    http MJPEG URL                           (default: "0")
- *   YOLO_CAM_W/H/FPS rpicam capture geometry            (default: 640x480@30)
+ *   YOLO_CAM_W/H/FPS capture geometry (all source types)  (default: 1280x720@30)
+ *   YOLO_JPEG_Q      MJPEG stream quality 1..100                    (default: 80)
  *   YOLO_TRACK       on | off  — IoU tracking / box persistence     (default: on)
  *   YOLO_INPUT       model input size                         (default: 320)
  *   YOLO_CLASSES     number of classes                        (default: 80)
@@ -69,6 +70,7 @@ fun main() {
     if (!isPt) println("  model input: ${onnx.modelInputW}x${onnx.modelInputH}")
 
     val trackOn = env("YOLO_TRACK")?.lowercase() != "off"
+    val jpegQ   = env("YOLO_JPEG_Q")?.toIntOrNull()?.coerceIn(1, 100) ?: 80
     val tracker = DetectionTracker()
     val mjpeg = MjpegServer(port)
     mjpeg.start()
@@ -100,7 +102,7 @@ fun main() {
                     println("  video frame: ${img.width}x${img.height}")
                 }
                 val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
-                mjpeg.pushFrame(Render.draw(img, latestDets.get(), hud))
+                mjpeg.pushFrame(Render.draw(img, latestDets.get(), hud), jpegQ)
                 streamMeter.tick()?.let { streamFps.set(it) }
 
                 // Kick inference on the latest frame if the detector is free.
