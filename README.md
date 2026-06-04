@@ -269,6 +269,15 @@ YOLO_MODEL=/home/pi/models/yolov10n.onnx YOLO_SOURCE=0 YOLO_INPUT=320 \
 > Gradle кеширует сборку, последующие запуски быстрые. Поток вещается на CPU, так
 > что на лёгкой модели (yolov10n, вход 320) жди несколько кадров в секунду.
 
+### Orange Pi 5 / RK3588 (NPU, RKNN)
+
+На платах Rockchip с NPU (Orange Pi 5 и др.) CPU-инференс — не лучший выбор: есть
+NPU на ~6 TOPS. Для него в репозитории лежит **Python-сайдкар** на NPU
+(`tools/rknn-sidecar/`): он гоняет `.rknn`-модель на NPU и раздаёт такой же
+аннотированный MJPEG-поток (с FPS-счётчиком и трекингом), как JVM-версия. RKNN
+управляется из Python, поскольку у его рантайма нет Java-биндинга. Конвертация
+модели ONNX → `.rknn` и запуск описаны в [`tools/rknn-sidecar/README.md`](tools/rknn-sidecar/README.md).
+
 ---
 
 ## GitHub Actions (CI)
