@@ -26,6 +26,12 @@
 ### Ручной режим камеры
 Кнопка ручного управления (FAB слева внизу) открывает панель со всеми инструментами, которые поддерживает выбранная камера: зум, яркость (EV), ручная экспозиция (ISO + выдержка) и ручной фокус. Панель строится динамически — недоступные на конкретном сенсоре контролы просто не показываются.
 
+### Headless-режим для одноплатников (Desktop)
+На Raspberry Pi и других ARM-платах можно запускать без GUI и монитора, прямо по
+SSH: приложение крутит детекцию и постоянно вещает MJPEG-поток в локальную сеть.
+Настраивается переменными окружения, ставится в автозапуск через systemd. См.
+раздел [«Одноплатник (Raspberry Pi)»](#одноплатник-raspberry-pi--headless-режим).
+
 ### GPU-ускорение на Desktop
 Десктопное приложение перебирает провайдеры выполнения по порядку при запуске:
 1. **CUDA** — NVIDIA на Linux / Windows
@@ -51,6 +57,7 @@
 | ONNX Runtime | ✓ | ✓ |
 | PyTorch TorchScript (`.pt`) | — | ✓ |
 | GPU: CUDA / DirectML | — | ✓ |
+| Headless-режим (SSH, без GUI) + автозапуск | — | ✓ |
 | Скриншот с боксами | ✓ | ✓ |
 | Видеозапись — Always | ✓ | — |
 | Видеозапись — Smart | ✓ | — |
@@ -164,6 +171,89 @@ from ultralytics import YOLO
 model = YOLO("yolov10n.pt")
 model.export(format="onnx", imgsz=640, simplify=True)
 ```
+
+---
+
+## Одноплатник (Raspberry Pi) — headless-режим
+
+Для запуска на плате по SSH, без рабочего стола и монитора: нет окна, приложение
+просто крутит детекцию и **постоянно вещает аннотированный MJPEG-поток в локальную
+сеть**. Предназначено для автозапуска при включении платы.
+
+### Запуск
+```bash
+./gradlew :desktop:runHeadless
+```
+GUI и дисплей не нужны. После старта в консоль выводятся адреса потока вида
+`http://<IP-платы>:8080` — открой любой из них в браузере или VLC с другого
+устройства в той же сети. Инференс считается только пока кто-то смотрит поток
+(экономия CPU на слабой плате), сервер при этом всегда слушает порт.
+
+### Конфигурация (переменные окружения)
+Всё настраивается через переменные окружения — удобно для systemd:
+
+| Переменная | Назначение | По умолчанию |
+|---|---|---|
+| `YOLO_MODEL` | путь к модели `.onnx` или `.pt` | **обязательна** |
+| `YOLO_MODEL_TYPE` | `onnx` или `pt` | определяется по расширению |
+| `YOLO_SOURCE` | индекс USB-камеры (`0`, `1`, …) или `http://…` MJPEG URL | `0` |
+| `YOLO_INPUT` | размер входа модели | `320` |
+| `YOLO_CLASSES` | число классов | `80` |
+| `YOLO_CONF` | порог уверенности `0..1` | `0.25` |
+| `YOLO_PORT` | порт MJPEG-сервера | `8080` |
+| `YOLO_GPU` | `cpu` или `auto` | `cpu` |
+
+Пример вручную:
+```bash
+YOLO_MODEL=/home/pi/models/yolov10n.onnx YOLO_SOURCE=0 YOLO_INPUT=320 \
+  ./gradlew :desktop:runHeadless
+```
+
+### Автозапуск при включении платы (systemd)
+
+1. Создай файл сервиса `/etc/systemd/system/yolo-detector.service` (подставь свои
+   путь к проекту, модель и имя пользователя):
+
+   ```ini
+   [Unit]
+   Description=YOLO Detector (headless MJPEG broadcast)
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   User=pi
+   WorkingDirectory=/home/pi/yolo
+   Environment=YOLO_MODEL=/home/pi/models/yolov10n.onnx
+   Environment=YOLO_SOURCE=0
+   Environment=YOLO_INPUT=320
+   Environment=YOLO_PORT=8080
+   Environment=YOLO_GPU=cpu
+   ExecStart=/home/pi/yolo/gradlew :desktop:runHeadless --console=plain
+   Restart=on-failure
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+2. Включи и запусти сервис:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now yolo-detector
+   ```
+
+3. Полезные команды:
+   ```bash
+   systemctl status yolo-detector      # состояние
+   journalctl -u yolo-detector -f      # живой лог (адреса потока — здесь)
+   sudo systemctl restart yolo-detector
+   ```
+
+> Первый запуск дольше: Gradle собирает проект и тянет зависимости (нужен
+> интернет). Чтобы плата не собирала проект при каждом старте — это уже учтено:
+> Gradle кеширует сборку, последующие запуски быстрые. Поток вещается на CPU, так
+> что на лёгкой модели (yolov10n, вход 320) жди несколько кадров в секунду.
 
 ---
 

@@ -116,3 +116,17 @@ compose.desktop {
         }
     }
 }
+
+// ── Headless runner ─────────────────────────────────────────────────────────
+// For single-board computers (Raspberry Pi, etc.) driven over SSH with no
+// desktop: runs detection and broadcasts the annotated MJPEG stream on the LAN,
+// no GUI window. Configure via YOLO_* environment variables (see Headless.kt).
+//   ./gradlew :desktop:runHeadless
+tasks.register<JavaExec>("runHeadless") {
+    group = "application"
+    description = "Run the detector headless (MJPEG broadcast only, no GUI)"
+    dependsOn("classes")
+    mainClass.set("com.destik.yolodesktop.HeadlessKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Xmx2g", "-Djava.awt.headless=true")
+}
