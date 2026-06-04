@@ -31,10 +31,32 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/android/sdk/ndk/26.1.10909125
+          key: android-ndk-26.1.10909125
+
       - name: Install NDK and CMake
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          # Provision NDK r26b robustly: AGP otherwise auto-downloads it during
+          # configuration, and a corrupted download fails the whole build
+          # ("Archive is not a ZIP archive"). Retry + verify so a flaky Google
+          # mirror doesn't break CI; the cache above skips the download on reuse.
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+          for i in 1 2 3 4; do
+            if [ -f "$NDK_DIR/source.properties" ]; then
+              echo "NDK present (attempt $i)"; break
+            fi
+            echo "Installing NDK + CMake (attempt $i)…"
+            rm -rf "$NDK_DIR"
+            yes | sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" || true
+            [ -f "$NDK_DIR/source.properties" ] && { echo "NDK installed"; break; }
+            sleep $((i * 10))
+          done
+          test -f "$NDK_DIR/source.properties" || { echo "::error::NDK install failed after retries"; exit 1; }
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
 
       - name: Cache NCNN
         id: cache-ncnn
