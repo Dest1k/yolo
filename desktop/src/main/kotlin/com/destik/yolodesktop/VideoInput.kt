@@ -49,9 +49,12 @@ class VideoInput(
 
     /** Raspberry Pi CSI camera via rpicam-vid / libcamera-vid → MJPEG on stdout. */
     private fun runRpicamLoop() {
-        val w   = System.getenv("YOLO_CAM_W")?.toIntOrNull()   ?: 1280
-        val h   = System.getenv("YOLO_CAM_H")?.toIntOrNull()   ?: 720
-        val fps = System.getenv("YOLO_CAM_FPS")?.toIntOrNull() ?: 15
+        // Lighter defaults for single-board CPUs: lower resolution = less JPEG
+        // encode + network = lower latency; higher FPS keeps the stream smooth
+        // (detection is decoupled and runs as fast as it can regardless).
+        val w   = System.getenv("YOLO_CAM_W")?.toIntOrNull()   ?: 640
+        val h   = System.getenv("YOLO_CAM_H")?.toIntOrNull()   ?: 480
+        val fps = System.getenv("YOLO_CAM_FPS")?.toIntOrNull() ?: 30
         val args = listOf(
             "-t", "0", "--codec", "mjpeg", "--nopreview",
             "--width", "$w", "--height", "$h", "--framerate", "$fps", "-o", "-"

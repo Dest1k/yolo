@@ -26,8 +26,9 @@ object Render {
         java.awt.Color(200, 0, 200),  java.awt.Color(0, 200, 200)
     )
 
-    /** Returns a copy of [src] with detection boxes + labels drawn on it. */
-    fun draw(src: BufferedImage, dets: List<Detection>): BufferedImage {
+    /** Returns a copy of [src] with detection boxes + labels drawn on it.
+     *  Optional [hud] text is drawn in the bottom-left corner (e.g. an FPS meter). */
+    fun draw(src: BufferedImage, dets: List<Detection>, hud: String? = null): BufferedImage {
         val out = BufferedImage(src.width, src.height, BufferedImage.TYPE_INT_RGB)
         val g   = out.createGraphics()
         g.drawImage(src, 0, 0, null)
@@ -42,6 +43,18 @@ object Render {
             g.fillRect(d.x1.toInt(), d.y1.toInt() - th, tw + 4, th)
             g.color = java.awt.Color.BLACK
             g.drawString(label, d.x1.toInt() + 2, d.y1.toInt() - 2)
+        }
+        if (hud != null) {
+            g.font = g.font.deriveFont(java.awt.Font.BOLD, 16f)
+            val fm = g.fontMetrics
+            val tw = fm.stringWidth(hud)
+            val th = fm.height
+            val x = 6
+            val y = out.height - 6
+            g.color = java.awt.Color(0, 0, 0, 160)
+            g.fillRect(x - 4, y - th + 2, tw + 8, th + 2)
+            g.color = java.awt.Color(0, 230, 118)
+            g.drawString(hud, x, y - 4)
         }
         g.dispose()
         return out

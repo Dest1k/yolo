@@ -35,6 +35,7 @@ class AppState {
     val mjpegServer = MjpegServer(8080)
     private val onnxDetector = OnnxDetector()
     private val ptDetector   = PtDetector()
+    private val tracker      = DetectionTracker()
     var videoInput: VideoInput? = null
 
     val cocoLabels get() = Render.cocoLabels
@@ -63,12 +64,13 @@ class AppState {
         videoInput = VideoInput(
             source  = sourcePath,
             onFrame = { img ->
-                val dets = runCatching {
+                val raw = runCatching {
                     when (modelType) {
                         ModelType.ONNX -> onnxDetector.detect(img)
                         ModelType.PT   -> ptDetector.detect(img)
                     }
                 }.getOrDefault(emptyList())
+                val dets = tracker.update(raw, System.currentTimeMillis())
                 val composed = Render.draw(img, dets)
                 if (mjpegActive) mjpegServer.pushFrame(composed)
                 // Compose state must be mutated on the UI thread
@@ -84,6 +86,7 @@ class AppState {
 
     fun stop() {
         videoInput?.stop(); videoInput = null
+        tracker.reset()
         uiScope.launch { running = false; statusMessage = "Stopped" }
     }
 
