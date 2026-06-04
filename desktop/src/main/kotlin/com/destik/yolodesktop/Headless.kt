@@ -60,7 +60,9 @@ fun main() {
         kotlin.system.exitProcess(1)
     }
     println("  provider=$provider")
+    if (!isPt) println("  model input: ${onnx.modelInputW}x${onnx.modelInputH}")
 
+    var loggedFrame = false
     val mjpeg = MjpegServer(port)
     mjpeg.start()
     for (ip in lanAddresses()) println("  stream: http://$ip:$port")
@@ -74,6 +76,10 @@ fun main() {
             if (mjpeg.hasClients()) {
                 val dets = runCatching { if (isPt) pt.detect(img) else onnx.detect(img) }
                     .getOrDefault(emptyList())
+                if (!loggedFrame) {
+                    loggedFrame = true
+                    println("  video frame: ${img.width}x${img.height} | first-frame detections: ${dets.size}")
+                }
                 mjpeg.pushFrame(Render.draw(img, dets))
             }
         },

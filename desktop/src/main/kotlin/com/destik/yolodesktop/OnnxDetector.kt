@@ -30,6 +30,10 @@ class OnnxDetector {
     private var env: OrtEnvironment? = null
     private var session: OrtSession? = null
     private var inputSize = 640
+    // Actual model input dims (read from the graph; may be non-square). Fall back
+    // to the requested square size when the model declares a dynamic input.
+    private var inW = 640
+    private var inH = 640
     var confThreshold = 0.25f
     var numClasses = 80
     var nmsThreshold = 0.45f
@@ -37,6 +41,10 @@ class OnnxDetector {
     /** Human-readable description of the execution provider actually used. */
     var activeProvider = "CPU"
         private set
+
+    /** Model's input geometry actually used for letterboxing (after load). */
+    val modelInputW get() = inW
+    val modelInputH get() = inH
 
     // Reusable per-frame buffers.
     private var padded: BufferedImage? = null
@@ -58,32 +66,51 @@ class OnnxDetector {
         env = OrtEnvironment.getEnvironment()
         val opts = buildSessionOptions(gpuMode)
         session = env!!.createSession(modelPath, opts)
+
+        // Read the model's real input geometry so letterboxing matches the graph
+        // regardless of what YOLO_INPUT was set to. NCHW assumed: [batch,3,H,W].
+        inW = inputSize; inH = inputSize
+        runCatching {
+            val info = session!!.inputInfo.values.iterator().next().info
+            if (info is ai.onnxruntime.TensorInfo) {
+                val s = info.shape
+                if (s.size == 4) {
+                    val hh = s[2].toInt(); val ww = s[3].toInt()
+                    if (hh in 32..8192) inH = hh
+                    if (ww in 32..8192) inW = ww
+                }
+            }
+        }
     }
 
     fun detect(image: BufferedImage): List<Detection> {
         val sess = session ?: return emptyList()
         val env  = env     ?: return emptyList()
 
-        val sz = inputSize
+        val iw = inW
+        val ih = inH
         val w  = image.width
         val h  = image.height
-        val scale = min(sz.toFloat() / w, sz.toFloat() / h)
+        // Uniform-scale letterbox (preserves aspect ratio) into the model's own
+        // input rectangle, so detections map back to the exact source frame —
+        // works for any video resolution / aspect and any model input size.
+        val scale = min(iw.toFloat() / w, ih.toFloat() / h)
         val nw = (w * scale).roundToInt()
         val nh = (h * scale).roundToInt()
-        val padX = (sz - nw) / 2
-        val padY = (sz - nh) / 2
+        val padX = (iw - nw) / 2
+        val padY = (ih - nh) / 2
 
         // Reusable letterbox canvas (gray 114 padding, matches training).
-        val pad = padded?.takeIf { it.width == sz && it.height == sz }
-            ?: BufferedImage(sz, sz, BufferedImage.TYPE_INT_RGB).also { padded = it }
+        val pad = padded?.takeIf { it.width == iw && it.height == ih }
+            ?: BufferedImage(iw, ih, BufferedImage.TYPE_INT_RGB).also { padded = it }
         pad.createGraphics().apply {
-            color = Color(114, 114, 114); fillRect(0, 0, sz, sz)
+            color = Color(114, 114, 114); fillRect(0, 0, iw, ih)
             drawImage(image, padX, padY, nw, nh, null); dispose()
         }
 
-        val n  = sz * sz
+        val n  = iw * ih
         val px = pixels?.takeIf { it.size == n } ?: IntArray(n).also { pixels = it }
-        pad.getRGB(0, 0, sz, sz, px, 0, sz)
+        pad.getRGB(0, 0, iw, ih, px, 0, iw)
 
         val arr = floats?.takeIf { it.size == 3 * n } ?: FloatArray(3 * n).also { floats = it }
         for (i in 0 until n) {
@@ -94,7 +121,7 @@ class OnnxDetector {
         }
 
         val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr),
-            longArrayOf(1L, 3L, sz.toLong(), sz.toLong()))
+            longArrayOf(1L, 3L, ih.toLong(), iw.toLong()))
         return try {
             val results = sess.run(mapOf(sess.inputNames.iterator().next() to tensor))
             results.use {
@@ -105,9 +132,9 @@ class OnnxDetector {
                 val b = shape[2].toInt()
                 val buf = out.floatBuffer
                 if ((b == 6 && a in 7..4000) || (a == 6 && b in 7..4000))
-                    parseNmsFree(buf, a, b, sz, padX, padY, scale, w, h)
+                    parseNmsFree(buf, a, b, iw, ih, padX, padY, scale, w, h)
                 else
-                    parseAnchorFree(buf, a, b, sz, padX, padY, scale, w, h)
+                    parseAnchorFree(buf, a, b, iw, ih, padX, padY, scale, w, h)
             }
         } catch (e: Exception) {
             emptyList()
@@ -118,23 +145,24 @@ class OnnxDetector {
 
     private fun parseNmsFree(
         buf: FloatBuffer, a: Int, b: Int,
-        sz: Int, padX: Int, padY: Int, scale: Float, ow: Int, oh: Int
+        iw: Int, ih: Int, padX: Int, padY: Int, scale: Float, ow: Int, oh: Int
     ): List<Detection> {
         val tr = (a < b)
         val nd = if (tr) b else a
         fun g(attr: Int, i: Int) = if (tr) buf[attr * nd + i] else buf[i * 6 + attr]
 
-        // pixel vs normalised coords
-        var pixel = false
-        for (i in 0 until min(nd, 100)) { val x2 = g(2, i); if (!x2.isNaN() && x2 > 1.5f) { pixel = true; break } }
-        val sc = if (pixel) sz.toFloat() else 1f   // normalised → scale up to model px
+        // Auto-detect pixel vs normalised coords; normalised scale up per-axis to
+        // the model input rectangle (x by width, y by height).
+        val pixel = looksPixel(nd) { g(2, it) }
+        val scX = if (pixel) 1f else iw.toFloat()
+        val scY = if (pixel) 1f else ih.toFloat()
 
         val dets = ArrayList<Detection>()
         for (i in 0 until nd) {
             val score = g(4, i)
             if (score.isNaN() || score < confThreshold) continue
-            val x1 = g(0, i) * sc; val y1 = g(1, i) * sc
-            val x2 = g(2, i) * sc; val y2 = g(3, i) * sc
+            val x1 = g(0, i) * scX; val y1 = g(1, i) * scY
+            val x2 = g(2, i) * scX; val y2 = g(3, i) * scY
             if (x2 <= x1 || y2 <= y1) continue
             val cls = g(5, i).toInt().coerceIn(0, numClasses - 1)
             dets += Detection(
@@ -150,7 +178,7 @@ class OnnxDetector {
 
     private fun parseAnchorFree(
         buf: FloatBuffer, a: Int, b: Int,
-        sz: Int, padX: Int, padY: Int, scale: Float, ow: Int, oh: Int
+        iw: Int, ih: Int, padX: Int, padY: Int, scale: Float, ow: Int, oh: Int
     ): List<Detection> {
         val tr    = (a < b)
         val nd    = if (tr) b else a
@@ -158,12 +186,18 @@ class OnnxDetector {
         val nc    = (attrs - 4).coerceAtLeast(1)
         fun g(attr: Int, i: Int) = if (tr) buf[attr * nd + i] else buf[i * attrs + attr]
 
+        // Auto-detect pixel vs normalised box coords (some exports emit 0..1).
+        val pixel = looksPixel(nd) { g(2, it) }
+        val scX = if (pixel) 1f else iw.toFloat()
+        val scY = if (pixel) 1f else ih.toFloat()
+
         val raw = ArrayList<Detection>()
         for (i in 0 until nd) {
             var best = confThreshold; var cls = -1
             for (c in 0 until nc) { val s = g(4 + c, i); if (s > best) { best = s; cls = c } }
             if (cls < 0) continue
-            val cx = g(0, i); val cy = g(1, i); val bw = g(2, i); val bh = g(3, i)
+            val cx = g(0, i) * scX; val cy = g(1, i) * scY
+            val bw = g(2, i) * scX; val bh = g(3, i) * scY
             if (bw <= 0f || bh <= 0f || cx.isNaN()) continue
             val x1 = (cx - bw / 2 - padX) / scale
             val y1 = (cy - bh / 2 - padY) / scale
@@ -176,6 +210,12 @@ class OnnxDetector {
             )
         }
         return nms(raw)
+    }
+
+    /** Heuristic: coords are raw pixels if any sampled value exceeds ~1.5. */
+    private inline fun looksPixel(nd: Int, value: (Int) -> Float): Boolean {
+        for (i in 0 until min(nd, 100)) { val v = value(i); if (!v.isNaN() && v > 1.5f) return true }
+        return false
     }
 
     /** Greedy per-class NMS. */
