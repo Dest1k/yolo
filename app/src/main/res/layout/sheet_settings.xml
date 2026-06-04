@@ -76,6 +76,28 @@
             android:layout_height="wrap_content" android:thumbTint="@color/accent"/>
     </LinearLayout>
 
+    <!-- Stabilise boxes (anti-flicker) -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginBottom="8dp">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="Удерживать рамки (анти-мерцание)"
+            android:textColor="@color/text_primary"/>
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchStabilize" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:thumbTint="@color/accent"/>
+    </LinearLayout>
+
+    <!-- Upright inference (better portrait detection) -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginBottom="8dp">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:text="Поворот кадра до инференса (точнее в портрете, медленнее)"
+            android:textColor="@color/text_primary"/>
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchUpright" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:thumbTint="@color/accent"/>
+    </LinearLayout>
+
     <!-- Output name -->
     <com.google.android.material.textfield.TextInputEditText android:id="@+id/etOut0"
         android:layout_width="match_parent" android:layout_height="wrap_content"

@@ -19,5 +19,12 @@ data class ModelConfig(
     var classNames: List<String> = emptyList(),
     var onnxPath: String = "",
     var engine: String = "ncnn",   // "ncnn" or "onnx"
-    var streamUrl: String = ""     // if non-empty, use network stream instead of camera
+    var streamUrl: String = "",    // if non-empty, use network stream instead of camera
+    // Hold boxes through brief detection gaps (IoU tracking) so they stop
+    // flickering when the camera moves. On by default.
+    var stabilizeBoxes: Boolean = true,
+    // Rotate the frame upright before inference so portrait orientation detects
+    // as well as landscape. Costs one bitmap rotation per inference frame, so
+    // it's off by default.
+    var uprightInference: Boolean = false
 )

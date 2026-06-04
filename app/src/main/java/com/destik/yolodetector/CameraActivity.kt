@@ -43,6 +43,9 @@ class CameraActivity : AppCompatActivity() {
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var camera: Camera? = null
 
+    // Holds boxes through brief detection gaps so they don't flicker on movement
+    private val tracker = DetectionTracker()
+
     // Last known detections — written by inferenceExecutor, read by streamExecutor
     @Volatile private var lastKnownDets: Array<Detection> = emptyArray()
     @Volatile private var lastKnownDiag: String = ""
@@ -189,6 +192,7 @@ class CameraActivity : AppCompatActivity() {
     private fun flipCamera() {
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
             CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        tracker.reset()   // drop stale tracks from the previous lens
         startCamera()
     }
 
@@ -259,20 +263,31 @@ class CameraActivity : AppCompatActivity() {
         try {
             val t0 = System.currentTimeMillis()
 
+            // Upright inference: feed the model a rotated-upright frame so portrait
+            // orientation detects as well as landscape. Detections then come back
+            // already in display space, so the post-hoc coordinate rotation is skipped.
+            val upright = config.uprightInference && rotation != 0
+            val inferBmp = if (upright) rotateUpright(bmp, rotation) else bmp
+
             val rawDets: Array<Detection> = runCatching {
-                if (config.engine == "onnx") onnxDetector?.detect(bmp) ?: emptyArray()
-                else ncnnDetector.detect(bmp, config)
+                if (config.engine == "onnx") onnxDetector?.detect(inferBmp) ?: emptyArray()
+                else ncnnDetector.detect(inferBmp, config)
             }.getOrDefault(emptyArray())
+
+            if (inferBmp !== bmp) inferBmp.recycle()
 
             val diag = runCatching {
                 if (config.engine == "onnx") onnxDetector?.getDiagnostics() ?: ""
                 else ncnnDetector.getDiagnostics()
             }.getOrDefault("")
 
-            var dets = rotateDetections(rawDets, rotation)
+            var dets = if (upright) rawDets else rotateDetections(rawDets, rotation)
             if (isFront) dets = dets.map {
                 Detection(1f - it.x - it.w, it.y, it.w, it.h, it.label, it.confidence)
             }.toTypedArray()
+
+            // Stabilise so boxes survive momentary misses while the camera moves.
+            if (config.stabilizeBoxes) dets = tracker.update(dets, System.currentTimeMillis())
 
             lastKnownDets = dets
             lastKnownDiag = diag
@@ -330,6 +345,12 @@ class CameraActivity : AppCompatActivity() {
             postRotate(rotation.toFloat())
             if (isFront) postScale(-1f, 1f, raw.width / 2f, raw.height / 2f)
         }
+        return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+    }
+
+    /** Rotation-only copy used to feed the model an upright frame (no front mirror). */
+    private fun rotateUpright(raw: Bitmap, rotation: Int): Bitmap {
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
         return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
     }
 
@@ -457,6 +478,7 @@ class CameraActivity : AppCompatActivity() {
     private fun showSettingsSheet() {
         SettingsSheet(config) { updated ->
             config = updated
+            tracker.reset()   // settings (incl. orientation/stabilise) changed
             inferenceExecutor.execute {
                 ncnnDetector.release(); onnxDetector?.release()
                 if (config.engine == "onnx") {
