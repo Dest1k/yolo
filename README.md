@@ -79,7 +79,8 @@ SSH: приложение крутит детекцию и постоянно в
 
 ### ONNX — Android + Desktop
 - Один файл `.onnx`
-- NMS-free выход формата `[1, N, 6]` (стиль YOLOv10)
+- Desktop сам определяет раскладку выхода: **NMS-free** `[1, N, 6]` (YOLOv10), **anchor-free** `[1, 4+nc, N]` (YOLOv8/v9/v11) и **с objectness** `[1, 5+nc, N]` (YOLOv5/v6). Размер входа и normalized/pixel-координаты определяются автоматически. Для верного разбора v5/v6 важно правильное число классов — задаётся `YOLO_CLASSES` или числом строк в `YOLO_LABELS`.
+- Кастомные классы: `YOLO_LABELS=labels.txt` (по имени класса на строку) вместо встроенных меток COCO
 - Android: доступно ускорение через NNAPI
 - Desktop: CUDA EP (NVIDIA) + DirectML EP (AMD/NVIDIA Windows); автоматический откат на CPU
 
@@ -206,7 +207,8 @@ GUI и дисплей не нужны. После старта в консоль
 | `YOLO_JPEG_Q` | качество MJPEG-потока `1..100` | `80` |
 | `YOLO_TRACK` | `on` / `off` — IoU-трекинг и удержание рамок | `on` |
 | `YOLO_INPUT` | размер входа модели | `320` |
-| `YOLO_CLASSES` | число классов | `80` |
+| `YOLO_CLASSES` | число классов | число меток из `YOLO_LABELS`, иначе `80` |
+| `YOLO_LABELS` | путь к `labels.txt` (по классу на строку) для кастомных моделей | COCO |
 | `YOLO_CONF` | порог уверенности `0..1` | `0.25` |
 | `YOLO_PORT` | порт MJPEG-сервера | `8080` |
 | `YOLO_GPU` | `cpu` или `auto` | `cpu` |

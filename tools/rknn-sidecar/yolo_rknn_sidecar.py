@@ -18,7 +18,8 @@ Config via environment variables (same names as the JVM app where they overlap):
   YOLO_SOURCE   camera index "0"/"1", a GStreamer/V4L2 pipeline string,
                 or an http MJPEG URL                          (default: "0")
   YOLO_INPUT    model input size (square)                     (default: 640)
-  YOLO_CLASSES  number of classes                             (default: 80)
+  YOLO_CLASSES  number of classes                  (default: labels count, else 80)
+  YOLO_LABELS   path to labels.txt (one class per line) for custom models
   YOLO_CONF     confidence threshold 0..1                     (default: 0.25)
   YOLO_NMS      NMS IoU threshold 0..1                         (default: 0.45)
   YOLO_PORT     MJPEG server port                             (default: 8080)
@@ -58,8 +59,22 @@ def env(key, default=None):
     return v.strip() if v and v.strip() else default
 
 
-def label_for(cls):
+def label_for(cls, labels=None):
+    if labels is not None and 0 <= cls < len(labels):
+        return labels[cls]
     return COCO[cls] if 0 <= cls < len(COCO) else f"cls{cls}"
+
+
+def load_labels(path):
+    if not path:
+        return None
+    try:
+        with open(path) as f:
+            names = [ln.strip() for ln in f if ln.strip()]
+        return names or None
+    except OSError as e:
+        sys.stderr.write(f"WARNING: can't read labels '{path}': {e}\n")
+        return None
 
 
 # ── Letterbox preprocessing (aspect-preserving, gray pad) ────────────────────
@@ -124,9 +139,15 @@ def _decode_nmsfree(a, r, dw, dh, ow, oh, in_sz, conf_th, num_classes):
 
 
 def _decode_anchorfree(a, r, dw, dh, ow, oh, in_sz, conf_th, nms_th, num_classes):
-    nc = max(1, a.shape[1] - 4)
-    cls = np.argmax(a[:, 4:4 + nc], axis=1)
-    conf = np.max(a[:, 4:4 + nc], axis=1)
+    attrs = a.shape[1]
+    # YOLOv5/v6 have an objectness channel (attrs = 5+nc); v8/v9/v11 don't (4+nc).
+    has_obj = attrs == num_classes + 5
+    cls_start = 5 if has_obj else 4
+    nc = num_classes if has_obj else max(1, attrs - 4)
+    cls = np.argmax(a[:, cls_start:cls_start + nc], axis=1)
+    conf = np.max(a[:, cls_start:cls_start + nc], axis=1)
+    if has_obj:
+        conf = conf * a[:, 4]
     keep = conf >= conf_th
     a, cls, conf = a[keep], cls[keep], conf[keep]
     if a.shape[0] == 0:
@@ -176,12 +197,12 @@ class Tracker:
         return [t[0] for t in self.tracks]
 
 
-def draw(frame, dets, hud):
+def draw(frame, dets, hud, labels=None):
     for (x1, y1, x2, y2, conf, cls) in dets:
         color = PALETTE[cls % len(PALETTE)]
         p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
         cv2.rectangle(frame, p1, p2, color, 2)
-        text = f"{label_for(cls)} {conf:.2f}"
+        text = f"{label_for(cls, labels)} {conf:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (p1[0], p1[1] - th - 4), (p1[0] + tw + 2, p1[1]), color, -1)
         cv2.putText(frame, text, (p1[0] + 1, p1[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
@@ -199,6 +220,7 @@ class State:
         self.dets = []           # latest detections
         self.stream_fps = 0
         self.det_fps = 0
+        self.labels = None
         self.running = True
 
 
@@ -279,7 +301,7 @@ def make_handler(state):
                     if frame is None:
                         time.sleep(0.02)
                         continue
-                    draw(frame, dets, hud)
+                    draw(frame, dets, hud, state.labels)
                     ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                     if not ok:
                         continue
@@ -313,7 +335,8 @@ def main():
         sys.exit(2)
     source = env("YOLO_SOURCE", "0")
     in_sz = int(env("YOLO_INPUT", "640"))
-    num_classes = int(env("YOLO_CLASSES", "80"))
+    labels = load_labels(env("YOLO_LABELS"))
+    num_classes = int(env("YOLO_CLASSES")) if env("YOLO_CLASSES") else (len(labels) if labels else 80)
     conf = float(env("YOLO_CONF", "0.25"))
     nms = float(env("YOLO_NMS", "0.45"))
     port = int(env("YOLO_PORT", "8080"))
@@ -347,6 +370,9 @@ def main():
         sys.exit(1)
 
     state = State()
+    state.labels = labels
+    if labels:
+        print(f"  labels: {len(labels)} custom classes")
     threading.Thread(target=capture_loop, args=(state, cap), daemon=True).start()
     threading.Thread(target=inference_loop,
                      args=(state, rknn, in_sz, conf, nms, num_classes, track_on),

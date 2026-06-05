@@ -61,7 +61,8 @@ Then open `http://<board-ip>:8080`. FPS counter (stream | detect) is bottom-left
 | `YOLO_MODEL` | path to `.rknn` model | **required** |
 | `YOLO_SOURCE` | camera index `0`/`1`, a GStreamer/V4L2 pipeline string, or http MJPEG URL | `0` |
 | `YOLO_INPUT` | model input size (square) | `640` |
-| `YOLO_CLASSES` | number of classes | `80` |
+| `YOLO_CLASSES` | number of classes | labels count, else `80` |
+| `YOLO_LABELS` | path to labels.txt (one class per line) for custom models | COCO |
 | `YOLO_CONF` | confidence threshold | `0.25` |
 | `YOLO_NMS` | NMS IoU threshold | `0.45` |
 | `YOLO_PORT` | MJPEG server port | `8080` |

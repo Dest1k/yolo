@@ -25,7 +25,9 @@ import java.util.concurrent.atomic.AtomicReference
  *   YOLO_JPEG_Q      MJPEG stream quality 1..100                    (default: 80)
  *   YOLO_TRACK       on | off  — IoU tracking / box persistence     (default: on)
  *   YOLO_INPUT       model input size                         (default: 320)
- *   YOLO_CLASSES     number of classes                        (default: 80)
+ *   YOLO_CLASSES     number of classes              (default: labels count, else 80)
+ *   YOLO_LABELS      path to a labels.txt (one class name per line) for custom
+ *                    models — overrides the built-in COCO names
  *   YOLO_CONF        confidence threshold 0..1                (default: 0.25)
  *   YOLO_PORT        MJPEG server port                        (default: 8080)
  *   YOLO_GPU         cpu | auto                               (default: cpu)
@@ -41,7 +43,14 @@ fun main() {
         ?: if (modelPath.endsWith(".pt", true)) "pt" else "onnx") == "pt"
     val source     = env("YOLO_SOURCE") ?: "0"
     val inputSize  = env("YOLO_INPUT")?.toIntOrNull() ?: 320
-    val numClasses = env("YOLO_CLASSES")?.toIntOrNull() ?: 80
+    // Custom class names from a labels file (one per line) — for non-COCO models.
+    val labels     = env("YOLO_LABELS")?.let { path ->
+        runCatching { java.io.File(path).readLines().map { it.trim() }.filter { it.isNotEmpty() } }
+            .getOrElse { System.err.println("WARNING: can't read labels '$path': ${it.message}"); null }
+    }
+    // Class count drives v5/v6 objectness detection, so derive it from the labels
+    // file when present (unless YOLO_CLASSES is set explicitly).
+    val numClasses = env("YOLO_CLASSES")?.toIntOrNull() ?: labels?.size ?: 80
     val conf       = env("YOLO_CONF")?.toFloatOrNull() ?: 0.25f
     val port       = env("YOLO_PORT")?.toIntOrNull() ?: 8080
     val gpuAuto    = env("YOLO_GPU")?.lowercase() == "auto"
@@ -68,6 +77,7 @@ fun main() {
     }
     println("  provider=$provider")
     if (!isPt) println("  model input: ${onnx.modelInputW}x${onnx.modelInputH}")
+    if (labels != null) println("  labels: ${labels.size} custom classes")
 
     val trackOn = env("YOLO_TRACK")?.lowercase() != "off"
     val jpegQ   = env("YOLO_JPEG_Q")?.toIntOrNull()?.coerceIn(1, 100) ?: 80
@@ -102,7 +112,7 @@ fun main() {
                     println("  video frame: ${img.width}x${img.height}")
                 }
                 val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
-                mjpeg.pushFrame(Render.draw(img, latestDets.get(), hud), jpegQ)
+                mjpeg.pushFrame(Render.draw(img, latestDets.get(), hud, labels), jpegQ)
                 streamMeter.tick()?.let { streamFps.set(it) }
 
                 // Kick inference on the latest frame if the detector is free.

@@ -183,7 +183,12 @@ class OnnxDetector {
         val tr    = (a < b)
         val nd    = if (tr) b else a
         val attrs = if (tr) a else b
-        val nc    = (attrs - 4).coerceAtLeast(1)
+        // YOLOv5/v6 carry an objectness channel (cx,cy,w,h,obj,cls…) → attrs = 5+nc;
+        // YOLOv8/v9/v11 don't (cx,cy,w,h,cls…) → attrs = 4+nc. Tell them apart by the
+        // known class count so all of v5/v6/v8/v11 decode correctly.
+        val hasObj   = attrs == numClasses + 5
+        val clsStart = if (hasObj) 5 else 4
+        val nc       = if (hasObj) numClasses else (attrs - 4).coerceAtLeast(1)
         fun g(attr: Int, i: Int) = if (tr) buf[attr * nd + i] else buf[i * attrs + attr]
 
         // Auto-detect pixel vs normalised box coords (some exports emit 0..1).
@@ -193,9 +198,10 @@ class OnnxDetector {
 
         val raw = ArrayList<Detection>()
         for (i in 0 until nd) {
-            var best = confThreshold; var cls = -1
-            for (c in 0 until nc) { val s = g(4 + c, i); if (s > best) { best = s; cls = c } }
-            if (cls < 0) continue
+            var bestProb = 0f; var cls = -1
+            for (c in 0 until nc) { val s = g(clsStart + c, i); if (s > bestProb) { bestProb = s; cls = c } }
+            val score = if (hasObj) g(4, i) * bestProb else bestProb
+            if (cls < 0 || score < confThreshold) continue
             val cx = g(0, i) * scX; val cy = g(1, i) * scY
             val bw = g(2, i) * scX; val bh = g(3, i) * scY
             if (bw <= 0f || bh <= 0f || cx.isNaN()) continue
@@ -206,7 +212,7 @@ class OnnxDetector {
             raw += Detection(
                 x1 = x1.coerceIn(0f, ow.toFloat()), y1 = y1.coerceIn(0f, oh.toFloat()),
                 x2 = x2.coerceIn(0f, ow.toFloat()), y2 = y2.coerceIn(0f, oh.toFloat()),
-                conf = best, cls = cls
+                conf = score, cls = cls
             )
         }
         return nms(raw)

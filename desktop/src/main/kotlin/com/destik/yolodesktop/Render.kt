@@ -18,7 +18,8 @@ object Render {
         "refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
     )
 
-    fun labelFor(cls: Int): String = cocoLabels.getOrNull(cls) ?: "cls$cls"
+    fun labelFor(cls: Int, labels: List<String>? = null): String =
+        labels?.getOrNull(cls) ?: cocoLabels.getOrNull(cls) ?: "cls$cls"
 
     private val palette = arrayOf(
         java.awt.Color(255, 80, 80),  java.awt.Color(80, 200, 80),
@@ -27,8 +28,10 @@ object Render {
     )
 
     /** Returns a copy of [src] with detection boxes + labels drawn on it.
-     *  Optional [hud] text is drawn in the bottom-left corner (e.g. an FPS meter). */
-    fun draw(src: BufferedImage, dets: List<Detection>, hud: String? = null): BufferedImage {
+     *  Optional [hud] text is drawn in the bottom-left corner (e.g. an FPS meter).
+     *  [labels] overrides the built-in COCO names (for custom models). */
+    fun draw(src: BufferedImage, dets: List<Detection>, hud: String? = null,
+             labels: List<String>? = null): BufferedImage {
         val out = BufferedImage(src.width, src.height, BufferedImage.TYPE_INT_RGB)
         val g   = out.createGraphics()
         g.drawImage(src, 0, 0, null)
@@ -36,7 +39,7 @@ object Render {
         for (d in dets) {
             g.color = palette[d.cls % palette.size]
             g.drawRect(d.x1.toInt(), d.y1.toInt(), (d.x2 - d.x1).toInt(), (d.y2 - d.y1).toInt())
-            val label = "${labelFor(d.cls)} ${"%.2f".format(d.conf)}"
+            val label = "${labelFor(d.cls, labels)} ${"%.2f".format(d.conf)}"
             val fm = g.fontMetrics
             val tw = fm.stringWidth(label)
             val th = fm.height
