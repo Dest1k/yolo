@@ -102,8 +102,8 @@ fun main() {
         val cPort = env("YOLO_CONTROL_PORT")?.toIntOrNull() ?: (port + 1)
         val g = SiyiGimbal(gHost, gPort).also { it.start() }
         gimbal = g
-        control = SiyiControlServer(g, cPort).also { it.start() }
-        for (ip in lanAddresses()) println("  gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
+        control = SiyiControlServer(g, cPort, port).also { it.start() }
+        for (ip in lanAddresses()) println("  video + gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
     }
 
     // Decoupled pipeline: the capture thread streams every frame at full camera

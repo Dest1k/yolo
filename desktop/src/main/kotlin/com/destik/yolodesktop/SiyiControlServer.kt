@@ -21,7 +21,11 @@ import java.net.URI
  *   /mode?m=lock|follow|fpv
  *   /attitude /config /version   (re-request from the gimbal)
  */
-class SiyiControlServer(private val gimbal: SiyiGimbal, private val port: Int = 8081) {
+class SiyiControlServer(
+    private val gimbal: SiyiGimbal,
+    private val port: Int = 8081,
+    private val streamPort: Int = 8080
+) {
 
     private var server: HttpServer? = null
 
@@ -44,7 +48,7 @@ class SiyiControlServer(private val gimbal: SiyiGimbal, private val port: Int = 
             fun i(k: String, d: Int = 0) = q[k]?.toIntOrNull() ?: d
 
             when (path) {
-                "/" -> { sendHtml(ex, PANEL); return }
+                "/" -> { sendHtml(ex, panelHtml()); return }
                 "/status", "/attitude" -> {
                     if (path == "/attitude") gimbal.requestAttitude()
                     sendJson(ex, status()); return
@@ -109,47 +113,52 @@ class SiyiControlServer(private val gimbal: SiyiGimbal, private val port: Int = 
         ex.responseBody.use { it.write(bytes) }
     }
 
-    companion object {
-        private val PANEL = """
+    /** Combined page: live MJPEG video full-screen with the gimbal controls overlaid. */
+    private fun panelHtml(): String = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIYI Gimbal</title><style>
-body{font-family:system-ui,sans-serif;background:#1a1a1a;color:#eee;margin:0;padding:16px}
-h2{margin:0 0 12px} .row{margin:10px 0} button{background:#333;color:#eee;border:1px solid #555;
-border-radius:8px;padding:12px 16px;font-size:16px;margin:3px;cursor:pointer} button:active{background:#00e676;color:#000}
-.pad{display:grid;grid-template-columns:repeat(3,64px);gap:4px;justify-content:center}
-#st{font-family:monospace;white-space:pre;background:#222;padding:10px;border-radius:8px}
-input{width:64px;background:#222;color:#eee;border:1px solid #555;border-radius:6px;padding:6px}
+*{box-sizing:border-box} body{margin:0;background:#000;font-family:system-ui,sans-serif;color:#eee;overflow:hidden}
+#vid{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000}
+.ov{position:fixed;z-index:2} button{background:rgba(20,20,20,.6);color:#eee;border:1px solid #777;
+border-radius:10px;padding:12px 14px;font-size:16px;margin:3px;cursor:pointer;backdrop-filter:blur(3px)}
+button:active{background:#00e676;color:#000}
+#st{top:8px;left:8px;font-family:monospace;white-space:pre;background:rgba(0,0,0,.5);padding:8px 10px;border-radius:8px;font-size:13px}
+#pad{bottom:12px;left:12px;display:grid;grid-template-columns:repeat(3,56px);gap:4px}
+#side{bottom:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end}
+#top{top:8px;right:8px;display:flex;flex-wrap:wrap;justify-content:flex-end;max-width:60vw}
+input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;border-radius:6px;padding:6px}
+.grp{display:flex;align-items:center;margin:2px 0}
 </style></head><body>
-<h2>SIYI Gimbal</h2>
-<div id="st">loading…</div>
-<div class="row"><b>Move</b> (hold)
-<div class="pad">
+<img id="vid" alt="stream">
+<div id="st" class="ov">loading…</div>
+<div id="pad" class="ov">
 <span></span><button data-y="0" data-p="60">▲</button><span></span>
 <button data-y="-60" data-p="0">◀</button><button onclick="g('/center')">●</button><button data-y="60" data-p="0">▶</button>
 <span></span><button data-y="0" data-p="-60">▼</button><span></span>
-</div></div>
-<div class="row"><b>Angle</b> yaw<input id="ay" value="0"> pitch<input id="ap" value="0">
-<button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div>
-<div class="row"><b>Zoom</b>
-<button onmousedown="g('/zoom?dir=in')" onmouseup="g('/zoom?dir=stop')" ontouchstart="g('/zoom?dir=in')" ontouchend="g('/zoom?dir=stop')">+</button>
-<button onmousedown="g('/zoom?dir=out')" onmouseup="g('/zoom?dir=stop')" ontouchstart="g('/zoom?dir=out')" ontouchend="g('/zoom?dir=stop')">−</button>
-x<input id="zx" value="2"><button onclick="g('/zoom?x='+zx.value)">set</button>
-<button onclick="g('/autofocus')">AF</button>
-<button onmousedown="g('/focus?dir=far')" onmouseup="g('/focus?dir=stop')">focus+</button>
-<button onmousedown="g('/focus?dir=near')" onmouseup="g('/focus?dir=stop')">focus−</button></div>
-<div class="row"><b>Mode</b>
-<button onclick="g('/mode?m=lock')">lock</button><button onclick="g('/mode?m=follow')">follow</button>
-<button onclick="g('/mode?m=fpv')">fpv</button></div>
-<div class="row"><b>Camera</b>
-<button onclick="g('/photo')">photo</button><button onclick="g('/record')">record</button><button onclick="g('/hdr')">hdr</button></div>
+</div>
+<div id="top" class="ov">
+<button onclick="g('/mode?m=lock')">lock</button><button onclick="g('/mode?m=follow')">follow</button><button onclick="g('/mode?m=fpv')">fpv</button>
+<button onclick="g('/photo')">📷</button><button onclick="g('/record')">⏺</button><button onclick="g('/hdr')">hdr</button>
+</div>
+<div id="side" class="ov">
+<div class="grp"><button id="zin">＋</button><button id="zout">－</button>x<input id="zx" value="2"><button onclick="g('/zoom?x='+zx.value)">set</button></div>
+<div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus＋</button><button id="fn">focus－</button></div>
+<div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div>
+</div>
 <script>
-function g(u){return fetch(u).then(r=>r.json()).then(show).catch(()=>{})}
+var STREAM=$streamPort;
+document.getElementById('vid').src=location.protocol+'//'+location.hostname+':'+STREAM;
+function g(u){return fetch(u).then(r=>r.json()).then(show).catch(function(){})}
 function show(s){document.getElementById('st').textContent=
- 'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\nmode '+s.mode+'  rec '+s.recording+'\nfw '+s.firmware+'  hw '+s.hardwareId}
-document.querySelectorAll('.pad button[data-y]').forEach(b=>{
- const send=()=>g('/rotate?yaw='+b.dataset.y+'&pitch='+b.dataset.p), stop=()=>g('/stop');
- b.onmousedown=send;b.onmouseup=stop;b.onmouseleave=stop;b.ontouchstart=e=>{e.preventDefault();send()};b.ontouchend=stop;});
-setInterval(()=>fetch('/status').then(r=>r.json()).then(show).catch(()=>{}),1000);
+ 'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\nmode '+s.mode+'  rec '+s.recording+'\nfw '+s.firmware+' hw '+s.hardwareId}
+function hold(el,down,up){if(!el)return;el.onmousedown=down;el.onmouseup=up;el.onmouseleave=up;
+ el.ontouchstart=function(e){e.preventDefault();down()};el.ontouchend=function(e){e.preventDefault();up()};}
+document.querySelectorAll('#pad button[data-y]').forEach(function(b){
+ hold(b,function(){g('/rotate?yaw='+b.dataset.y+'&pitch='+b.dataset.p)},function(){g('/stop')})});
+hold(document.getElementById('zin'),function(){g('/zoom?dir=in')},function(){g('/zoom?dir=stop')});
+hold(document.getElementById('zout'),function(){g('/zoom?dir=out')},function(){g('/zoom?dir=stop')});
+hold(document.getElementById('ff'),function(){g('/focus?dir=far')},function(){g('/focus?dir=stop')});
+hold(document.getElementById('fn'),function(){g('/focus?dir=near')},function(){g('/focus?dir=stop')});
+setInterval(function(){fetch('/status').then(function(r){return r.json()}).then(show).catch(function(){})},1000);
 </script></body></html>""".trimIndent()
-    }
 }
