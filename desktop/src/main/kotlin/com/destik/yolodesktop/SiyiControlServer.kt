@@ -24,7 +24,8 @@ import java.net.URI
 class SiyiControlServer(
     private val gimbal: SiyiGimbal,
     private val port: Int = 8081,
-    private val streamPort: Int = 8080
+    private val streamPort: Int = 8080,
+    private val tracking: java.util.concurrent.atomic.AtomicBoolean? = null
 ) {
 
     private var server: HttpServer? = null
@@ -77,6 +78,9 @@ class SiyiControlServer(
                     "follow" -> gimbal.setFollowMode()
                     "fpv"    -> gimbal.setFpvMode()
                 }
+                "/track"    -> tracking?.let { t ->
+                    when (q["on"]) { "1", "true" -> t.set(true); "0", "false" -> t.set(false); else -> t.set(!t.get()) }
+                }
                 "/config"   -> gimbal.requestConfig()
                 "/version"  -> { gimbal.requestFirmwareVersion(); gimbal.requestHardwareId() }
                 else -> { sendText(ex, 404, "not found"); return }
@@ -90,7 +94,7 @@ class SiyiControlServer(
     private fun status(): String {
         val modeName = when (gimbal.motionMode) { 0 -> "lock"; 1 -> "follow"; 2 -> "fpv"; else -> "?" }
         return """{"yaw":${gimbal.yaw},"pitch":${gimbal.pitch},"roll":${gimbal.roll},""" +
-               """"recording":${gimbal.recording},"mode":"$modeName",""" +
+               """"recording":${gimbal.recording},"mode":"$modeName","tracking":${tracking?.get() ?: false},""" +
                """"firmware":"${gimbal.firmware}","hardwareId":"${gimbal.hardwareId}"}"""
     }
 
@@ -131,12 +135,14 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 </style></head><body>
 <img id="vid" alt="stream">
 <div id="st" class="ov">loading…</div>
+<div id="trk" class="ov" style="top:8px;left:50%;transform:translateX(-50%);padding:6px 12px;border-radius:8px;font-weight:bold;background:rgba(0,0,0,.5)">TRACK OFF <span style="opacity:.7">(Space)</span></div>
 <div id="pad" class="ov">
 <span></span><button data-y="0" data-p="60">▲</button><span></span>
 <button data-y="-60" data-p="0">◀</button><button onclick="g('/center')">●</button><button data-y="60" data-p="0">▶</button>
 <span></span><button data-y="0" data-p="-60">▼</button><span></span>
 </div>
 <div id="top" class="ov">
+<button onclick="g('/track')">track</button>
 <button onclick="g('/mode?m=lock')">lock</button><button onclick="g('/mode?m=follow')">follow</button><button onclick="g('/mode?m=fpv')">fpv</button>
 <button onclick="g('/photo')">📷</button><button onclick="g('/record')">⏺</button><button onclick="g('/hdr')">hdr</button>
 </div>
@@ -150,7 +156,10 @@ var STREAM=$streamPort;
 document.getElementById('vid').src=location.protocol+'//'+location.hostname+':'+STREAM;
 function g(u){return fetch(u).then(r=>r.json()).then(show).catch(function(){})}
 function show(s){document.getElementById('st').textContent=
- 'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\nmode '+s.mode+'  rec '+s.recording+'\nfw '+s.firmware+' hw '+s.hardwareId}
+ 'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\nmode '+s.mode+'  rec '+s.recording+'\nfw '+s.firmware+' hw '+s.hardwareId;
+ var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'● TRACK ON ':'TRACK OFF ');
+ t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
+document.addEventListener('keydown',function(e){if(e.code==='Space'||e.key===' '){e.preventDefault();g('/track')}});
 function hold(el,down,up){if(!el)return;el.onmousedown=down;el.onmouseup=up;el.onmouseleave=up;
  el.ontouchstart=function(e){e.preventDefault();down()};el.ontouchend=function(e){e.preventDefault();up()};}
 document.querySelectorAll('#pad button[data-y]').forEach(function(b){

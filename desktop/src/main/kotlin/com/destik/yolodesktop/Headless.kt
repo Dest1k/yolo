@@ -93,6 +93,8 @@ fun main() {
     // Enabled with YOLO_GIMBAL=on (auto-on when the source is the SIYI RTSP feed).
     var gimbal: SiyiGimbal? = null
     var control: SiyiControlServer? = null
+    var follower: GimbalFollower? = null
+    val tracking = AtomicBoolean(false)            // auto-follow mode (toggled from panel)
     val gimbalEnv = env("YOLO_GIMBAL")?.lowercase()
     val gimbalOn = gimbalEnv == "on" ||
         (gimbalEnv != "off" && source.contains("192.168.144.25"))
@@ -102,7 +104,13 @@ fun main() {
         val cPort = env("YOLO_CONTROL_PORT")?.toIntOrNull() ?: (port + 1)
         val g = SiyiGimbal(gHost, gPort).also { it.start() }
         gimbal = g
-        control = SiyiControlServer(g, cPort, port).also { it.start() }
+        follower = GimbalFollower(
+            g,
+            maxSpeed = env("YOLO_TRACK_SPEED")?.toIntOrNull() ?: 40,
+            invertYaw = env("YOLO_TRACK_INVERT_YAW")?.lowercase() == "on",
+            invertPitch = env("YOLO_TRACK_INVERT_PITCH")?.lowercase() == "on"
+        )
+        control = SiyiControlServer(g, cPort, port, tracking).also { it.start() }
         for (ip in lanAddresses()) println("  video + gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
     }
 
@@ -113,6 +121,8 @@ fun main() {
     // run at camera FPS while detection updates as fast as it can.
     val latestDets  = AtomicReference<List<Detection>>(emptyList())
     val latestFrame = AtomicReference<BufferedImage?>(null)
+    val targetBox   = AtomicReference<Detection?>(null)   // currently tracked target (for drawing)
+    val frameW = AtomicInteger(0); val frameH = AtomicInteger(0)
     val inferencing = AtomicBoolean(false)
     val inferExec   = Executors.newSingleThreadExecutor()
     val streamFps   = AtomicInteger(0)
@@ -137,6 +147,7 @@ fun main() {
                 // thread; inference on its own thread.
                 val snap = copyImage(img)
                 latestFrame.set(snap)
+                frameW.set(snap.width); frameH.set(snap.height)
                 if (inferencing.compareAndSet(false, true)) {
                     inferExec.execute {
                         try {
@@ -167,15 +178,33 @@ fun main() {
             val f = latestFrame.getAndSet(null)
             if (f == null) { try { Thread.sleep(2) } catch (e: InterruptedException) { break }; continue }
             val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
-            runCatching { mjpeg.pushFrame(Render.draw(f, latestDets.get(), hud, labels), jpegQ) }
+            runCatching {
+                mjpeg.pushFrame(
+                    Render.draw(f, latestDets.get(), hud, labels, targetBox.get(), tracking.get()), jpegQ
+                )
+            }
             streamMeter.tick()?.let { streamFps.set(it) }
         }
     }, "stream").apply { isDaemon = true; start() }
+
+    // Target-follow thread: when tracking is on, steer the gimbal to keep the
+    // YOLO-detected target centred. Toggled from the panel (spacebar) via /track.
+    val followThread = follower?.let { fol ->
+        Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                if (tracking.get()) targetBox.set(fol.step(latestDets.get(), frameW.get(), frameH.get()))
+                else { fol.stop(); targetBox.set(null) }
+                try { Thread.sleep(66) } catch (e: InterruptedException) { break }
+            }
+        }, "gimbal-follow").apply { isDaemon = true; start() }
+    }
 
     Runtime.getRuntime().addShutdownHook(Thread {
         println("shutting down…")
         runCatching { video.stop() }
         runCatching { streamThread.interrupt() }
+        runCatching { followThread?.interrupt() }
+        runCatching { follower?.stop() }
         runCatching { inferExec.shutdownNow() }
         runCatching { control?.stop() }
         runCatching { gimbal?.close() }

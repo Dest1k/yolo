@@ -29,9 +29,12 @@ object Render {
 
     /** Returns a copy of [src] with detection boxes + labels drawn on it.
      *  Optional [hud] text is drawn in the bottom-left corner (e.g. an FPS meter).
-     *  [labels] overrides the built-in COCO names (for custom models). */
+     *  [labels] overrides the built-in COCO names (for custom models).
+     *  When [tracking] is on, a centre crosshair + TRACKING badge are drawn and the
+     *  locked [target] is highlighted. */
     fun draw(src: BufferedImage, dets: List<Detection>, hud: String? = null,
-             labels: List<String>? = null): BufferedImage {
+             labels: List<String>? = null, target: Detection? = null,
+             tracking: Boolean = false): BufferedImage {
         val out = BufferedImage(src.width, src.height, BufferedImage.TYPE_INT_RGB)
         val g   = out.createGraphics()
         g.drawImage(src, 0, 0, null)
@@ -46,6 +49,26 @@ object Render {
             g.fillRect(d.x1.toInt(), d.y1.toInt() - th, tw + 4, th)
             g.color = java.awt.Color.BLACK
             g.drawString(label, d.x1.toInt() + 2, d.y1.toInt() - 2)
+        }
+        if (tracking) {
+            val cx = out.width / 2; val cy = out.height / 2
+            g.color = java.awt.Color(255, 60, 60)
+            g.stroke = java.awt.BasicStroke(2f)
+            g.drawLine(cx - 16, cy, cx + 16, cy); g.drawLine(cx, cy - 16, cx, cy + 16)
+            g.drawOval(cx - 6, cy - 6, 12, 12)
+            if (target != null) {
+                g.color = java.awt.Color(255, 230, 0)
+                g.stroke = java.awt.BasicStroke(3f)
+                g.drawRect(target.x1.toInt(), target.y1.toInt(),
+                    (target.x2 - target.x1).toInt(), (target.y2 - target.y1).toInt())
+                // line from frame centre to the target centre
+                g.color = java.awt.Color(255, 60, 60)
+                g.stroke = java.awt.BasicStroke(1f)
+                g.drawLine(cx, cy, ((target.x1 + target.x2) / 2).toInt(), ((target.y1 + target.y2) / 2).toInt())
+            }
+            g.font = g.font.deriveFont(java.awt.Font.BOLD, 16f)
+            g.color = java.awt.Color(255, 60, 60)
+            g.drawString("TRACKING", out.width / 2 - 38, 22)
         }
         if (hud != null) {
             g.font = g.font.deriveFont(java.awt.Font.BOLD, 16f)
