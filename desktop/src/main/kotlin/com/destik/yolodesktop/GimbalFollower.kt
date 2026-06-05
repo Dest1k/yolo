@@ -27,11 +27,19 @@ class GimbalFollower(
     private var prev: Detection? = null
     private var lockCount = 0
     private var moving = false
+    @Volatile private var pending: Pair<Float, Float>? = null   // normalised click point
+
+    /** Manually lock the target under a click (normalised 0..1 coords). */
+    fun requestPick(nx: Float, ny: Float) { pending = nx to ny }
 
     /** Advance one control tick; returns the currently locked target (for drawing), or null. */
     fun step(dets: List<Detection>, fw: Int, fh: Int): Detection? {
         if (fw <= 0 || fh <= 0 || dets.isEmpty()) { stop(); prev = null; lockCount = 0; return null }
 
+        pending?.let { (nx, ny) ->
+            pending = null
+            pickAt(dets, nx * fw, ny * fh)?.let { prev = it; lockCount = 0 }
+        }
         val t = pick(dets, prev, fw)
         prev = t
         if (t == null) { stop(); lockCount = 0; return null }
@@ -56,6 +64,15 @@ class GimbalFollower(
 
     /** Stop gimbal motion if we were moving (called when tracking is off / target lost). */
     fun stop() { if (moving) { gimbal.stopRotation(); moving = false } }
+
+    /** Detection whose box contains the point, else the nearest by centre. */
+    private fun pickAt(dets: List<Detection>, px: Float, py: Float): Detection? {
+        val inside = dets.filter { px in it.x1..it.x2 && py in it.y1..it.y2 }
+        val pool = inside.ifEmpty { dets }
+        return pool.minByOrNull {
+            val dx = (it.x1 + it.x2) / 2 - px; val dy = (it.y1 + it.y2) / 2 - py; dx * dx + dy * dy
+        }
+    }
 
     private fun pick(dets: List<Detection>, prev: Detection?, fw: Int): Detection? {
         if (prev != null) {

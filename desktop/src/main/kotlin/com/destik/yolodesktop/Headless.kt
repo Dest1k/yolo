@@ -123,7 +123,7 @@ fun main() {
             invertYaw = env("YOLO_TRACK_INVERT_YAW")?.lowercase() == "on",
             invertPitch = env("YOLO_TRACK_INVERT_PITCH")?.lowercase() == "on"
         )
-        control = SiyiControlServer(g, cPort, port, tracking).also { it.start() }
+        control = SiyiControlServer(g, cPort, port, tracking, follower).also { it.start() }
         for (ip in lanAddresses()) println("  video + gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
     }
 

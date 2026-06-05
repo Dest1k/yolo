@@ -59,19 +59,34 @@ Then open `http://<board-ip>:8080`. FPS counter (stream | detect) is bottom-left
 | Var | Meaning | Default |
 |---|---|---|
 | `YOLO_MODEL` | path to `.rknn` model | **required** |
-| `YOLO_SOURCE` | camera index `0`/`1`, a GStreamer/V4L2 pipeline string, or http MJPEG URL | `0` |
+| `YOLO_SOURCE` | camera index `0`/`1`, GStreamer pipeline, `rtsp://…` or http MJPEG URL | `0` |
 | `YOLO_INPUT` | model input size (square) | `640` |
 | `YOLO_CLASSES` | number of classes | labels count, else `80` |
 | `YOLO_LABELS` | path to labels.txt (one class per line) for custom models | COCO |
+| `YOLO_FILTER` | keep only these classes (indices or names, comma-separated) | all |
 | `YOLO_CONF` | confidence threshold | `0.25` |
 | `YOLO_NMS` | NMS IoU threshold | `0.45` |
-| `YOLO_PORT` | MJPEG server port | `8080` |
+| `YOLO_PORT` | MJPEG / control panel port | `8080` |
+| `YOLO_JPEG_Q` | MJPEG quality 1..100 | `75` |
 | `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | capture geometry (index sources) | `640` / `480` / `30` |
-| `YOLO_TRACK` | `on` / `off` IoU tracking | `on` |
+| `YOLO_TRACK` | `on` / `off` IoU tracking (box persistence) | `on` |
+| `YOLO_GIMBAL` | `on` / `off` SIYI gimbal control (auto-on for SIYI source) | `off` |
+| `YOLO_GIMBAL_HOST` / `YOLO_GIMBAL_PORT` | SIYI camera UDP address | `192.168.144.25` / `37260` |
+| `YOLO_TRACK_SPEED` | max follow speed | `40` |
+| `YOLO_TRACK_INVERT_YAW` / `YOLO_TRACK_INVERT_PITCH` | flip an axis if it chases away | `off` |
 
 > CSI camera on Orange Pi 5: pass a GStreamer pipeline as `YOLO_SOURCE`, e.g.
 > `YOLO_SOURCE="v4l2src device=/dev/video0 ! videoconvert ! appsink"` (exact
 > pipeline depends on your camera/driver), or use a USB webcam (`YOLO_SOURCE=0`).
+
+### SIYI gimbal control
+
+Same control as the JVM headless, served on the **same port** at `/` (when
+`YOLO_GIMBAL=on` or the source is the SIYI camera): open `http://<board-ip>:8080`
+for video with controls overlaid — movement, zoom/focus, modes, photo/record, and
+**target follow** (Space toggles auto-follow; **click the video** to lock a target).
+HTTP endpoints (`/rotate`, `/angle`, `/zoom`, `/mode`, `/track`, `/pick`, `/status`)
+match the JVM app.
 
 ## 4. Autostart (systemd)
 

@@ -23,9 +23,17 @@ Config via environment variables (same names as the JVM app where they overlap):
   YOLO_FILTER   keep only these classes (comma-separated indices or names)
   YOLO_CONF     confidence threshold 0..1                     (default: 0.25)
   YOLO_NMS      NMS IoU threshold 0..1                         (default: 0.45)
-  YOLO_PORT     MJPEG server port                             (default: 8080)
+  YOLO_PORT     MJPEG server / control panel port             (default: 8080)
+  YOLO_JPEG_Q   MJPEG quality 1..100                          (default: 75)
   YOLO_CAM_W / YOLO_CAM_H / YOLO_CAM_FPS  capture geometry    (default: 640x480x30)
   YOLO_TRACK    on | off  — IoU tracking / box persistence    (default: on)
+
+SIYI gimbal control (same as the JVM headless), served on the same port at "/":
+  YOLO_GIMBAL   on | off  — enable control + web panel (auto-on for SIYI source)
+  YOLO_GIMBAL_HOST / YOLO_GIMBAL_PORT          (default: 192.168.144.25 / 37260)
+  YOLO_TRACK_SPEED                              max follow speed (default: 40)
+  YOLO_TRACK_INVERT_YAW / YOLO_TRACK_INVERT_PITCH   flip an axis if it chases away
+  Follow a target: Space toggles auto-follow, or click the video to lock a target.
 
 Convert an ONNX model to .rknn on an x86 Linux host with rknn-toolkit2 — see the
 README next to this file.
@@ -34,8 +42,12 @@ README next to this file.
 import os
 import sys
 import time
+import socket
+import struct
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 import numpy as np
 import cv2
@@ -215,7 +227,184 @@ class Tracker:
         return [t[0] for t in self.tracks]
 
 
-def draw(frame, dets, hud, labels=None):
+# ── SIYI gimbal (UDP SDK) — mirrors the JVM SiyiGimbal ───────────────────────
+class SiyiGimbal:
+    def __init__(self, host="192.168.144.25", port=37260):
+        self.addr = (host, port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(1.0)
+        self.seq = 0
+        self._lock = threading.Lock()
+        self.running = True
+        self.yaw = self.pitch = self.roll = 0.0
+        self.firmware = ""
+        self.hardware_id = ""
+        self.recording = False
+        self.motion_mode = -1
+        threading.Thread(target=self._rx, daemon=True).start()
+        self.request_hardware_id(); self.request_firmware()
+        self.request_config(); self.request_attitude()
+
+    @staticmethod
+    def _crc16(data):                       # CRC16/XMODEM (poly 0x1021, init 0)
+        crc = 0
+        for b in data:
+            crc ^= (b << 8)
+            for _ in range(8):
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
+        return crc & 0xFFFF
+
+    def _send(self, cmd, data=b""):
+        with self._lock:
+            s = self.seq & 0xFFFF
+            self.seq += 1
+        body = bytes([0x55, 0x66, 0x01]) + struct.pack("<H", len(data)) + \
+            struct.pack("<H", s) + bytes([cmd & 0xFF]) + data
+        frame = body + struct.pack("<H", self._crc16(body))
+        try:
+            self.sock.sendto(frame, self.addr)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _i8(v):
+        return max(-1, min(1, int(v)))
+
+    @staticmethod
+    def _sp(v):
+        return max(-100, min(100, int(v)))
+
+    def request_firmware(self):    self._send(0x01)
+    def request_hardware_id(self): self._send(0x02)
+    def autofocus(self):           self._send(0x04, bytes([1]))
+    def manual_zoom(self, d):      self._send(0x05, struct.pack("b", self._i8(d)))
+    def manual_focus(self, d):     self._send(0x06, struct.pack("b", self._i8(d)))
+    def rotate(self, yaw, pitch):  self._send(0x07, struct.pack("bb", self._sp(yaw), self._sp(pitch)))
+    def stop_rotation(self):       self.rotate(0, 0)
+    def center(self):              self._send(0x08, bytes([1]))
+    def request_config(self):      self._send(0x0A)
+    def take_photo(self):          self._send(0x0C, bytes([0]))
+    def toggle_hdr(self):          self._send(0x0C, bytes([1]))
+    def toggle_record(self):       self._send(0x0C, bytes([2]))
+    def set_lock(self):            self._send(0x0C, bytes([3]))
+    def set_follow(self):          self._send(0x0C, bytes([4]))
+    def set_fpv(self):             self._send(0x0C, bytes([5]))
+    def request_attitude(self):    self._send(0x0D)
+
+    def set_angle(self, yaw, pitch):
+        y = int(max(-135.0, min(135.0, yaw)) * 10)
+        p = int(max(-90.0, min(25.0, pitch)) * 10)
+        self._send(0x0E, struct.pack("<hh", y, p))
+
+    def absolute_zoom(self, x):
+        x = max(1.0, x); ip = int(x); fr = int((x - ip) * 10)
+        self._send(0x0F, bytes([ip & 0xFF, fr & 0xFF]))
+
+    def _rx(self):
+        while self.running:
+            try:
+                data, _ = self.sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self._parse(data)
+
+    def _parse(self, b):
+        if len(b) < 10 or b[0] != 0x55 or b[1] != 0x66:
+            return
+        dlen = b[3] | (b[4] << 8); cmd = b[7]; d = 8
+        if 8 + dlen + 2 > len(b):
+            return
+        if cmd == 0x01:
+            self.firmware = "".join(f"{b[d + i]:02x}" for i in range(min(dlen, 12)))
+        elif cmd == 0x02:
+            self.hardware_id = bytes(b[d:d + min(dlen, 16)]).decode("ascii", "ignore").strip()
+        elif cmd == 0x0A and dlen >= 5:
+            self.recording = b[d + 3] == 1
+            self.motion_mode = b[d + 4]
+        elif cmd == 0x0D and dlen >= 6:
+            self.yaw = struct.unpack_from("<h", b, d)[0] / 10.0
+            self.pitch = struct.unpack_from("<h", b, d + 2)[0] / 10.0
+            self.roll = struct.unpack_from("<h", b, d + 4)[0] / 10.0
+
+    def close(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# ── Visual-servoing follower — mirrors the JVM GimbalFollower ─────────────────
+class GimbalFollower:
+    def __init__(self, gimbal, max_speed=40, deadzone=0.05, stable_ticks=3,
+                 invert_yaw=False, invert_pitch=False):
+        self.g = gimbal
+        self.max_speed = max_speed
+        self.deadzone = deadzone
+        self.stable_ticks = stable_ticks
+        self.invert_yaw = invert_yaw
+        self.invert_pitch = invert_pitch
+        self.prev = None
+        self.lock_count = 0
+        self.moving = False
+        self.pending = None          # (nx, ny) normalised click point for manual pick
+
+    def request_pick(self, nx, ny):
+        self.pending = (nx, ny)
+
+    def step(self, dets, fw, fh):
+        if fw <= 0 or fh <= 0 or not dets:
+            self.stop(); self.prev = None; self.lock_count = 0; return None
+        if self.pending is not None:
+            px, py = self.pending[0] * fw, self.pending[1] * fh
+            self.pending = None
+            t = self._pick_at(dets, px, py)
+            if t is not None:
+                self.prev = t; self.lock_count = 0
+        t = self._pick(dets, self.prev, fw)
+        self.prev = t
+        if t is None:
+            self.stop(); self.lock_count = 0; return None
+        self.lock_count += 1
+        if self.lock_count < self.stable_ticks:
+            self.stop(); return t
+        cx, cy = (t[0] + t[2]) / 2, (t[1] + t[3]) / 2
+        ex, ey = cx / fw - 0.5, cy / fh - 0.5
+        if abs(ex) < self.deadzone and abs(ey) < self.deadzone:
+            self.stop(); return t
+        gain = 2 * self.max_speed
+        ys = int(max(-self.max_speed, min(self.max_speed, ex * gain)))
+        ps = int(max(-self.max_speed, min(self.max_speed, -ey * gain)))
+        if self.invert_yaw: ys = -ys
+        if self.invert_pitch: ps = -ps
+        self.g.rotate(ys, ps); self.moving = True
+        return t
+
+    def stop(self):
+        if self.moving:
+            self.g.stop_rotation(); self.moving = False
+
+    @staticmethod
+    def _pick_at(dets, px, py):
+        inside = [d for d in dets if d[0] <= px <= d[2] and d[1] <= py <= d[3]]
+        pool = inside if inside else dets
+        return min(pool, key=lambda d: ((d[0] + d[2]) / 2 - px) ** 2 + ((d[1] + d[3]) / 2 - py) ** 2)
+
+    def _pick(self, dets, prev, fw):
+        if prev is not None:
+            near = min(dets, key=lambda d: self._cdist(d, prev))
+            if self._cdist(near, prev) < 0.3 * fw:
+                return near
+        return max(dets, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
+
+    @staticmethod
+    def _cdist(a, b):
+        return math.hypot(((a[0] + a[2]) - (b[0] + b[2])) / 2, ((a[1] + a[3]) - (b[1] + b[3])) / 2)
+
+
+def draw(frame, dets, hud, labels=None, tracking=False, target=None):
     for (x1, y1, x2, y2, conf, cls) in dets:
         color = PALETTE[cls % len(PALETTE)]
         p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
@@ -224,6 +413,17 @@ def draw(frame, dets, hud, labels=None):
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (p1[0], p1[1] - th - 4), (p1[0] + tw + 2, p1[1]), color, -1)
         cv2.putText(frame, text, (p1[0] + 1, p1[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    if tracking:
+        h, w = frame.shape[:2]
+        cx, cy = w // 2, h // 2
+        cv2.line(frame, (cx - 16, cy), (cx + 16, cy), (60, 60, 255), 2)
+        cv2.line(frame, (cx, cy - 16), (cx, cy + 16), (60, 60, 255), 2)
+        cv2.circle(frame, (cx, cy), 6, (60, 60, 255), 2)
+        if target is not None:
+            tx1, ty1, tx2, ty2 = int(target[0]), int(target[1]), int(target[2]), int(target[3])
+            cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), (0, 230, 255), 3)
+            cv2.line(frame, (cx, cy), ((tx1 + tx2) // 2, (ty1 + ty2) // 2), (60, 60, 255), 1)
+        cv2.putText(frame, "TRACKING", (cx - 48, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 60, 255), 2)
     if hud:
         cv2.rectangle(frame, (2, frame.shape[0] - 24), (2 + 9 * len(hud), frame.shape[0] - 2), (0, 0, 0), -1)
         cv2.putText(frame, hud, (6, frame.shape[0] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (118, 230, 0), 2)
@@ -239,6 +439,11 @@ class State:
         self.stream_fps = 0
         self.det_fps = 0
         self.labels = None
+        self.jpeg_q = 75
+        self.gimbal = None       # SiyiGimbal or None
+        self.follower = None     # GimbalFollower or None
+        self.tracking = False    # auto-follow on/off (Space / click)
+        self.target = None       # currently tracked box (for drawing)
         self.running = True
 
 
@@ -249,10 +454,29 @@ def open_source(src, w, h, fps):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         cap.set(cv2.CAP_PROP_FPS, fps)
         return cap
-    if src.startswith("http"):
+    if src.startswith(("http", "rtsp")):
         return cv2.VideoCapture(src)
     # otherwise treat as a GStreamer/V4L2 pipeline string
     return cv2.VideoCapture(src, cv2.CAP_GSTREAMER)
+
+
+def follow_loop(state):
+    """When tracking is on, steer the gimbal to keep the target centred."""
+    while state.running:
+        if state.tracking and state.follower is not None:
+            with state.lock:
+                frame = state.frame
+                dets = list(state.dets)
+            if frame is not None:
+                h, w = frame.shape[:2]
+                state.target = state.follower.step(dets, w, h)
+            else:
+                state.target = None
+        else:
+            if state.follower is not None:
+                state.follower.stop()
+            state.target = None
+        time.sleep(0.066)
 
 
 def capture_loop(state, cap):
@@ -302,12 +526,29 @@ def inference_loop(state, rknn, in_sz, conf, nms, num_classes, track_on, filter_
             count, t0 = 0, time.time()
 
 
+def _status_json(state):
+    g = state.gimbal
+    mode = {0: "lock", 1: "follow", 2: "fpv"}.get(g.motion_mode if g else -1, "?")
+    return ('{"yaw":%s,"pitch":%s,"roll":%s,"recording":%s,"mode":"%s","tracking":%s,'
+            '"firmware":"%s","hardwareId":"%s"}' % (
+                g.yaw if g else 0, g.pitch if g else 0, g.roll if g else 0,
+                str(g.recording if g else False).lower(), mode, str(state.tracking).lower(),
+                g.firmware if g else "", g.hardware_id if g else ""))
+
+
 def make_handler(state):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
-        def do_GET(self):
+        def _send(self, code, ctype, body):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body if isinstance(body, bytes) else body.encode())
+
+        def _stream(self):
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=--mjpeg")
             self.send_header("Cache-Control", "no-store")
@@ -318,21 +559,122 @@ def make_handler(state):
                         frame = None if state.frame is None else state.frame.copy()
                         dets = list(state.dets)
                         hud = f"FPS {state.stream_fps}  |  det {state.det_fps}"
+                        tracking, target, q = state.tracking, state.target, state.jpeg_q
                     if frame is None:
-                        time.sleep(0.02)
-                        continue
-                    draw(frame, dets, hud, state.labels)
-                    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        time.sleep(0.02); continue
+                    draw(frame, dets, hud, state.labels, tracking, target)
+                    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
                     if not ok:
                         continue
-                    self.wfile.write(b"--mjpeg\r\nContent-Type: image/jpeg\r\n"
-                                     b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n")
-                    self.wfile.write(jpg.tobytes())
-                    self.wfile.write(b"\r\n")
+                    self.wfile.write(b"--mjpeg\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(jpg)).encode() + b"\r\n\r\n")
+                    self.wfile.write(jpg.tobytes()); self.wfile.write(b"\r\n")
                     time.sleep(0.005)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        def do_GET(self):
+            u = urlparse(self.path); path = u.path
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if path == "/stream" or (path == "/" and state.gimbal is None):
+                self._stream(); return
+            if path == "/":
+                self._send(200, "text/html; charset=utf-8", PANEL); return
+
+            g = state.gimbal
+            fol = state.follower
+            try:
+                if path in ("/status", "/attitude"):
+                    if path == "/attitude" and g: g.request_attitude()
+                elif g is None:
+                    pass
+                elif path == "/rotate":  g.rotate(int(float(q.get("yaw", 0))), int(float(q.get("pitch", 0))))
+                elif path == "/stop":    g.stop_rotation()
+                elif path == "/angle":   g.set_angle(float(q.get("yaw", 0)), float(q.get("pitch", 0)))
+                elif path == "/center":  g.center()
+                elif path == "/zoom":
+                    if "x" in q: g.absolute_zoom(float(q["x"]))
+                    elif q.get("dir") == "in": g.manual_zoom(1)
+                    elif q.get("dir") == "out": g.manual_zoom(-1)
+                    else: g.manual_zoom(0)
+                elif path == "/focus":
+                    g.manual_focus(1 if q.get("dir") == "far" else -1 if q.get("dir") == "near" else 0)
+                elif path == "/autofocus": g.autofocus()
+                elif path == "/photo":   g.take_photo()
+                elif path == "/record":  g.toggle_record()
+                elif path == "/hdr":     g.toggle_hdr()
+                elif path == "/mode":
+                    m = q.get("m")
+                    (g.set_lock if m == "lock" else g.set_follow if m == "follow"
+                     else g.set_fpv if m == "fpv" else (lambda: None))()
+                elif path == "/track":
+                    on = q.get("on")
+                    state.tracking = (on in ("1", "true")) if on is not None else (not state.tracking)
+                elif path == "/pick":
+                    if fol is not None and "nx" in q and "ny" in q:
+                        fol.request_pick(float(q["nx"]), float(q["ny"])); state.tracking = True
+                elif path == "/config":  g.request_config()
+                elif path == "/version": g.request_firmware(); g.request_hardware_id()
+                else:
+                    self._send(404, "text/plain", "not found"); return
+                self._send(200, "application/json", _status_json(state))
+            except Exception as e:
+                self._send(500, "text/plain", f"error: {e}")
     return Handler
+
+
+PANEL = """
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIYI Gimbal</title><style>
+*{box-sizing:border-box}body{margin:0;background:#000;font-family:system-ui,sans-serif;color:#eee;overflow:hidden}
+#vid{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000;cursor:crosshair}
+.ov{position:fixed;z-index:2}button{background:rgba(20,20,20,.6);color:#eee;border:1px solid #777;border-radius:10px;
+padding:12px 14px;font-size:16px;margin:3px;cursor:pointer}button:active{background:#00e676;color:#000}
+#st{top:8px;left:8px;font-family:monospace;white-space:pre;background:rgba(0,0,0,.5);padding:8px 10px;border-radius:8px;font-size:13px}
+#trk{top:8px;left:50%;transform:translateX(-50%);padding:6px 12px;border-radius:8px;font-weight:bold;background:rgba(0,0,0,.5)}
+#pad{bottom:12px;left:12px;display:grid;grid-template-columns:repeat(3,56px);gap:4px}
+#side{bottom:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end}
+#top{top:8px;right:8px;display:flex;flex-wrap:wrap;justify-content:flex-end;max-width:60vw}
+input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;border-radius:6px;padding:6px}
+.grp{display:flex;align-items:center;margin:2px 0}
+</style></head><body>
+<img id="vid" alt="stream">
+<div id="st" class="ov">loading...</div>
+<div id="trk" class="ov">TRACK OFF <span style="opacity:.7">(Space / click)</span></div>
+<div id="pad" class="ov">
+<span></span><button data-y="0" data-p="60">^</button><span></span>
+<button data-y="-60" data-p="0">&lt;</button><button onclick="g('/center')">o</button><button data-y="60" data-p="0">&gt;</button>
+<span></span><button data-y="0" data-p="-60">v</button><span></span></div>
+<div id="top" class="ov">
+<button onclick="g('/track')">track</button>
+<button onclick="g('/mode?m=lock')">lock</button><button onclick="g('/mode?m=follow')">follow</button><button onclick="g('/mode?m=fpv')">fpv</button>
+<button onclick="g('/photo')">photo</button><button onclick="g('/record')">rec</button><button onclick="g('/hdr')">hdr</button></div>
+<div id="side" class="ov">
+<div class="grp"><button id="zin">+</button><button id="zout">-</button>x<input id="zx" value="2"><button onclick="g('/zoom?x='+zx.value)">set</button></div>
+<div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus+</button><button id="fn">focus-</button></div>
+<div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div></div>
+<script>
+var vid=document.getElementById('vid');vid.src='/stream';
+function g(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){})}
+function show(s){document.getElementById('st').textContent=
+ 'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\\nmode '+s.mode+'  rec '+s.recording+'\\nfw '+s.firmware+' hw '+s.hardwareId;
+ var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'* TRACK ON ':'TRACK OFF ');
+ t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
+function hold(el,dn,up){if(!el)return;el.onmousedown=dn;el.onmouseup=up;el.onmouseleave=up;
+ el.ontouchstart=function(e){e.preventDefault();dn()};el.ontouchend=function(e){e.preventDefault();up()}}
+document.querySelectorAll('#pad button[data-y]').forEach(function(b){
+ hold(b,function(){g('/rotate?yaw='+b.dataset.y+'&pitch='+b.dataset.p)},function(){g('/stop')})});
+hold(document.getElementById('zin'),function(){g('/zoom?dir=in')},function(){g('/zoom?dir=stop')});
+hold(document.getElementById('zout'),function(){g('/zoom?dir=out')},function(){g('/zoom?dir=stop')});
+hold(document.getElementById('ff'),function(){g('/focus?dir=far')},function(){g('/focus?dir=stop')});
+hold(document.getElementById('fn'),function(){g('/focus?dir=near')},function(){g('/focus?dir=stop')});
+document.addEventListener('keydown',function(e){if(e.code==='Space'||e.key===' '){e.preventDefault();g('/track')}});
+vid.addEventListener('click',function(e){var nw=vid.naturalWidth,nh=vid.naturalHeight;if(!nw||!nh)return;
+ var r=vid.getBoundingClientRect();var sc=Math.min(r.width/nw,r.height/nh);var dw=nw*sc,dh=nh*sc;
+ var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;var x=(e.clientX-ox)/dw,y=(e.clientY-oy)/dh;
+ if(x<0||x>1||y<0||y>1)return;g('/pick?nx='+x.toFixed(4)+'&ny='+y.toFixed(4))});
+setInterval(function(){fetch('/status').then(function(r){return r.json()}).then(show).catch(function(){})},1000);
+</script></body></html>"""
 
 
 def lan_ips():
@@ -365,6 +707,9 @@ def main():
     cam_h = int(env("YOLO_CAM_H", "480"))
     cam_fps = int(env("YOLO_CAM_FPS", "30"))
     track_on = env("YOLO_TRACK", "on").lower() != "off"
+    jpeg_q = int(env("YOLO_JPEG_Q", "75"))
+    gimbal_env = (env("YOLO_GIMBAL", "") or "").lower()
+    gimbal_on = gimbal_env == "on" or (gimbal_env != "off" and "192.168.144.25" in source)
 
     print("YOLO RKNN sidecar (NPU)")
     print(f"  model={model} source={source} input={in_sz} classes={num_classes} "
@@ -392,16 +737,33 @@ def main():
 
     state = State()
     state.labels = labels
+    state.jpeg_q = jpeg_q
     if labels:
         print(f"  labels: {len(labels)} custom classes")
+    if filter_set is not None:
+        print(f"  filter: only classes {sorted(filter_set)}")
+
+    if gimbal_on:
+        g_host = env("YOLO_GIMBAL_HOST", "192.168.144.25")
+        g_port = int(env("YOLO_GIMBAL_PORT", "37260"))
+        state.gimbal = SiyiGimbal(g_host, g_port)
+        state.follower = GimbalFollower(
+            state.gimbal,
+            max_speed=int(env("YOLO_TRACK_SPEED", "40")),
+            invert_yaw=env("YOLO_TRACK_INVERT_YAW", "off").lower() == "on",
+            invert_pitch=env("YOLO_TRACK_INVERT_PITCH", "off").lower() == "on")
+        threading.Thread(target=follow_loop, args=(state,), daemon=True).start()
+        print(f"  gimbal control: enabled ({g_host}:{g_port}) — Space/click to track")
+
     threading.Thread(target=capture_loop, args=(state, cap), daemon=True).start()
     threading.Thread(target=inference_loop,
                      args=(state, rknn, in_sz, conf, nms, num_classes, track_on, filter_set),
                      daemon=True).start()
 
     for ip in lan_ips():
-        print(f"  stream: http://{ip}:{port}")
-    print("  (open a stream URL above in a browser or VLC on the same network)")
+        print(f"  open: http://{ip}:{port}   (video + gimbal control)" if gimbal_on
+              else f"  stream: http://{ip}:{port}")
+    print("  (open the URL above in a browser on the same network)")
 
     server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(state))
     try:
@@ -410,6 +772,8 @@ def main():
         pass
     finally:
         state.running = False
+        if state.gimbal is not None:
+            state.gimbal.close()
         rknn.release()
 
 

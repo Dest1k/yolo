@@ -25,7 +25,8 @@ class SiyiControlServer(
     private val gimbal: SiyiGimbal,
     private val port: Int = 8081,
     private val streamPort: Int = 8080,
-    private val tracking: java.util.concurrent.atomic.AtomicBoolean? = null
+    private val tracking: java.util.concurrent.atomic.AtomicBoolean? = null,
+    private val follower: GimbalFollower? = null
 ) {
 
     private var server: HttpServer? = null
@@ -81,6 +82,12 @@ class SiyiControlServer(
                 "/track"    -> tracking?.let { t ->
                     when (q["on"]) { "1", "true" -> t.set(true); "0", "false" -> t.set(false); else -> t.set(!t.get()) }
                 }
+                "/pick"     -> {
+                    val nx = q["nx"]?.toFloatOrNull(); val ny = q["ny"]?.toFloatOrNull()
+                    if (follower != null && nx != null && ny != null) {
+                        follower.requestPick(nx, ny); tracking?.set(true)
+                    }
+                }
                 "/config"   -> gimbal.requestConfig()
                 "/version"  -> { gimbal.requestFirmwareVersion(); gimbal.requestHardwareId() }
                 else -> { sendText(ex, 404, "not found"); return }
@@ -122,7 +129,7 @@ class SiyiControlServer(
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIYI Gimbal</title><style>
 *{box-sizing:border-box} body{margin:0;background:#000;font-family:system-ui,sans-serif;color:#eee;overflow:hidden}
-#vid{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000}
+#vid{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000;cursor:crosshair}
 .ov{position:fixed;z-index:2} button{background:rgba(20,20,20,.6);color:#eee;border:1px solid #777;
 border-radius:10px;padding:12px 14px;font-size:16px;margin:3px;cursor:pointer;backdrop-filter:blur(3px)}
 button:active{background:#00e676;color:#000}
@@ -135,7 +142,7 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 </style></head><body>
 <img id="vid" alt="stream">
 <div id="st" class="ov">loading…</div>
-<div id="trk" class="ov" style="top:8px;left:50%;transform:translateX(-50%);padding:6px 12px;border-radius:8px;font-weight:bold;background:rgba(0,0,0,.5)">TRACK OFF <span style="opacity:.7">(Space)</span></div>
+<div id="trk" class="ov" style="top:8px;left:50%;transform:translateX(-50%);padding:6px 12px;border-radius:8px;font-weight:bold;background:rgba(0,0,0,.5)">TRACK OFF <span style="opacity:.7">(Space / click)</span></div>
 <div id="pad" class="ov">
 <span></span><button data-y="0" data-p="60">▲</button><span></span>
 <button data-y="-60" data-p="0">◀</button><button onclick="g('/center')">●</button><button data-y="60" data-p="0">▶</button>
@@ -160,6 +167,11 @@ function show(s){document.getElementById('st').textContent=
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'● TRACK ON ':'TRACK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
 document.addEventListener('keydown',function(e){if(e.code==='Space'||e.key===' '){e.preventDefault();g('/track')}});
+var vv=document.getElementById('vid');
+vv.addEventListener('click',function(e){var nw=vv.naturalWidth,nh=vv.naturalHeight;if(!nw||!nh)return;
+ var r=vv.getBoundingClientRect();var sc=Math.min(r.width/nw,r.height/nh);var dw=nw*sc,dh=nh*sc;
+ var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;var x=(e.clientX-ox)/dw,y=(e.clientY-oy)/dh;
+ if(x<0||x>1||y<0||y>1)return;g('/pick?nx='+x.toFixed(4)+'&ny='+y.toFixed(4))});
 function hold(el,down,up){if(!el)return;el.onmousedown=down;el.onmouseup=up;el.onmouseleave=up;
  el.ontouchstart=function(e){e.preventDefault();down()};el.ontouchend=function(e){e.preventDefault();up()};}
 document.querySelectorAll('#pad button[data-y]').forEach(function(b){
