@@ -20,6 +20,7 @@ Config via environment variables (same names as the JVM app where they overlap):
   YOLO_INPUT    model input size (square)                     (default: 640)
   YOLO_CLASSES  number of classes                  (default: labels count, else 80)
   YOLO_LABELS   path to labels.txt (one class per line) for custom models
+  YOLO_FILTER   keep only these classes (comma-separated indices or names)
   YOLO_CONF     confidence threshold 0..1                     (default: 0.25)
   YOLO_NMS      NMS IoU threshold 0..1                         (default: 0.45)
   YOLO_PORT     MJPEG server port                             (default: 8080)
@@ -63,6 +64,23 @@ def label_for(cls, labels=None):
     if labels is not None and 0 <= cls < len(labels):
         return labels[cls]
     return COCO[cls] if 0 <= cls < len(COCO) else f"cls{cls}"
+
+
+def parse_filter(spec, labels):
+    """Set of class indices to keep, from comma-separated indices or names."""
+    if not spec:
+        return None
+    names = labels if labels else COCO
+    out = set()
+    for tok in spec.split(","):
+        t = tok.strip()
+        if t.isdigit():
+            out.add(int(t))
+        else:
+            for i, n in enumerate(names):
+                if n.lower() == t.lower():
+                    out.add(i); break
+    return out or None
 
 
 def load_labels(path):
@@ -254,7 +272,7 @@ def capture_loop(state, cap):
     cap.release()
 
 
-def inference_loop(state, rknn, in_sz, conf, nms, num_classes, track_on):
+def inference_loop(state, rknn, in_sz, conf, nms, num_classes, track_on, filter_set=None):
     tracker = Tracker() if track_on else None
     count, t0 = 0, time.time()
     while state.running:
@@ -268,6 +286,8 @@ def inference_loop(state, rknn, in_sz, conf, nms, num_classes, track_on):
         try:
             outputs = rknn.inference(inputs=[lb])
             dets = decode(outputs, r, dw, dh, ow, oh, in_sz, conf, nms, num_classes)
+            if filter_set is not None:
+                dets = [d for d in dets if d[5] in filter_set]
         except Exception as e:           # keep the stream alive on a bad frame
             sys.stderr.write(f"inference error: {e}\n")
             dets = []
@@ -337,6 +357,7 @@ def main():
     in_sz = int(env("YOLO_INPUT", "640"))
     labels = load_labels(env("YOLO_LABELS"))
     num_classes = int(env("YOLO_CLASSES")) if env("YOLO_CLASSES") else (len(labels) if labels else 80)
+    filter_set = parse_filter(env("YOLO_FILTER"), labels)
     conf = float(env("YOLO_CONF", "0.25"))
     nms = float(env("YOLO_NMS", "0.45"))
     port = int(env("YOLO_PORT", "8080"))
@@ -375,7 +396,7 @@ def main():
         print(f"  labels: {len(labels)} custom classes")
     threading.Thread(target=capture_loop, args=(state, cap), daemon=True).start()
     threading.Thread(target=inference_loop,
-                     args=(state, rknn, in_sz, conf, nms, num_classes, track_on),
+                     args=(state, rknn, in_sz, conf, nms, num_classes, track_on, filter_set),
                      daemon=True).start()
 
     for ip in lan_ips():

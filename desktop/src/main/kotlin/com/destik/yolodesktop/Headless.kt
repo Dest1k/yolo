@@ -30,6 +30,8 @@ import java.util.concurrent.atomic.AtomicReference
  *   YOLO_CLASSES     number of classes              (default: labels count, else 80)
  *   YOLO_LABELS      path to a labels.txt (one class name per line) for custom
  *                    models — overrides the built-in COCO names
+ *   YOLO_FILTER      keep only these classes (comma-separated indices or names,
+ *                    e.g. "person" or "0,2"); applies to drawing, tracking, follow
  *   YOLO_CONF        confidence threshold 0..1                (default: 0.25)
  *   YOLO_PORT        MJPEG server port                        (default: 8080)
  *   YOLO_GPU         cpu | auto                               (default: cpu)
@@ -56,6 +58,16 @@ fun main() {
     val conf       = env("YOLO_CONF")?.toFloatOrNull() ?: 0.25f
     val port       = env("YOLO_PORT")?.toIntOrNull() ?: 8080
     val gpuAuto    = env("YOLO_GPU")?.lowercase() == "auto"
+    // Keep only these classes (comma-separated indices or names, e.g. "person" or
+    // "0,2"). Empty/unset = keep all. Filtering happens before tracking/drawing/
+    // follow, so it limits everything (e.g. follow only people).
+    val filterSet: Set<Int>? = env("YOLO_FILTER")?.let { spec ->
+        val names = labels ?: Render.cocoLabels.toList()
+        spec.split(",").mapNotNull { tok ->
+            val t = tok.trim()
+            t.toIntOrNull() ?: names.indexOfFirst { it.equals(t, true) }.takeIf { it >= 0 }
+        }.toSet().ifEmpty { null }
+    }
 
     println("YOLO Detector — headless")
     println("  model=$modelPath type=${if (isPt) "pt" else "onnx"} source=$source")
@@ -80,6 +92,7 @@ fun main() {
     println("  provider=$provider")
     if (!isPt) println("  model input: ${onnx.modelInputW}x${onnx.modelInputH}")
     if (labels != null) println("  labels: ${labels.size} custom classes")
+    if (filterSet != null) println("  filter: only classes $filterSet")
 
     val trackOn = env("YOLO_TRACK")?.lowercase() != "off"
     val jpegQ   = env("YOLO_JPEG_Q")?.toIntOrNull()?.coerceIn(1, 100) ?: 80
@@ -151,8 +164,9 @@ fun main() {
                 if (inferencing.compareAndSet(false, true)) {
                     inferExec.execute {
                         try {
-                            val raw = runCatching { if (isPt) pt.detect(snap) else onnx.detect(snap) }
+                            var raw = runCatching { if (isPt) pt.detect(snap) else onnx.detect(snap) }
                                 .getOrDefault(emptyList())
+                            if (filterSet != null) raw = raw.filter { it.cls in filterSet }
                             latestDets.set(
                                 if (trackOn) runCatching { tracker.update(raw, System.currentTimeMillis()) }
                                     .getOrDefault(raw) else raw
