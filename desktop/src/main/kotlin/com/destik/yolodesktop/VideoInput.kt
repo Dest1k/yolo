@@ -58,7 +58,10 @@ class VideoInput(
                 setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
                 setOption("fflags", "nobuffer")       // don't buffer — keep latency low
                 setOption("flags", "low_delay")
+                setOption("max_delay", "0")
                 setOption("reorder_queue_size", "0")
+                setOption("probesize", "100000")      // start fast, don't pre-buffer
+                setOption("analyzeduration", "0")
             }
             try {
                 grabber.start()

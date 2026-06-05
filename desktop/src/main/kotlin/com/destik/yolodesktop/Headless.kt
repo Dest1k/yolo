@@ -112,6 +112,7 @@ fun main() {
     // lag — the stream never waits on the slow CPU detector — and lets the video
     // run at camera FPS while detection updates as fast as it can.
     val latestDets  = AtomicReference<List<Detection>>(emptyList())
+    val latestFrame = AtomicReference<BufferedImage?>(null)
     val inferencing = AtomicBoolean(false)
     val inferExec   = Executors.newSingleThreadExecutor()
     val streamFps   = AtomicInteger(0)
@@ -130,19 +131,24 @@ fun main() {
                     loggedFrame = true
                     println("  video frame: ${img.width}x${img.height}")
                 }
-                val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
-                mjpeg.pushFrame(Render.draw(img, latestDets.get(), hud, labels), jpegQ)
-                streamMeter.tick()?.let { streamFps.set(it) }
-
-                // Kick inference on the latest frame if the detector is free.
+                // Keep the capture thread light so it drains the decoder and RTSP
+                // latency stays low: copy the frame (capture buffers are reused)
+                // and hand it off. Drawing + JPEG encode happen on the stream
+                // thread; inference on its own thread.
+                val snap = copyImage(img)
+                latestFrame.set(snap)
                 if (inferencing.compareAndSet(false, true)) {
-                    val snap = copyImage(img)   // detach from the capture buffer
                     inferExec.execute {
                         try {
                             val raw = runCatching { if (isPt) pt.detect(snap) else onnx.detect(snap) }
                                 .getOrDefault(emptyList())
-                            latestDets.set(if (trackOn) tracker.update(raw, System.currentTimeMillis()) else raw)
+                            latestDets.set(
+                                if (trackOn) runCatching { tracker.update(raw, System.currentTimeMillis()) }
+                                    .getOrDefault(raw) else raw
+                            )
                             detMeter.tick()?.let { detFps.set(it) }
+                        } catch (e: Throwable) {           // never let a bug kill the worker
+                            System.err.println("inference error: ${e.message}")
                         } finally {
                             inferencing.set(false)
                         }
@@ -153,9 +159,23 @@ fun main() {
         onError = { msg -> System.err.println(msg) }
     )
 
+    // Stream thread: draw boxes + HUD and push at encode speed, always using the
+    // newest captured frame (stale frames are dropped) so the stream never lags
+    // behind capture even when encoding can't keep up with the camera FPS.
+    val streamThread = Thread({
+        while (!Thread.currentThread().isInterrupted) {
+            val f = latestFrame.getAndSet(null)
+            if (f == null) { try { Thread.sleep(2) } catch (e: InterruptedException) { break }; continue }
+            val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
+            runCatching { mjpeg.pushFrame(Render.draw(f, latestDets.get(), hud, labels), jpegQ) }
+            streamMeter.tick()?.let { streamFps.set(it) }
+        }
+    }, "stream").apply { isDaemon = true; start() }
+
     Runtime.getRuntime().addShutdownHook(Thread {
         println("shutting down…")
         runCatching { video.stop() }
+        runCatching { streamThread.interrupt() }
         runCatching { inferExec.shutdownNow() }
         runCatching { control?.stop() }
         runCatching { gimbal?.close() }

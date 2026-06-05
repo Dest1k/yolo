@@ -21,11 +21,15 @@ class DetectionTracker(
 
     @Synchronized
     fun update(dets: List<Detection>, nowMs: Long): List<Detection> {
-        val matched = BooleanArray(tracks.size)
+        // Match only against tracks that existed at the start: tracks.add() below
+        // grows the list within this call, so bound the inner loop by the original
+        // count (and size `matched` to it) to avoid index-out-of-bounds.
+        val n = tracks.size
+        val matched = BooleanArray(n)
         for (d in dets) {
             var best = -1
             var bestIou = iouThreshold
-            for (i in tracks.indices) {
+            for (i in 0 until n) {
                 if (matched[i] || tracks[i].det.cls != d.cls) continue
                 val v = iou(tracks[i].det, d)
                 if (v >= bestIou) { bestIou = v; best = i }
