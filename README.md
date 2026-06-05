@@ -202,7 +202,10 @@ GUI и дисплей не нужны. После старта в консоль
 |---|---|---|
 | `YOLO_MODEL` | путь к модели `.onnx` или `.pt` | **обязательна** |
 | `YOLO_MODEL_TYPE` | `onnx` или `pt` | определяется по расширению |
-| `YOLO_SOURCE` | `0`/`1`… USB-камера, `rpicam` для CSI-камеры Raspberry Pi, или `http://…` MJPEG URL | `0` |
+| `YOLO_SOURCE` | `0`/`1`… USB-камера, `rpicam` (CSI Raspberry Pi), `rtsp://…` (напр. SIYI ZR10), или `http://…` MJPEG URL | `0` |
+| `YOLO_GIMBAL` | `on`/`off` — управление подвесом SIYI + веб-панель (авто-`on` для SIYI RTSP) | `off` |
+| `YOLO_GIMBAL_HOST` / `YOLO_GIMBAL_PORT` | адрес камеры SIYI (UDP SDK) | `192.168.144.25` / `37260` |
+| `YOLO_CONTROL_PORT` | порт HTTP-API/панели управления подвесом | `YOLO_PORT`+1 |
 | `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | разрешение и FPS захвата (для всех источников: USB и `rpicam`) | `1280` / `720` / `30` |
 | `YOLO_JPEG_Q` | качество MJPEG-потока `1..100` | `80` |
 | `YOLO_TRACK` | `on` / `off` — IoU-трекинг и удержание рамок | `on` |
@@ -225,6 +228,32 @@ YOLO_MODEL=/home/pi/models/yolov10n.onnx YOLO_SOURCE=0 YOLO_INPUT=320 \
 `rpicam-apps` (`sudo apt install -y rpicam-apps`) и работающая камера
 (`rpicam-hello --list-cameras` должна её показать). На Pi 5 старым модулям нужен
 переходной шлейф 22-pin → 15-pin.
+
+### SIYI ZR10 — RTSP-поток и управление подвесом
+
+Подключи камеру SIYI по RTSP и включи управление подвесом одной командой:
+```bash
+YOLO_MODEL=/home/pi/models/yolov10n.onnx \
+  YOLO_SOURCE=rtsp://192.168.144.25:8554/main.264 \
+  ./gradlew :desktop:runHeadless --console=plain
+```
+Для SIYI-адреса управление подвесом включается автоматически (или явно
+`YOLO_GIMBAL=on`). В консоль выводится адрес панели управления
+`http://<IP-платы>:8081` — открой в браузере: стрелки (движение по скорости,
+удержание), абсолютный угол, центр, зум (ручной/абсолютный), фокус/автофокус,
+режимы lock/follow/FPV, фото/запись/HDR, телеметрия (yaw/pitch/roll). Всё это
+также доступно как HTTP-эндпоинты (`/rotate`, `/angle`, `/zoom`, `/mode`,
+`/status` …) — удобно дёргать из скриптов:
+```bash
+curl "http://<IP>:8081/angle?yaw=30&pitch=-20"
+curl "http://<IP>:8081/zoom?x=4.5"
+curl "http://<IP>:8081/status"
+```
+Протокол — UDP SIYI SDK (камера `192.168.144.25:37260`); поддержаны зум, фокус,
+вращение по скорости, абсолютный угол, центрирование, режимы движения,
+фото/запись/HDR и запросы версии/ID/аттитюда/конфига. Реализовано по
+опубликованному SDK — проверь на своём ZR10, при расхождениях на уровне байт
+поправлю.
 
 ### Автозапуск при включении платы (systemd)
 

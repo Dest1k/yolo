@@ -19,8 +19,10 @@ import java.util.concurrent.atomic.AtomicReference
  * model), so it slots cleanly into a systemd unit:
  *   YOLO_MODEL       path to model file (.onnx or .pt)        [required]
  *   YOLO_MODEL_TYPE  onnx | pt              (default: inferred from extension)
- *   YOLO_SOURCE      "0"/"1"… USB webcam, "rpicam" for a Pi CSI camera, or an
- *                    http MJPEG URL                           (default: "0")
+ *   YOLO_SOURCE      "0"/"1"… USB webcam, "rpicam" for a Pi CSI camera, an
+ *                    rtsp:// URL (e.g. SIYI ZR10), or an http MJPEG URL  (def: "0")
+ *   YOLO_GIMBAL      on | off — SIYI gimbal control + web panel (auto-on for the
+ *                    SIYI RTSP source). YOLO_GIMBAL_HOST/PORT, YOLO_CONTROL_PORT.
  *   YOLO_CAM_W/H/FPS capture geometry (all source types)  (default: 1280x720@30)
  *   YOLO_JPEG_Q      MJPEG stream quality 1..100                    (default: 80)
  *   YOLO_TRACK       on | off  — IoU tracking / box persistence     (default: on)
@@ -87,6 +89,23 @@ fun main() {
     for (ip in lanAddresses()) println("  stream: http://$ip:$port")
     println("  (open a stream URL above in a browser or VLC on the same network)")
 
+    // ── SIYI gimbal control (e.g. ZR10) ──────────────────────────────────────
+    // Enabled with YOLO_GIMBAL=on (auto-on when the source is the SIYI RTSP feed).
+    var gimbal: SiyiGimbal? = null
+    var control: SiyiControlServer? = null
+    val gimbalEnv = env("YOLO_GIMBAL")?.lowercase()
+    val gimbalOn = gimbalEnv == "on" ||
+        (gimbalEnv != "off" && source.contains("192.168.144.25"))
+    if (gimbalOn) {
+        val gHost = env("YOLO_GIMBAL_HOST") ?: "192.168.144.25"
+        val gPort = env("YOLO_GIMBAL_PORT")?.toIntOrNull() ?: 37260
+        val cPort = env("YOLO_CONTROL_PORT")?.toIntOrNull() ?: (port + 1)
+        val g = SiyiGimbal(gHost, gPort).also { it.start() }
+        gimbal = g
+        control = SiyiControlServer(g, cPort).also { it.start() }
+        for (ip in lanAddresses()) println("  gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
+    }
+
     // Decoupled pipeline: the capture thread streams every frame at full camera
     // FPS with the last known boxes; inference runs on a separate thread over the
     // *latest* frame only (intermediate frames are dropped). This kills the input
@@ -138,6 +157,8 @@ fun main() {
         println("shutting down…")
         runCatching { video.stop() }
         runCatching { inferExec.shutdownNow() }
+        runCatching { control?.stop() }
+        runCatching { gimbal?.close() }
         runCatching { mjpeg.stop() }
         runCatching { onnx.close() }
         runCatching { pt.close() }

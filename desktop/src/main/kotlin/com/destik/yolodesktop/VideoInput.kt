@@ -1,5 +1,6 @@
 package com.destik.yolodesktop
 
+import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
 import org.bytedeco.javacv.Java2DFrameConverter
 import org.bytedeco.javacv.OpenCVFrameGrabber
@@ -37,6 +38,7 @@ class VideoInput(
 
     private fun loop() {
         when {
+            source.startsWith("rtsp", ignoreCase = true) -> runRtspLoop()
             source.startsWith("http", ignoreCase = true) -> runMjpegLoop()
             // CSI ribbon camera on a Raspberry Pi (libcamera stack): not a V4L2
             // /dev/videoN device, so OpenCV can't open it by index. Stream it via
@@ -44,6 +46,38 @@ class VideoInput(
             source.equals("rpicam", true) || source.equals("libcamera", true) ||
                 source.equals("csi", true) -> runRpicamLoop()
             else -> runWebcamLoop()
+        }
+    }
+
+    /** RTSP stream (e.g. SIYI ZR10: rtsp://192.168.144.25:8554/main.264) via FFmpeg. */
+    private fun runRtspLoop() {
+        while (running.get() && !Thread.currentThread().isInterrupted) {
+            val grabber = FFmpegFrameGrabber(source).apply {
+                format = "rtsp"
+                setOption("rtsp_transport", "tcp")   // reliable; avoids UDP packet loss tearing
+                setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
+                setOption("fflags", "nobuffer")       // don't buffer — keep latency low
+                setOption("flags", "low_delay")
+                setOption("reorder_queue_size", "0")
+            }
+            try {
+                grabber.start()
+                val converter = Java2DFrameConverter()
+                while (running.get() && !Thread.currentThread().isInterrupted) {
+                    val frame: Frame = grabber.grabImage() ?: continue
+                    val img = converter.convert(frame) ?: continue
+                    onFrame(ensureRgb(img))
+                }
+            } catch (e: InterruptedException) {
+                break
+            } catch (e: Exception) {
+                if (!running.get()) break
+                onError("RTSP error: ${e.message} — reconnecting…")
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
+            } finally {
+                runCatching { grabber.stop() }
+                runCatching { grabber.release() }
+            }
         }
     }
 
