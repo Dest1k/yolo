@@ -51,11 +51,13 @@ class VideoInput(
 
     /** RTSP stream (e.g. SIYI ZR10: rtsp://192.168.144.25:8554/main.264) via FFmpeg. */
     private fun runRtspLoop() {
-        // If the H.265 decoder loses a reference frame (network blip, or we just
-        // joined the stream mid-GOP before a keyframe) it can't reconstruct
-        // anything until the next keyframe and the picture freezes. If frames stop
-        // arriving for this long, tear the grabber down and reconnect — that forces
-        // the camera to send a fresh keyframe and resyncs the decoder.
+        // An H.265 stream can only be decoded starting from a keyframe (IDR). When
+        // we connect we almost always join mid-GOP, so the decoder has no reference
+        // and every frame until the next keyframe is garbage ("Could not find ref
+        // with POC …" — green/black/smeared). The fix: drop everything until we've
+        // seen the first keyframe, then the picture decodes cleanly. If no keyframe
+        // (or no frame at all) arrives within staleMs, reconnect — a fresh RTSP
+        // session usually makes the camera emit a new IDR right away.
         val staleMs = 5000L
         while (running.get() && !Thread.currentThread().isInterrupted) {
             val grabber = FFmpegFrameGrabber(source).apply {
@@ -64,11 +66,8 @@ class VideoInput(
                 setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
                 setOption("fflags", "nobuffer")       // don't buffer — keep latency low
                 setOption("flags", "low_delay")
-                // Was reorder_queue_size 0 + max_delay 0 — so aggressive the HEVC
-                // decoder could never rebuild after a lost reference and the picture
-                // froze. A small reorder queue lets it recover at the next keyframe
-                // while keeping latency low. (No discardcorrupt — that dropped *every*
-                // frame while joining mid-GOP and gave a black screen.)
+                // A small reorder queue lets the decoder rebuild after a lost
+                // reference instead of freezing, while keeping latency low.
                 setOption("reorder_queue_size", "16")
                 setOption("probesize", "100000")      // start fast, don't pre-buffer
                 setOption("analyzeduration", "0")
@@ -77,14 +76,22 @@ class VideoInput(
                 grabber.start()
                 val converter = Java2DFrameConverter()
                 var lastFrameAt = System.currentTimeMillis()
+                var sawKeyframe = false
                 while (running.get() && !Thread.currentThread().isInterrupted) {
                     val frame: Frame? = grabber.grabImage()
                     if (frame == null) {
                         if (System.currentTimeMillis() - lastFrameAt > staleMs) {
-                            onError("RTSP stalled (no frames ${staleMs}ms) — reconnecting…")
+                            onError("RTSP: no ${if (sawKeyframe) "frames" else "keyframe"} ${staleMs}ms — reconnecting…")
                             break
                         }
                         continue
+                    }
+                    // Hold off display until the first keyframe so we never show the
+                    // garbled mid-GOP frames the decoder can't reconstruct.
+                    if (!sawKeyframe) {
+                        if (!frame.keyFrame) continue
+                        sawKeyframe = true
+                        println("  RTSP: locked onto keyframe — streaming")
                     }
                     val img = converter.convert(frame) ?: continue
                     lastFrameAt = System.currentTimeMillis()
@@ -253,7 +260,6 @@ class VideoInput(
             // boundary-scan fallback
             val baos = ByteArrayOutputStream(64 * 1024)
             val marker = "--$boundary".toByteArray()
-            val buf = ByteArray(4096)
             while (true) {
                 val b = inp.read()
                 if (b == -1) break
