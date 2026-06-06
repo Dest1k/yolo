@@ -38,6 +38,17 @@ class VideoInput(
 
     private fun loop() {
         when {
+            // Hardware-decode path (YOLO_HWDEC=on): pipe through the *system* ffmpeg
+            // so it can use the board's hardware video decoder (e.g. the Pi 5's HEVC
+            // block) instead of JavaCV's CPU-only bundled ffmpeg. Works for rtsp://
+            // and http(s):// URLs. Falls back below if ffmpeg isn't on PATH.
+            hwDecRequested() && (source.startsWith("rtsp", true) || source.startsWith("http", true)) -> {
+                if (hasSystemFfmpeg()) runSystemFfmpegLoop()
+                else {
+                    onError("YOLO_HWDEC=on but 'ffmpeg' not found on PATH — falling back to software decode. Install with: sudo apt install -y ffmpeg")
+                    if (source.startsWith("rtsp", true)) runRtspLoop() else runMjpegLoop()
+                }
+            }
             source.startsWith("rtsp", ignoreCase = true) -> runRtspLoop()
             source.startsWith("http", ignoreCase = true) -> runMjpegLoop()
             // CSI ribbon camera on a Raspberry Pi (libcamera stack): not a V4L2
@@ -48,6 +59,84 @@ class VideoInput(
             else -> runWebcamLoop()
         }
     }
+
+    private fun hwDecRequested() = System.getenv("YOLO_HWDEC")?.trim()?.lowercase() == "on"
+
+    private fun hasSystemFfmpeg(): Boolean = runCatching {
+        ProcessBuilder("ffmpeg", "-version").redirectErrorStream(true).start()
+            .also { it.inputStream.readBytes(); it.waitFor() }.exitValue() == 0
+    }.getOrDefault(false)
+
+    /**
+     * Hardware-accelerated RTSP/HTTP decode via the system `ffmpeg`. ffmpeg decodes
+     * (using the board's HW decoder when available) and emits raw BGR frames to
+     * stdout; we read them at a fixed size and wrap them as [BufferedImage].
+     *
+     * On a Raspberry Pi 5 the stock ffmpeg auto-selects the hardware HEVC decoder.
+     * To force a specific decoder set YOLO_FFMPEG_DECODER (e.g. "hevc_v4l2m2m").
+     * Output geometry is YOLO_CAM_W/H (default 1280x720, the ZR10 main stream size).
+     */
+    private fun runSystemFfmpegLoop() {
+        val w = camW(); val h = camH()
+        val frameBytes = w * h * 3
+        val decoder = System.getenv("YOLO_FFMPEG_DECODER")?.trim()?.takeIf { it.isNotEmpty() }
+        while (running.get() && !Thread.currentThread().isInterrupted) {
+            val cmd = buildList {
+                add("ffmpeg"); add("-hide_banner"); add("-loglevel"); add("warning")
+                if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add("tcp") }
+                add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
+                if (decoder != null) { add("-c:v"); add(decoder) }   // force HW decoder if asked
+                add("-i"); add(source)
+                add("-an")                                            // no audio
+                add("-vf"); add("scale=$w:$h")                        // fixed size → fixed frame bytes
+                add("-pix_fmt"); add("bgr24"); add("-f"); add("rawvideo"); add("-")
+            }
+            println("  RTSP: hardware decode via system ffmpeg${decoder?.let { " ($it)" } ?: ""} → ${w}x$h")
+            var proc: Process? = null
+            try {
+                proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
+                // Surface ffmpeg's stderr so the user can see whether HW decode engaged.
+                val err = proc.errorStream
+                Thread { runCatching { err.bufferedReader().forEachLine { System.err.println("ffmpeg: $it") } } }
+                    .apply { isDaemon = true; start() }
+                val inp = proc.inputStream
+                val buf = ByteArray(frameBytes)
+                while (running.get() && !Thread.currentThread().isInterrupted) {
+                    if (!readFully(inp, buf)) break              // pipe closed / ffmpeg exited
+                    onFrame(bgrToImage(buf, w, h))
+                }
+            } catch (e: InterruptedException) {
+                break
+            } catch (e: Exception) {
+                if (!running.get()) break
+                onError("ffmpeg decode error: ${e.message} — reconnecting…")
+            } finally {
+                runCatching { proc?.destroy() }
+            }
+            if (!running.get()) break
+            try { Thread.sleep(1500) } catch (_: InterruptedException) { break }  // reconnect backoff
+        }
+    }
+
+    /** Reads exactly buf.size bytes; returns false on EOF before the buffer fills. */
+    private fun readFully(inp: InputStream, buf: ByteArray): Boolean {
+        var off = 0
+        while (off < buf.size) {
+            val n = inp.read(buf, off, buf.size - off)
+            if (n < 0) return false
+            off += n
+        }
+        return true
+    }
+
+    /** Wraps a packed bgr24 buffer as a BufferedImage (no per-pixel copy). */
+    private fun bgrToImage(buf: ByteArray, w: Int, h: Int): BufferedImage {
+        val img = BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR)
+        val dst = (img.raster.dataBuffer as java.awt.image.DataBufferByte).data
+        System.arraycopy(buf, 0, dst, 0, minOf(buf.size, dst.size))
+        return img
+    }
+
 
     /** RTSP stream (e.g. SIYI ZR10: rtsp://192.168.144.25:8554/main.264) via FFmpeg. */
     private fun runRtspLoop() {
