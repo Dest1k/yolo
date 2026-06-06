@@ -124,7 +124,7 @@ class VideoInput(
                 add("-i"); add(source)
                 add("-an")                                            // no audio
                 if (vf.isNotEmpty()) { add("-vf"); add(vf) }
-                add("-c:v"); add("mjpeg"); add("-q:v"); add("3")      // high-quality intermediate JPEG
+                add("-c:v"); add("mjpeg"); add("-q:v"); add("5")      // intermediate JPEG (re-encoded for the browser anyway)
                 // image2pipe emits one complete JPEG per frame as it's encoded.
                 add("-f"); add("image2pipe"); add("-")
             }
@@ -181,7 +181,7 @@ class VideoInput(
                     if (img != null) {
                         onFrame(ensureRgb(img)); count++
                         if (count == 1L) println("  RTSP: first frame from ffmpeg ${img.width}x${img.height} — pipe OK")
-                        else if (count % 300L == 0L) println("  RTSP: $count frames decoded from ffmpeg")
+                        else if (count % 100L == 0L) println("  RTSP: $count frames decoded from ffmpeg")
                     }
                     inFrame = false
                 }
