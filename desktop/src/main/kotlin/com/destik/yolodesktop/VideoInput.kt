@@ -83,52 +83,52 @@ class VideoInput(
     /**
      * RTSP/HTTP decode via the system `ffmpeg`, which is far more robust than
      * JavaCV's bundled one and can use the board's hardware decoder. ffmpeg decodes
-     * and emits raw BGR frames to stdout; we read them at a fixed size and wrap them
-     * as [BufferedImage].
+     * and re-encodes to MJPEG on stdout; we parse the JPEG frames (self-delimiting,
+     * so no fragile fixed-size framing) and decode them to [BufferedImage].
      *
-     * Decode mode (in order of preference for a Pi 5 HEVC stream):
-     *   • Software (default): just YOLO_HWDEC=on — most robust, the A76 handles 720p.
-     *   • Hardware via the V4L2 request API: YOLO_FFMPEG_HWACCEL=drm (the Pi 5's HEVC
-     *     block is a *stateless* decoder, reached through -hwaccel, NOT the old
-     *     hevc_v4l2m2m m2m device which only exists on the Pi 4). Optional
-     *     YOLO_FFMPEG_HWDEV (e.g. /dev/dri/card0). We add hwdownload so the frames
-     *     come back to CPU memory for the BGR pipe.
-     *   • Explicit decoder: YOLO_FFMPEG_DECODER (e.g. hevc on a build that maps it to HW).
-     * Output geometry is YOLO_CAM_W/H (default 1280x720, the ZR10 main stream size).
+     * MJPEG output (not raw bgr24) is deliberate: it sidesteps the unaccelerated
+     * yuv420p→bgr24 swscale path that re-inits per frame on this ffmpeg build and
+     * stalls. It's exactly what the known-good `ffmpeg … out.jpg` test used.
+     *
+     * Decode mode:
+     *   • Software (default) — most robust; the Pi 5 A76 handles 720p easily.
+     *   • Hardware via V4L2 request API: YOLO_FFMPEG_HWACCEL=drm (+ optional
+     *     YOLO_FFMPEG_HWDEV). hwdownload brings frames back for the MJPEG encoder.
+     *   • Explicit decoder: YOLO_FFMPEG_DECODER.
+     * Optional scaling only if YOLO_CAM_W/H are set (default: keep native size).
      */
     private fun runSystemFfmpegLoop() {
-        val w = camW(); val h = camH()
-        val frameBytes = w * h * 3
         // Effective decode config — may fall back to software if a HW attempt yields
         // no frames, so a bad YOLO_FFMPEG_* combo can't trap us in a retry loop.
         var decoder = System.getenv("YOLO_FFMPEG_DECODER")?.trim()?.takeIf { it.isNotEmpty() }
         var hwaccel = System.getenv("YOLO_FFMPEG_HWACCEL")?.trim()?.takeIf { it.isNotEmpty() }
         val hwdev   = System.getenv("YOLO_FFMPEG_HWDEV")?.trim()?.takeIf { it.isNotEmpty() }
+        val scale   = if (System.getenv("YOLO_CAM_W") != null || System.getenv("YOLO_CAM_H") != null)
+            "scale=${camW()}:${camH()}" else null
         while (running.get() && !Thread.currentThread().isInterrupted) {
-            // With a hwaccel the decoded frame may live in GPU memory; hwdownload
-            // pulls it back so scale→bgr24 can run on the CPU side for our raw pipe.
-            val vf = if (hwaccel != null) "hwdownload,scale=$w:$h" else "scale=$w:$h"
+            // hwaccel frames may live in GPU memory; hwdownload pulls them back so the
+            // MJPEG encoder (a CPU filter) can consume them.
+            val vf = listOfNotNull(hwaccel?.let { "hwdownload" }, scale).joinToString(",")
             val cmd = buildList {
                 add("ffmpeg"); add("-hide_banner"); add("-loglevel"); add("warning")
                 if (hwaccel != null) { add("-hwaccel"); add(hwaccel) }
                 if (hwdev != null && hwaccel != null) { add("-hwaccel_device"); add(hwdev) }
                 if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add(rtspTransport()) }
-                // NB: no -fflags nobuffer / -flags low_delay here — they make ffmpeg
-                // drop packets under jitter ("max delay reached. need to consume
-                // packet" → corruption). A little default buffering decodes cleanly.
-                // Opt back into low latency (at the cost of robustness) with
-                // YOLO_LOWLATENCY=on.
+                // NB: no -fflags nobuffer / -flags low_delay by default — they make
+                // ffmpeg drop packets under jitter ("max delay reached" → corruption).
+                // Opt into low latency (at the cost of robustness) with YOLO_LOWLATENCY=on.
                 if (System.getenv("YOLO_LOWLATENCY")?.trim()?.lowercase() == "on") {
                     add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
                 }
                 if (decoder != null) { add("-c:v"); add(decoder) }   // force decoder if asked
                 add("-i"); add(source)
                 add("-an")                                            // no audio
-                add("-vf"); add(vf)                                   // fixed size → fixed frame bytes
-                add("-pix_fmt"); add("bgr24"); add("-f"); add("rawvideo"); add("-")
+                if (vf.isNotEmpty()) { add("-vf"); add(vf) }
+                add("-c:v"); add("mjpeg"); add("-q:v"); add("3")      // high-quality intermediate JPEG
+                add("-f"); add("mjpeg"); add("-")
             }
             val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
-            println("  RTSP: system ffmpeg decode ($mode) → ${w}x$h")
+            println("  RTSP: system ffmpeg decode ($mode), MJPEG pipe")
             var proc: Process? = null
             var frames = 0L
             try {
@@ -137,13 +137,7 @@ class VideoInput(
                 val err = proc.errorStream
                 Thread { runCatching { err.bufferedReader().forEachLine { System.err.println("ffmpeg: $it") } } }
                     .apply { isDaemon = true; start() }
-                val inp = proc.inputStream
-                val buf = ByteArray(frameBytes)
-                while (running.get() && !Thread.currentThread().isInterrupted) {
-                    if (!readFully(inp, buf)) break              // pipe closed / ffmpeg exited
-                    frames++
-                    onFrame(bgrToImage(buf, w, h))
-                }
+                frames = readJpegFrames(proc.inputStream)
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -163,23 +157,33 @@ class VideoInput(
         }
     }
 
-    /** Reads exactly buf.size bytes; returns false on EOF before the buffer fills. */
-    private fun readFully(inp: InputStream, buf: ByteArray): Boolean {
-        var off = 0
-        while (off < buf.size) {
-            val n = inp.read(buf, off, buf.size - off)
-            if (n < 0) return false
-            off += n
+    /**
+     * Reads concatenated JPEG frames (each delimited by SOI 0xFFD8 … EOI 0xFFD9)
+     * from an MJPEG stream, decoding each and passing it to [onFrame]. Returns the
+     * number of frames emitted; stops on EOF / stop / interrupt.
+     */
+    private fun readJpegFrames(stream: InputStream): Long {
+        val inp = stream.buffered(1 shl 16)
+        val frame = ByteArrayOutputStream(1 shl 18)
+        var prev = -1; var inFrame = false; var count = 0L
+        while (running.get() && !Thread.currentThread().isInterrupted) {
+            val b = inp.read()
+            if (b == -1) break
+            if (!inFrame) {
+                if (prev == 0xFF && b == 0xD8) {            // start of image
+                    inFrame = true; frame.reset(); frame.write(0xFF); frame.write(0xD8)
+                }
+            } else {
+                frame.write(b)
+                if (prev == 0xFF && b == 0xD9) {            // end of image
+                    val img = javax.imageio.ImageIO.read(frame.toByteArray().inputStream())
+                    if (img != null) { onFrame(ensureRgb(img)); count++ }
+                    inFrame = false
+                }
+            }
+            prev = b
         }
-        return true
-    }
-
-    /** Wraps a packed bgr24 buffer as a BufferedImage (no per-pixel copy). */
-    private fun bgrToImage(buf: ByteArray, w: Int, h: Int): BufferedImage {
-        val img = BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR)
-        val dst = (img.raster.dataBuffer as java.awt.image.DataBufferByte).data
-        System.arraycopy(buf, 0, dst, 0, minOf(buf.size, dst.size))
-        return img
+        return count
     }
 
 
