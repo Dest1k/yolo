@@ -37,15 +37,16 @@ class VideoInput(
     }
 
     private fun loop() {
+        val isUrl = source.startsWith("rtsp", true) || source.startsWith("http", true)
         when {
-            // Hardware-decode path (YOLO_HWDEC=on): pipe through the *system* ffmpeg
-            // so it can use the board's hardware video decoder (e.g. the Pi 5's HEVC
-            // block) instead of JavaCV's CPU-only bundled ffmpeg. Works for rtsp://
-            // and http(s):// URLs. Falls back below if ffmpeg isn't on PATH.
-            hwDecRequested() && (source.startsWith("rtsp", true) || source.startsWith("http", true)) -> {
+            // Prefer the *system* ffmpeg for network streams: it's typically newer
+            // and (on a Pi) a Raspberry-Pi build that decodes far more reliably than
+            // JavaCV's bundled one, and can use the board's hardware decoder. Auto-on
+            // when ffmpeg is on PATH; YOLO_HWDEC=on forces it, =off keeps JavaCV.
+            isUrl && useSystemFfmpeg() -> {
                 if (hasSystemFfmpeg()) runSystemFfmpegLoop()
                 else {
-                    onError("YOLO_HWDEC=on but 'ffmpeg' not found on PATH — falling back to software decode. Install with: sudo apt install -y ffmpeg")
+                    onError("YOLO_HWDEC=on but 'ffmpeg' not found on PATH — falling back to JavaCV. Install with: sudo apt install -y ffmpeg")
                     if (source.startsWith("rtsp", true)) runRtspLoop() else runMjpegLoop()
                 }
             }
@@ -60,10 +61,17 @@ class VideoInput(
         }
     }
 
-    private fun hwDecRequested() = System.getenv("YOLO_HWDEC")?.trim()?.lowercase() == "on"
+    /** Whether to route network streams through the system ffmpeg. YOLO_HWDEC:
+     *  on/off explicit; otherwise auto = use it whenever ffmpeg is installed. */
+    private fun useSystemFfmpeg(): Boolean =
+        when (System.getenv("YOLO_HWDEC")?.trim()?.lowercase()) {
+            "off", "no", "0"  -> false
+            "on", "yes", "1"  -> true
+            else              -> hasSystemFfmpeg()   // auto
+        }
 
-    /** RTSP transport: "tcp" (default) or "udp". Set YOLO_RTSP_TRANSPORT=udp if a
-     *  TCP-interleaved feed (e.g. SIYI/LIVE555) loses packets after the keyframe. */
+    /** RTSP transport: "tcp" (default) or "udp". On a lossy link UDP drops packets
+     *  (corruption); TCP retransmits. Set YOLO_RTSP_TRANSPORT=udp only if TCP stalls. */
     private fun rtspTransport() =
         System.getenv("YOLO_RTSP_TRANSPORT")?.trim()?.lowercase()?.takeIf { it == "udp" || it == "tcp" } ?: "tcp"
 
@@ -105,7 +113,14 @@ class VideoInput(
                 if (hwaccel != null) { add("-hwaccel"); add(hwaccel) }
                 if (hwdev != null && hwaccel != null) { add("-hwaccel_device"); add(hwdev) }
                 if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add(rtspTransport()) }
-                add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
+                // NB: no -fflags nobuffer / -flags low_delay here — they make ffmpeg
+                // drop packets under jitter ("max delay reached. need to consume
+                // packet" → corruption). A little default buffering decodes cleanly.
+                // Opt back into low latency (at the cost of robustness) with
+                // YOLO_LOWLATENCY=on.
+                if (System.getenv("YOLO_LOWLATENCY")?.trim()?.lowercase() == "on") {
+                    add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
+                }
                 if (decoder != null) { add("-c:v"); add(decoder) }   // force decoder if asked
                 add("-i"); add(source)
                 add("-an")                                            // no audio
