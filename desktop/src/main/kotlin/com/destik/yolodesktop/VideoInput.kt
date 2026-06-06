@@ -61,18 +61,17 @@ class VideoInput(
             val grabber = FFmpegFrameGrabber(source).apply {
                 format = "rtsp"
                 setOption("rtsp_transport", "tcp")   // reliable; avoids UDP packet loss tearing
-                setOption("rtsp_flags", "prefer_tcp")
                 setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
-                // Keep latency low, but NOT so aggressive that HEVC can't recover a
-                // lost reference: discard corrupt frames (so a half-decoded garbled
-                // frame is never shown) and keep a small reorder queue so the decoder
-                // can rebuild from the next keyframe instead of stalling forever.
-                setOption("fflags", "nobuffer+discardcorrupt")
+                setOption("fflags", "nobuffer")       // don't buffer — keep latency low
                 setOption("flags", "low_delay")
-                setOption("err_detect", "ignore_err") // keep decoding past glitches
-                setOption("reorder_queue_size", "16") // was 0 — that blocked recovery
-                setOption("probesize", "500000")
-                setOption("analyzeduration", "1000000")
+                // Was reorder_queue_size 0 + max_delay 0 — so aggressive the HEVC
+                // decoder could never rebuild after a lost reference and the picture
+                // froze. A small reorder queue lets it recover at the next keyframe
+                // while keeping latency low. (No discardcorrupt — that dropped *every*
+                // frame while joining mid-GOP and gave a black screen.)
+                setOption("reorder_queue_size", "16")
+                setOption("probesize", "100000")      // start fast, don't pre-buffer
+                setOption("analyzeduration", "0")
             }
             try {
                 grabber.start()
