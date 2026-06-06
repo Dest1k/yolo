@@ -51,24 +51,44 @@ class VideoInput(
 
     /** RTSP stream (e.g. SIYI ZR10: rtsp://192.168.144.25:8554/main.264) via FFmpeg. */
     private fun runRtspLoop() {
+        // If the H.265 decoder loses a reference frame (network blip, or we just
+        // joined the stream mid-GOP before a keyframe) it can't reconstruct
+        // anything until the next keyframe and the picture freezes. If frames stop
+        // arriving for this long, tear the grabber down and reconnect — that forces
+        // the camera to send a fresh keyframe and resyncs the decoder.
+        val staleMs = 5000L
         while (running.get() && !Thread.currentThread().isInterrupted) {
             val grabber = FFmpegFrameGrabber(source).apply {
                 format = "rtsp"
                 setOption("rtsp_transport", "tcp")   // reliable; avoids UDP packet loss tearing
+                setOption("rtsp_flags", "prefer_tcp")
                 setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
-                setOption("fflags", "nobuffer")       // don't buffer — keep latency low
+                // Keep latency low, but NOT so aggressive that HEVC can't recover a
+                // lost reference: discard corrupt frames (so a half-decoded garbled
+                // frame is never shown) and keep a small reorder queue so the decoder
+                // can rebuild from the next keyframe instead of stalling forever.
+                setOption("fflags", "nobuffer+discardcorrupt")
                 setOption("flags", "low_delay")
-                setOption("max_delay", "0")
-                setOption("reorder_queue_size", "0")
-                setOption("probesize", "100000")      // start fast, don't pre-buffer
-                setOption("analyzeduration", "0")
+                setOption("err_detect", "ignore_err") // keep decoding past glitches
+                setOption("reorder_queue_size", "16") // was 0 — that blocked recovery
+                setOption("probesize", "500000")
+                setOption("analyzeduration", "1000000")
             }
             try {
                 grabber.start()
                 val converter = Java2DFrameConverter()
+                var lastFrameAt = System.currentTimeMillis()
                 while (running.get() && !Thread.currentThread().isInterrupted) {
-                    val frame: Frame = grabber.grabImage() ?: continue
+                    val frame: Frame? = grabber.grabImage()
+                    if (frame == null) {
+                        if (System.currentTimeMillis() - lastFrameAt > staleMs) {
+                            onError("RTSP stalled (no frames ${staleMs}ms) — reconnecting…")
+                            break
+                        }
+                        continue
+                    }
                     val img = converter.convert(frame) ?: continue
+                    lastFrameAt = System.currentTimeMillis()
                     onFrame(ensureRgb(img))
                 }
             } catch (e: InterruptedException) {
