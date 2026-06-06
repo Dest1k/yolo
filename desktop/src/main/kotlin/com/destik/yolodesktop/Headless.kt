@@ -24,6 +24,8 @@ import java.util.concurrent.atomic.AtomicReference
  *   YOLO_HWDEC       on | off — decode rtsp/http via the system ffmpeg so it can use
  *                    the board's HARDWARE decoder (e.g. Pi 5 HEVC). YOLO_FFMPEG_DECODER
  *                    forces a decoder (e.g. hevc_v4l2m2m); size = YOLO_CAM_W/H. (def: off)
+ *   YOLO_RTSP_TRANSPORT  tcp | udp — RTSP transport. Use udp if a TCP feed (SIYI/
+ *                    LIVE555) loses packets and stalls after the first frame. (def: tcp)
  *   YOLO_GIMBAL      on | off — SIYI gimbal control + web panel (auto-on for the
  *                    SIYI RTSP source). YOLO_GIMBAL_HOST/PORT, YOLO_CONTROL_PORT.
  *   YOLO_CAM_W/H/FPS capture geometry (all source types)  (default: 1280x720@30)

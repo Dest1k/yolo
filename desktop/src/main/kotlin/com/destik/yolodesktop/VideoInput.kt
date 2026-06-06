@@ -62,6 +62,11 @@ class VideoInput(
 
     private fun hwDecRequested() = System.getenv("YOLO_HWDEC")?.trim()?.lowercase() == "on"
 
+    /** RTSP transport: "tcp" (default) or "udp". Set YOLO_RTSP_TRANSPORT=udp if a
+     *  TCP-interleaved feed (e.g. SIYI/LIVE555) loses packets after the keyframe. */
+    private fun rtspTransport() =
+        System.getenv("YOLO_RTSP_TRANSPORT")?.trim()?.lowercase()?.takeIf { it == "udp" || it == "tcp" } ?: "tcp"
+
     private fun hasSystemFfmpeg(): Boolean = runCatching {
         ProcessBuilder("ffmpeg", "-version").redirectErrorStream(true).start()
             .also { it.inputStream.readBytes(); it.waitFor() }.exitValue() == 0
@@ -99,7 +104,7 @@ class VideoInput(
                 add("ffmpeg"); add("-hide_banner"); add("-loglevel"); add("warning")
                 if (hwaccel != null) { add("-hwaccel"); add(hwaccel) }
                 if (hwdev != null && hwaccel != null) { add("-hwaccel_device"); add(hwdev) }
-                if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add("tcp") }
+                if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add(rtspTransport()) }
                 add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
                 if (decoder != null) { add("-c:v"); add(decoder) }   // force decoder if asked
                 add("-i"); add(source)
@@ -176,7 +181,7 @@ class VideoInput(
         while (running.get() && !Thread.currentThread().isInterrupted) {
             val grabber = FFmpegFrameGrabber(source).apply {
                 format = "rtsp"
-                setOption("rtsp_transport", "tcp")   // reliable; avoids UDP packet loss tearing
+                setOption("rtsp_transport", rtspTransport())   // tcp default; udp if it loses packets
                 setOption("stimeout", "5000000")      // 5s socket timeout (microseconds)
                 setOption("fflags", "nobuffer")       // don't buffer — keep latency low
                 setOption("flags", "low_delay")
