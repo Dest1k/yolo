@@ -125,10 +125,7 @@ class VideoInput(
                 add("-an")                                            // no audio
                 if (vf.isNotEmpty()) { add("-vf"); add(vf) }
                 add("-c:v"); add("mjpeg"); add("-q:v"); add("3")      // high-quality intermediate JPEG
-                // image2pipe (not the raw mjpeg muxer) emits one complete JPEG per
-                // frame and flushes it immediately, so frames reach us in real time
-                // instead of sitting in ffmpeg's output buffer.
-                add("-flush_packets"); add("1")
+                // image2pipe emits one complete JPEG per frame as it's encoded.
                 add("-f"); add("image2pipe"); add("-")
             }
             val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
