@@ -68,30 +68,45 @@ class VideoInput(
     }.getOrDefault(false)
 
     /**
-     * Hardware-accelerated RTSP/HTTP decode via the system `ffmpeg`. ffmpeg decodes
-     * (using the board's HW decoder when available) and emits raw BGR frames to
-     * stdout; we read them at a fixed size and wrap them as [BufferedImage].
+     * RTSP/HTTP decode via the system `ffmpeg`, which is far more robust than
+     * JavaCV's bundled one and can use the board's hardware decoder. ffmpeg decodes
+     * and emits raw BGR frames to stdout; we read them at a fixed size and wrap them
+     * as [BufferedImage].
      *
-     * On a Raspberry Pi 5 the stock ffmpeg auto-selects the hardware HEVC decoder.
-     * To force a specific decoder set YOLO_FFMPEG_DECODER (e.g. "hevc_v4l2m2m").
+     * Decode mode (in order of preference for a Pi 5 HEVC stream):
+     *   • Software (default): just YOLO_HWDEC=on — most robust, the A76 handles 720p.
+     *   • Hardware via the V4L2 request API: YOLO_FFMPEG_HWACCEL=drm (the Pi 5's HEVC
+     *     block is a *stateless* decoder, reached through -hwaccel, NOT the old
+     *     hevc_v4l2m2m m2m device which only exists on the Pi 4). Optional
+     *     YOLO_FFMPEG_HWDEV (e.g. /dev/dri/card0). We add hwdownload so the frames
+     *     come back to CPU memory for the BGR pipe.
+     *   • Explicit decoder: YOLO_FFMPEG_DECODER (e.g. hevc on a build that maps it to HW).
      * Output geometry is YOLO_CAM_W/H (default 1280x720, the ZR10 main stream size).
      */
     private fun runSystemFfmpegLoop() {
         val w = camW(); val h = camH()
         val frameBytes = w * h * 3
         val decoder = System.getenv("YOLO_FFMPEG_DECODER")?.trim()?.takeIf { it.isNotEmpty() }
+        val hwaccel = System.getenv("YOLO_FFMPEG_HWACCEL")?.trim()?.takeIf { it.isNotEmpty() }
+        val hwdev   = System.getenv("YOLO_FFMPEG_HWDEV")?.trim()?.takeIf { it.isNotEmpty() }
+        // With a hwaccel the decoded frame may live in GPU memory; hwdownload pulls
+        // it back so scale→bgr24 can run on the CPU side for our raw pipe.
+        val vf = if (hwaccel != null) "hwdownload,scale=$w:$h" else "scale=$w:$h"
         while (running.get() && !Thread.currentThread().isInterrupted) {
             val cmd = buildList {
                 add("ffmpeg"); add("-hide_banner"); add("-loglevel"); add("warning")
+                if (hwaccel != null) { add("-hwaccel"); add(hwaccel) }
+                if (hwdev != null)   { add("-hwaccel_device"); add(hwdev) }
                 if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add("tcp") }
                 add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
-                if (decoder != null) { add("-c:v"); add(decoder) }   // force HW decoder if asked
+                if (decoder != null) { add("-c:v"); add(decoder) }   // force decoder if asked
                 add("-i"); add(source)
                 add("-an")                                            // no audio
-                add("-vf"); add("scale=$w:$h")                        // fixed size → fixed frame bytes
+                add("-vf"); add(vf)                                   // fixed size → fixed frame bytes
                 add("-pix_fmt"); add("bgr24"); add("-f"); add("rawvideo"); add("-")
             }
-            println("  RTSP: hardware decode via system ffmpeg${decoder?.let { " ($it)" } ?: ""} → ${w}x$h")
+            val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
+            println("  RTSP: system ffmpeg decode ($mode) → ${w}x$h")
             var proc: Process? = null
             try {
                 proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
