@@ -125,7 +125,11 @@ class VideoInput(
                 add("-an")                                            // no audio
                 if (vf.isNotEmpty()) { add("-vf"); add(vf) }
                 add("-c:v"); add("mjpeg"); add("-q:v"); add("3")      // high-quality intermediate JPEG
-                add("-f"); add("mjpeg"); add("-")
+                // image2pipe (not the raw mjpeg muxer) emits one complete JPEG per
+                // frame and flushes it immediately, so frames reach us in real time
+                // instead of sitting in ffmpeg's output buffer.
+                add("-flush_packets"); add("1")
+                add("-f"); add("image2pipe"); add("-")
             }
             val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
             println("  RTSP: system ffmpeg decode ($mode), MJPEG pipe")
@@ -177,7 +181,11 @@ class VideoInput(
                 frame.write(b)
                 if (prev == 0xFF && b == 0xD9) {            // end of image
                     val img = javax.imageio.ImageIO.read(frame.toByteArray().inputStream())
-                    if (img != null) { onFrame(ensureRgb(img)); count++ }
+                    if (img != null) {
+                        onFrame(ensureRgb(img)); count++
+                        if (count == 1L) println("  RTSP: first frame from ffmpeg ${img.width}x${img.height} — pipe OK")
+                        else if (count % 300L == 0L) println("  RTSP: $count frames decoded from ffmpeg")
+                    }
                     inFrame = false
                 }
             }
