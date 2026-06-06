@@ -86,17 +86,19 @@ class VideoInput(
     private fun runSystemFfmpegLoop() {
         val w = camW(); val h = camH()
         val frameBytes = w * h * 3
-        val decoder = System.getenv("YOLO_FFMPEG_DECODER")?.trim()?.takeIf { it.isNotEmpty() }
-        val hwaccel = System.getenv("YOLO_FFMPEG_HWACCEL")?.trim()?.takeIf { it.isNotEmpty() }
+        // Effective decode config — may fall back to software if a HW attempt yields
+        // no frames, so a bad YOLO_FFMPEG_* combo can't trap us in a retry loop.
+        var decoder = System.getenv("YOLO_FFMPEG_DECODER")?.trim()?.takeIf { it.isNotEmpty() }
+        var hwaccel = System.getenv("YOLO_FFMPEG_HWACCEL")?.trim()?.takeIf { it.isNotEmpty() }
         val hwdev   = System.getenv("YOLO_FFMPEG_HWDEV")?.trim()?.takeIf { it.isNotEmpty() }
-        // With a hwaccel the decoded frame may live in GPU memory; hwdownload pulls
-        // it back so scale→bgr24 can run on the CPU side for our raw pipe.
-        val vf = if (hwaccel != null) "hwdownload,scale=$w:$h" else "scale=$w:$h"
         while (running.get() && !Thread.currentThread().isInterrupted) {
+            // With a hwaccel the decoded frame may live in GPU memory; hwdownload
+            // pulls it back so scale→bgr24 can run on the CPU side for our raw pipe.
+            val vf = if (hwaccel != null) "hwdownload,scale=$w:$h" else "scale=$w:$h"
             val cmd = buildList {
                 add("ffmpeg"); add("-hide_banner"); add("-loglevel"); add("warning")
                 if (hwaccel != null) { add("-hwaccel"); add(hwaccel) }
-                if (hwdev != null)   { add("-hwaccel_device"); add(hwdev) }
+                if (hwdev != null && hwaccel != null) { add("-hwaccel_device"); add(hwdev) }
                 if (source.startsWith("rtsp", true)) { add("-rtsp_transport"); add("tcp") }
                 add("-fflags"); add("nobuffer"); add("-flags"); add("low_delay")
                 if (decoder != null) { add("-c:v"); add(decoder) }   // force decoder if asked
@@ -108,6 +110,7 @@ class VideoInput(
             val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
             println("  RTSP: system ffmpeg decode ($mode) → ${w}x$h")
             var proc: Process? = null
+            var frames = 0L
             try {
                 proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
                 // Surface ffmpeg's stderr so the user can see whether HW decode engaged.
@@ -118,6 +121,7 @@ class VideoInput(
                 val buf = ByteArray(frameBytes)
                 while (running.get() && !Thread.currentThread().isInterrupted) {
                     if (!readFully(inp, buf)) break              // pipe closed / ffmpeg exited
+                    frames++
                     onFrame(bgrToImage(buf, w, h))
                 }
             } catch (e: InterruptedException) {
@@ -129,6 +133,12 @@ class VideoInput(
                 runCatching { proc?.destroy() }
             }
             if (!running.get()) break
+            // If a HW attempt never produced a frame, that hwaccel/decoder isn't
+            // usable on this build — drop it and continue in pure software.
+            if (frames == 0L && (hwaccel != null || decoder != null)) {
+                onError("ffmpeg ($mode) produced no frames — falling back to software decode")
+                hwaccel = null; decoder = null
+            }
             try { Thread.sleep(1500) } catch (_: InterruptedException) { break }  // reconnect backoff
         }
     }
