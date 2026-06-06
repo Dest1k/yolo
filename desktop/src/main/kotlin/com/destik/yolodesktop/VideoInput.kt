@@ -75,23 +75,33 @@ class VideoInput(
             try {
                 grabber.start()
                 val converter = Java2DFrameConverter()
-                var lastFrameAt = System.currentTimeMillis()
-                var sawKeyframe = false
+                val connectAt = System.currentTimeMillis()
+                var lastFrameAt = connectAt
+                var streaming = false
+                // Give the decoder up to this long to flag a keyframe; if none is
+                // reported (long GOP, or grabImage doesn't set the flag on this
+                // build) we start streaming anyway rather than hang on a black
+                // screen — the decoder cleans itself up at the next real IDR.
+                val keyframeWaitMs = 3000L
                 while (running.get() && !Thread.currentThread().isInterrupted) {
                     val frame: Frame? = grabber.grabImage()
                     if (frame == null) {
                         if (System.currentTimeMillis() - lastFrameAt > staleMs) {
-                            onError("RTSP: no ${if (sawKeyframe) "frames" else "keyframe"} ${staleMs}ms — reconnecting…")
+                            onError("RTSP: no ${if (streaming) "frames" else "keyframe"} ${staleMs}ms — reconnecting…")
                             break
                         }
                         continue
                     }
                     // Hold off display until the first keyframe so we never show the
-                    // garbled mid-GOP frames the decoder can't reconstruct.
-                    if (!sawKeyframe) {
-                        if (!frame.keyFrame) continue
-                        sawKeyframe = true
-                        println("  RTSP: locked onto keyframe — streaming")
+                    // garbled mid-GOP frames the decoder can't reconstruct — but never
+                    // wait forever: release the gate after keyframeWaitMs regardless.
+                    if (!streaming) {
+                        when {
+                            frame.keyFrame -> println("  RTSP: locked onto keyframe — streaming")
+                            System.currentTimeMillis() - connectAt < keyframeWaitMs -> continue
+                            else -> println("  RTSP: no keyframe flag after ${keyframeWaitMs}ms — streaming anyway")
+                        }
+                        streaming = true
                     }
                     val img = converter.convert(frame) ?: continue
                     lastFrameAt = System.currentTimeMillis()
