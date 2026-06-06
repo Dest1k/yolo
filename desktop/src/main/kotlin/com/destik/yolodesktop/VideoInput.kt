@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 typealias FrameCallback = (BufferedImage) -> Unit
 
@@ -132,19 +133,38 @@ class VideoInput(
             println("  RTSP: system ffmpeg decode ($mode), MJPEG pipe")
             var proc: Process? = null
             var frames = 0L
+            val latestJpeg = AtomicReference<ByteArray?>(null)
+            val sessionRunning = AtomicBoolean(true)
+            var decodeThread: Thread? = null
             try {
                 proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
                 // Surface ffmpeg's stderr so the user can see whether HW decode engaged.
                 val err = proc.errorStream
                 Thread { runCatching { err.bufferedReader().forEachLine { System.err.println("ffmpeg: $it") } } }
                     .apply { isDaemon = true; start() }
-                frames = readJpegFrames(proc.inputStream)
+                // Decoder: decodes only the LATEST jpeg (drops any it can't keep up
+                // with) so pipe-draining never waits on the slow ImageIO decode.
+                decodeThread = Thread({
+                    var dec = 0L
+                    while (sessionRunning.get() && running.get() && !Thread.currentThread().isInterrupted) {
+                        val jpg = latestJpeg.getAndSet(null)
+                        if (jpg == null) { try { Thread.sleep(2) } catch (e: InterruptedException) { break }; continue }
+                        val img = runCatching { javax.imageio.ImageIO.read(jpg.inputStream()) }.getOrNull() ?: continue
+                        onFrame(ensureRgb(img))
+                        if (++dec == 1L) println("  RTSP: first frame decoded ${img.width}x${img.height} — OK")
+                    }
+                }, "mjpeg-decode").apply { isDaemon = true; start() }
+                // Drain the pipe fast (no decode here) → ffmpeg never blocks on write,
+                // so the RTSP session stays healthy (no more CSeq errors).
+                frames = drainJpegPipe(proc.inputStream, latestJpeg)
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
                 if (!running.get()) break
                 onError("ffmpeg decode error: ${e.message} — reconnecting…")
             } finally {
+                sessionRunning.set(false)
+                runCatching { decodeThread?.interrupt() }
                 runCatching { proc?.destroy() }
             }
             if (!running.get()) break
@@ -159,34 +179,37 @@ class VideoInput(
     }
 
     /**
-     * Reads concatenated JPEG frames (each delimited by SOI 0xFFD8 … EOI 0xFFD9)
-     * from an MJPEG stream, decoding each and passing it to [onFrame]. Returns the
-     * number of frames emitted; stops on EOF / stop / interrupt.
+     * Drains an MJPEG pipe, extracting complete JPEG frames (SOI 0xFFD8 … EOI
+     * 0xFFD9) and publishing each into [latest] (latest-wins, older frames dropped).
+     * Does NOT decode — that's the decode thread's job — so this loop is fast enough
+     * to keep the pipe empty and stop ffmpeg ever blocking on write. Reads in big
+     * chunks. Returns frames seen; stops on EOF / stop / interrupt.
      */
-    private fun readJpegFrames(stream: InputStream): Long {
-        val inp = stream.buffered(1 shl 16)
-        val frame = ByteArrayOutputStream(1 shl 18)
-        var prev = -1; var inFrame = false; var count = 0L
+    private fun drainJpegPipe(stream: InputStream, latest: AtomicReference<ByteArray?>): Long {
+        val buf = ByteArray(64 * 1024)
+        val frame = ByteArrayOutputStream(1 shl 19)
+        var prev = -1; var inFrame = false; var count = 0L; var bytes = 0L; var lastLog = 0L
         while (running.get() && !Thread.currentThread().isInterrupted) {
-            val b = inp.read()
-            if (b == -1) break
-            if (!inFrame) {
-                if (prev == 0xFF && b == 0xD8) {            // start of image
-                    inFrame = true; frame.reset(); frame.write(0xFF); frame.write(0xD8)
-                }
-            } else {
-                frame.write(b)
-                if (prev == 0xFF && b == 0xD9) {            // end of image
-                    val img = javax.imageio.ImageIO.read(frame.toByteArray().inputStream())
-                    if (img != null) {
-                        onFrame(ensureRgb(img)); count++
-                        if (count == 1L) println("  RTSP: first frame from ffmpeg ${img.width}x${img.height} — pipe OK")
-                        else if (count % 100L == 0L) println("  RTSP: $count frames decoded from ffmpeg")
+            val n = stream.read(buf)
+            if (n < 0) break
+            bytes += n
+            for (i in 0 until n) {
+                val b = buf[i].toInt() and 0xFF
+                if (!inFrame) {
+                    if (prev == 0xFF && b == 0xD8) {        // start of image
+                        inFrame = true; frame.reset(); frame.write(0xFF); frame.write(0xD8)
                     }
-                    inFrame = false
+                } else {
+                    frame.write(b)
+                    if (prev == 0xFF && b == 0xD9) {        // end of image
+                        latest.set(frame.toByteArray()); count++
+                        if (count == 1L) println("  RTSP: first frame from ffmpeg — pipe OK")
+                        else if (count % 100L == 0L) println("  RTSP: $count frames from ffmpeg (pipe bytes=$bytes)")
+                        inFrame = false
+                    }
                 }
+                prev = b
             }
-            prev = b
         }
         return count
     }
