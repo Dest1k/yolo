@@ -126,7 +126,10 @@ class VideoInput(
                 add("-an")                                            // no audio
                 if (vf.isNotEmpty()) { add("-vf"); add(vf) }
                 add("-c:v"); add("mjpeg"); add("-q:v"); add("5")      // intermediate JPEG (re-encoded for the browser anyway)
-                // image2pipe emits one complete JPEG per frame as it's encoded.
+                // stdout is a non-seekable pipe: ffmpeg buffers output and only ever
+                // flushed the first frame. flush_packets forces it to push every frame
+                // to the pipe immediately (now safe — pipe draining is decoupled/fast).
+                add("-flush_packets"); add("1")
                 add("-f"); add("image2pipe"); add("-")
             }
             val mode = hwaccel?.let { "hwaccel=$it" } ?: decoder?.let { "decoder=$it" } ?: "software"
@@ -134,10 +137,13 @@ class VideoInput(
             var proc: Process? = null
             var frames = 0L
             val latestJpeg = AtomicReference<ByteArray?>(null)
+            val lastFrameAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
             val sessionRunning = AtomicBoolean(true)
             var decodeThread: Thread? = null
+            var watchdog: Thread? = null
             try {
                 proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
+                val p = proc
                 // Surface ffmpeg's stderr so the user can see whether HW decode engaged.
                 val err = proc.errorStream
                 Thread { runCatching { err.bufferedReader().forEachLine { System.err.println("ffmpeg: $it") } } }
@@ -154,9 +160,21 @@ class VideoInput(
                         if (++dec == 1L) println("  RTSP: first frame decoded ${img.width}x${img.height} — OK")
                     }
                 }, "mjpeg-decode").apply { isDaemon = true; start() }
+                // Watchdog: if the pipe stalls (frames stop arriving) kill ffmpeg so we
+                // reconnect instead of hanging forever on a blocked read.
+                watchdog = Thread({
+                    while (sessionRunning.get() && running.get()) {
+                        try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+                        if (System.currentTimeMillis() - lastFrameAt.get() > 6000) {
+                            System.err.println("RTSP: pipe stalled >6s — restarting ffmpeg")
+                            runCatching { p.destroyForcibly() }
+                            break
+                        }
+                    }
+                }, "mjpeg-watchdog").apply { isDaemon = true; start() }
                 // Drain the pipe fast (no decode here) → ffmpeg never blocks on write,
                 // so the RTSP session stays healthy (no more CSeq errors).
-                frames = drainJpegPipe(proc.inputStream, latestJpeg)
+                frames = drainJpegPipe(proc.inputStream, latestJpeg, lastFrameAt)
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -165,6 +183,7 @@ class VideoInput(
             } finally {
                 sessionRunning.set(false)
                 runCatching { decodeThread?.interrupt() }
+                runCatching { watchdog?.interrupt() }
                 runCatching { proc?.destroy() }
             }
             if (!running.get()) break
@@ -185,10 +204,14 @@ class VideoInput(
      * to keep the pipe empty and stop ffmpeg ever blocking on write. Reads in big
      * chunks. Returns frames seen; stops on EOF / stop / interrupt.
      */
-    private fun drainJpegPipe(stream: InputStream, latest: AtomicReference<ByteArray?>): Long {
+    private fun drainJpegPipe(
+        stream: InputStream,
+        latest: AtomicReference<ByteArray?>,
+        lastFrameAt: java.util.concurrent.atomic.AtomicLong
+    ): Long {
         val buf = ByteArray(64 * 1024)
         val frame = ByteArrayOutputStream(1 shl 19)
-        var prev = -1; var inFrame = false; var count = 0L; var bytes = 0L; var lastLog = 0L
+        var prev = -1; var inFrame = false; var count = 0L; var bytes = 0L
         while (running.get() && !Thread.currentThread().isInterrupted) {
             val n = stream.read(buf)
             if (n < 0) break
@@ -202,7 +225,7 @@ class VideoInput(
                 } else {
                     frame.write(b)
                     if (prev == 0xFF && b == 0xD9) {        // end of image
-                        latest.set(frame.toByteArray()); count++
+                        latest.set(frame.toByteArray()); count++; lastFrameAt.set(System.currentTimeMillis())
                         if (count == 1L) println("  RTSP: first frame from ffmpeg — pipe OK")
                         else if (count % 100L == 0L) println("  RTSP: $count frames from ffmpeg (pipe bytes=$bytes)")
                         inFrame = false
