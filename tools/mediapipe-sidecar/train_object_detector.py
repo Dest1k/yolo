@@ -24,6 +24,9 @@ Performance tuning (all via env vars, with sensible defaults):
   MM_CACHE        dataset cache dir                  (default ./cache)
   MM_MAX_IMAGES   cap the training set (faster runs) (default: all)
   MM_QUIET        1 = silence TF/Keras/TFA chatter   (default 1; set 0 to debug)
+  MM_QUANT        float | int8 — int8 = QAT, smaller/faster on the Pi  (default float)
+  MM_QAT_EPOCHS   int8 QAT fine-tune epochs          (default 10)
+  MM_QAT_BATCH    int8 QAT batch size                (default 4)
 
 GPU note (RTX 50-series / Blackwell, sm_120): the TensorFlow that Model Maker
 pins is older than Blackwell, so the GPU may error ("no kernel image is available
@@ -170,6 +173,37 @@ def _make_hparams(**kw):
     return object_detector.HParams(**kw)
 
 
+def _quantize_int8(model, train_data, val_data):
+    """
+    Make the exported .tflite int8 via Quantization-Aware Training — the supported
+    int8 path for the MediaPipe object detector. It's a short extra fine-tune on the
+    quantised graph; afterwards export_model() emits an int8 model (~2–4× smaller,
+    notably faster on the Pi's CPU). Returns True if QAT ran, False to fall back to
+    float (older Model Maker without QAT, or any failure — never blocks the export).
+    """
+    import dataclasses
+    try:
+        qkw = dict(
+            learning_rate=float(_env("MM_QAT_LR", "0.3")),
+            batch_size=int(_env("MM_QAT_BATCH", "4")),
+            epochs=int(_env("MM_QAT_EPOCHS", "10")),
+            decay_steps=int(_env("MM_QAT_DECAY_STEPS", "6")),
+            decay_rate=float(_env("MM_QAT_DECAY_RATE", "0.96")),
+        )
+        qat_cls = object_detector.QATHParams
+        names = {f.name for f in dataclasses.fields(qat_cls)}
+        qat = qat_cls(**{k: v for k, v in qkw.items() if k in names})
+        print(f"Quantization-aware training (int8): epochs={qkw['epochs']} batch={qkw['batch_size']}…")
+        model.quantization_aware_training(train_data, val_data, qat_hparams=qat)
+        qloss, qmetrics = model.evaluate(val_data, batch_size=qkw["batch_size"])
+        print(f"  int8 (QAT) eval: loss={qloss}  metrics={qmetrics}")
+        return True
+    except Exception as e:
+        print(f"  WARNING: int8 QAT unavailable/failed → exporting float32 instead "
+              f"({type(e).__name__}: {e})")
+        return False
+
+
 def main():
     import math
     spec = _resolve_model(MODEL_NAME)
@@ -212,13 +246,18 @@ def main():
     model = object_detector.ObjectDetector.create(
         train_data=train_data, validation_data=val_data, options=options)
 
-    print("Evaluating…")
+    print("Evaluating (float)…")
     loss, coco_metrics = model.evaluate(val_data, batch_size=BATCH_SIZE)
     print(f"  loss={loss}  metrics={coco_metrics}")
 
-    # Exports an int8-quantised model.tflite (with label metadata) into EXPORT_DIR.
-    model.export_model()
-    print(f"Done → {os.path.join(EXPORT_DIR, 'model.tflite')}")
+    # Optional int8 quantization (faster on the Pi). MM_QUANT=int8 runs QAT first.
+    quant = _env("MM_QUANT", "float").lower()
+    is_int8 = quant in ("int8", "qat") and _quantize_int8(model, train_data, val_data)
+
+    # export_model() emits int8 after QAT, else float32. Writes into EXPORT_DIR.
+    model.export_model("model.tflite")
+    out = os.path.join(EXPORT_DIR, "model.tflite")
+    print(f"Done ({'int8' if is_int8 else 'float32'}) → {out}")
     print("Copy it to the Pi and run the sidecar with YOLO_MODEL=path/to/model.tflite")
 
 

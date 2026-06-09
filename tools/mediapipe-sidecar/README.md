@@ -153,6 +153,8 @@ Performance / run knobs (env vars):
 | `MM_MODEL` | model name; auto-resolves to what's installed (`lite0`, `mobilenet`…) | `lite0` |
 | `MM_LR` | learning rate (raise with big batches) | Model Maker default |
 | `MM_THREADS` | CPU op threads | all logical cores |
+| `MM_QUANT` | `float` or `int8` — int8 = smaller/faster on the Pi (via QAT) | `float` |
+| `MM_QAT_EPOCHS` | int8 QAT fine-tune epochs | `10` |
 | `MM_QUIET` | `1` = quiet output (just progress); `0` = full TF logs | `1` |
 | `MM_FORCE_CPU` | `1` = ignore the GPU | `0` |
 | `MM_MIXED` | `1` = mixed_float16 (only helps a working GPU) | `0` |
@@ -163,9 +165,22 @@ Examples:
 ```bash
 # quick first model on CPU: 10 epochs, 4k images, clean output
 MM_EPOCHS=10 MM_MAX_IMAGES=4000 python train_object_detector.py
+# int8 model (faster on the Pi) at 320 input
+MM_MODEL=320 MM_QUANT=int8 python train_object_detector.py
 # full run, see every TF log (debugging)
 MM_QUIET=0 python train_object_detector.py
 ```
+
+#### int8 (the FPS lever on the Pi)
+
+`MM_QUANT=int8` makes the exported `.tflite` **int8** instead of float32 —
+typically **~2–4× smaller and noticeably faster** on the Pi 5 CPU (often the
+difference between ~13 and ~20–30 FPS). For the MediaPipe object detector int8 is
+done via **Quantization-Aware Training (QAT)**: the script first trains the float
+model, then runs a short QAT fine-tune (`MM_QAT_EPOCHS`, default 10), and
+`export_model()` then emits the int8 model. If your Model Maker version doesn't
+support QAT it falls back to float32 automatically (you'll see a WARNING). The Pi
+sidecar runs int8 and float models the same way — no config change.
 
 ### Alternative — Google Colab (zero setup, free + supported GPU)
 
