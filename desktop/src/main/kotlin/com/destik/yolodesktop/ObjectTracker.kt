@@ -27,10 +27,11 @@ import kotlin.math.sqrt
  *   • The box is held (not moved) through brief misses, so it never drifts onto
  *     whatever is covering the target.
  *
- * Cost is bounded: templates are tiny (grid×grid), local search is small, and the
- * expensive wide re-acquire only runs while the target is actually lost (and only
- * every other miss frame). On a Raspberry Pi A76 this stays well within frame
- * budget and runs on the stream thread without denting FPS.
+ * Cost is bounded and stays off the inference cores: grayscale is extracted only
+ * for the *region actually searched* (not the whole frame), templates are tiny,
+ * the local search is small, and the wide re-acquire only runs while the target
+ * is lost (and only every other miss frame). On a Raspberry Pi A76 this runs on
+ * the stream thread without denting FPS, even while a lock is active.
  *
  * All state is owned by a single caller thread (the stream loop), so no locking is
  * needed — the web panel hands in lock/clear requests via [Headless], not here.
@@ -59,18 +60,23 @@ class ObjectTracker(
 
     @Volatile var locked = false; private set
 
-    // Scratch grayscale plane of the current frame, reused across the scan.
-    private var gray = IntArray(0)
+    // Full-frame dimensions (for clamping) + the grayscale of just the prepared
+    // region. Only the searched window is converted each frame, so the cost scales
+    // with the target size, not the (large) frame.
     private var gw = 0; private var gh = 0
+    private var rx0 = 0; private var ry0 = 0; private var rgw = 0; private var rgh = 0
+    private var gray = IntArray(0)
+    private var rgbBuf = IntArray(0)
     private val patch = FloatArray(tw * th)
 
     /** Begin tracking the patch inside the given pixel rectangle of [frame]. */
     fun lock(frame: BufferedImage, x1: Float, y1: Float, x2: Float, y2: Float) {
-        toGray(frame)
+        gw = frame.width; gh = frame.height
         val rx1 = x1.coerceIn(0f, (gw - 1).toFloat()); val ry1 = y1.coerceIn(0f, (gh - 1).toFloat())
         val rx2 = x2.coerceIn(rx1 + 4f, gw.toFloat()); val ry2 = y2.coerceIn(ry1 + 4f, gh.toFloat())
         cx = (rx1 + rx2) / 2f; cy = (ry1 + ry2) / 2f
         bw = rx2 - rx1; bh = ry2 - ry1
+        prepareGray(frame, rx1, ry1, rx2, ry2)
         sampleInto(template, rx1, ry1, rx2, ry2)
         System.arraycopy(template, 0, anchor, 0, template.size)   // anchor = the original view
         recomputeStats(template).let { tMean = it.first; tNorm = it.second }
@@ -87,10 +93,11 @@ class ObjectTracker(
      */
     fun update(frame: BufferedImage): Box? {
         if (!locked) return null
-        toGray(frame)
+        gw = frame.width; gh = frame.height
 
         // 1) Local search around the last position — the common, cheap case.
         val r = (max(bw, bh) * 0.35f).toInt().coerceIn(6, 40)
+        prepareForScan(frame, r, SCALES_LOCAL_MAX)
         val local = scan(cx, cy, r, searchStep, SCALES_LOCAL)
         lastNcc = local[0]
         if (local[0] >= trackNcc) {
@@ -98,7 +105,7 @@ class ObjectTracker(
             // Ease the size so a noisy scale pick doesn't make the box jitter.
             bw += (local[3] - bw) * 0.5f; bh += (local[4] - bh) * 0.5f
             clampBox(); miss = 0
-            if (local[0] >= adaptNcc) adaptTemplate()
+            if (local[0] >= adaptNcc) adaptTemplate(frame)
             return box(local[0])
         }
 
@@ -109,6 +116,7 @@ class ObjectTracker(
         if (miss % 2 == 0) {
             val grow = 1f + miss * 0.4f
             val rr = (max(bw, bh) * 1.5f * grow).toInt().coerceIn(24, 250)
+            prepareForScan(frame, rr, SCALES_REACQ_MAX)
             val re = scan(cx, cy, rr, max(6, grid / 6), SCALES_REACQ)
             if (re[0] >= reacqNcc) {
                 cx = re[1]; cy = re[2]; bw = re[3]; bh = re[4]
@@ -134,6 +142,12 @@ class ObjectTracker(
         bw = bw.coerceIn(8f, gw.toFloat()); bh = bh.coerceIn(8f, gh.toFloat())
         cx = cx.coerceIn(bw / 2f, gw - bw / 2f)
         cy = cy.coerceIn(bh / 2f, gh - bh / 2f)
+    }
+
+    /** Prepare the grayscale region covering every sample a scan(±radius) will read. */
+    private fun prepareForScan(frame: BufferedImage, radius: Int, maxScale: Float) {
+        val hx = bw * maxScale / 2f + radius; val hy = bh * maxScale / 2f + radius
+        prepareGray(frame, cx - hx, cy - hy, cx + hx, cy + hy)
     }
 
     /**
@@ -178,28 +192,34 @@ class ObjectTracker(
         return max(cT / (pNorm * tNorm), cA / (pNorm * aNorm))
     }
 
-    /** Extract a grayscale plane of the frame into [gray] (reused buffer). */
-    private fun toGray(frame: BufferedImage) {
-        val w = frame.width; val h = frame.height
-        if (gray.size != w * h) gray = IntArray(w * h)
-        gw = w; gh = h
-        val rgb = frame.getRGB(0, 0, w, h, null, 0, w)
-        for (i in rgb.indices) {
-            val p = rgb[i]
+    /** Extract a grayscale plane for the clamped region [x0,y0,x1,y1] into [gray]. */
+    private fun prepareGray(frame: BufferedImage, x0: Float, y0: Float, x1: Float, y1: Float) {
+        rx0 = x0.toInt().coerceIn(0, gw - 1); ry0 = y0.toInt().coerceIn(0, gh - 1)
+        val ex = Math.ceil(x1.toDouble()).toInt().coerceIn(rx0 + 1, gw)
+        val ey = Math.ceil(y1.toDouble()).toInt().coerceIn(ry0 + 1, gh)
+        rgw = ex - rx0; rgh = ey - ry0
+        val need = rgw * rgh
+        if (rgbBuf.size < need) rgbBuf = IntArray(need)
+        if (gray.size < need) gray = IntArray(need)
+        frame.getRGB(rx0, ry0, rgw, rgh, rgbBuf, 0, rgw)
+        for (i in 0 until need) {
+            val p = rgbBuf[i]
             gray[i] = (((p ushr 16) and 0xFF) * 77 + ((p ushr 8) and 0xFF) * 150 + (p and 0xFF) * 29) shr 8
         }
     }
 
-    /** Sample the [tw]×[th] template grid out of a box region of the gray plane. */
+    /** Sample the [tw]×[th] template grid out of a box region, reading the prepared gray. */
     private fun sampleInto(dst: FloatArray, x1: Float, y1: Float, x2: Float, y2: Float) {
         val sx = (x2 - x1) / tw; val sy = (y2 - y1) / th
         var k = 0
         for (j in 0 until th) {
-            val fy = (y1 + (j + 0.5f) * sy).toInt().coerceIn(0, gh - 1)
-            val rowBase = fy * gw
+            val fy = (y1 + (j + 0.5f) * sy).toInt()
+            val ly = (fy - ry0).coerceIn(0, rgh - 1)
+            val rowBase = ly * rgw
             for (i in 0 until tw) {
-                val fx = (x1 + (i + 0.5f) * sx).toInt().coerceIn(0, gw - 1)
-                dst[k++] = gray[rowBase + fx].toFloat()
+                val fx = (x1 + (i + 0.5f) * sx).toInt()
+                val lx = (fx - rx0).coerceIn(0, rgw - 1)
+                dst[k++] = gray[rowBase + lx].toFloat()
             }
         }
     }
@@ -215,8 +235,9 @@ class ObjectTracker(
     }
 
     /** Blend the adaptive template toward the current (confident) match. */
-    private fun adaptTemplate() {
+    private fun adaptTemplate(frame: BufferedImage) {
         val (x1, y1, x2, y2) = boxCorners()
+        prepareGray(frame, x1, y1, x2, y2)
         sampleInto(patch, x1, y1, x2, y2)
         for (i in template.indices) template[i] = template[i] * 0.9f + patch[i] * 0.1f
         recomputeStats(template).let { tMean = it.first; tNorm = it.second }
@@ -225,5 +246,7 @@ class ObjectTracker(
     private companion object {
         val SCALES_LOCAL = floatArrayOf(0.9f, 1f, 1.1f)
         val SCALES_REACQ = floatArrayOf(0.7f, 0.85f, 1f, 1.2f, 1.45f)
+        const val SCALES_LOCAL_MAX = 1.1f
+        const val SCALES_REACQ_MAX = 1.45f
     }
 }
