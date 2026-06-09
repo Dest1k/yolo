@@ -34,7 +34,7 @@ object Render {
      *  locked [target] is highlighted. */
     fun draw(src: BufferedImage, dets: List<Detection>, hud: String? = null,
              labels: List<String>? = null, target: Detection? = null,
-             tracking: Boolean = false): BufferedImage {
+             tracking: Boolean = false, manual: ObjectTracker.Box? = null): BufferedImage {
         val out = BufferedImage(src.width, src.height, BufferedImage.TYPE_INT_RGB)
         val g   = out.createGraphics()
         g.drawImage(src, 0, 0, null)
@@ -69,6 +69,24 @@ object Render {
             g.font = g.font.deriveFont(java.awt.Font.BOLD, 16f)
             g.color = java.awt.Color(255, 60, 60)
             g.drawString("TRACKING", out.width / 2 - 38, 22)
+        }
+        // Manually locked target (drawn by the mouse) — a firmly attached cyan box
+        // with corner brackets so it reads as a hard lock, independent of YOLO.
+        if (manual != null) {
+            val mx = manual.x1.toInt(); val my = manual.y1.toInt()
+            val mw = (manual.x2 - manual.x1).toInt(); val mh = (manual.y2 - manual.y1).toInt()
+            val cyan = java.awt.Color(0, 230, 230)
+            g.color = cyan
+            g.stroke = java.awt.BasicStroke(2f)
+            g.drawRect(mx, my, mw, mh)
+            val c = minOf(mw, mh) / 4
+            g.stroke = java.awt.BasicStroke(4f)
+            g.drawLine(mx, my, mx + c, my);            g.drawLine(mx, my, mx, my + c)
+            g.drawLine(mx + mw, my, mx + mw - c, my);  g.drawLine(mx + mw, my, mx + mw, my + c)
+            g.drawLine(mx, my + mh, mx + c, my + mh);  g.drawLine(mx, my + mh, mx, my + mh - c)
+            g.drawLine(mx + mw, my + mh, mx + mw - c, my + mh); g.drawLine(mx + mw, my + mh, mx + mw, my + mh - c)
+            g.font = g.font.deriveFont(java.awt.Font.BOLD, 14f)
+            g.drawString("LOCK ${"%.2f".format(manual.conf)}", mx + 2, (my - 4).coerceAtLeast(12))
         }
         if (hud != null) {
             g.font = g.font.deriveFont(java.awt.Font.BOLD, 16f)

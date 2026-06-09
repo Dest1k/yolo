@@ -26,8 +26,15 @@ import java.util.concurrent.atomic.AtomicReference
  *                    forces a decoder (e.g. hevc_v4l2m2m); size = YOLO_CAM_W/H. (def: off)
  *   YOLO_RTSP_TRANSPORT  tcp | udp — RTSP transport. Use udp if a TCP feed (SIYI/
  *                    LIVE555) loses packets and stalls after the first frame. (def: tcp)
- *   YOLO_GIMBAL      on | off — SIYI gimbal control + web panel (auto-on for the
- *                    SIYI RTSP source). YOLO_GIMBAL_HOST/PORT, YOLO_CONTROL_PORT.
+ *   YOLO_GIMBAL      on | off — SIYI gimbal control (auto-on for the SIYI RTSP
+ *                    source). YOLO_GIMBAL_HOST/PORT, YOLO_CONTROL_PORT. The web
+ *                    panel always runs (YOLO_CONTROL_PORT, default YOLO_PORT+1):
+ *                    live video + manual target capture (drag a box to lock; C/Esc
+ *                    clears it; H toggles the gimbal controls, hidden for CSI).
+ *   YOLO_RECORD      path to .mp4 — record annotated video with the board's
+ *                    HARDWARE H.264 encoder (Pi v4l2m2m/nvenc/vaapi…), libx264 as
+ *                    fallback. Needs ffmpeg on PATH. YOLO_RECORD_BITRATE (kbps,
+ *                    def 4000), YOLO_RECORD_ENCODER forces a codec.
  *   YOLO_CAM_W/H/FPS capture geometry (all source types)  (default: 1280x720@30)
  *   YOLO_JPEG_Q      MJPEG stream quality 1..100                    (default: 80)
  *   YOLO_TRACK       on | off  — IoU tracking / box persistence     (default: on)
@@ -107,19 +114,29 @@ fun main() {
     for (ip in lanAddresses()) println("  stream: http://$ip:$port")
     println("  (open a stream URL above in a browser or VLC on the same network)")
 
+    // ── Manual target capture ────────────────────────────────────────────────
+    // Draw a rectangle on the panel video → a firmly attached box that follows the
+    // object (a single-object visual tracker, independent of YOLO — "in help of"
+    // it). Requests are handed in from the HTTP thread and applied on the stream
+    // thread (which owns the frames + tracker), so no locking is needed here.
+    val objTracker   = ObjectTracker()
+    val manualLockReq = AtomicReference<FloatArray?>(null)   // normalised x1,y1,x2,y2
+    val manualClear   = AtomicBoolean(false)
+    val manualTarget  = AtomicReference<ObjectTracker.Box?>(null)
+    val tracking = AtomicBoolean(false)            // gimbal auto-follow mode (toggled from panel)
+
     // ── SIYI gimbal control (e.g. ZR10) ──────────────────────────────────────
     // Enabled with YOLO_GIMBAL=on (auto-on when the source is the SIYI RTSP feed).
+    // For a CSI camera there's no gimbal, so the gimbal UI is useless: the panel
+    // hides it (toggle with 'h') and only shows the video + manual-capture overlay.
     var gimbal: SiyiGimbal? = null
-    var control: SiyiControlServer? = null
     var follower: GimbalFollower? = null
-    val tracking = AtomicBoolean(false)            // auto-follow mode (toggled from panel)
     val gimbalEnv = env("YOLO_GIMBAL")?.lowercase()
     val gimbalOn = gimbalEnv == "on" ||
         (gimbalEnv != "off" && source.contains("192.168.144.25"))
     if (gimbalOn) {
         val gHost = env("YOLO_GIMBAL_HOST") ?: "192.168.144.25"
         val gPort = env("YOLO_GIMBAL_PORT")?.toIntOrNull() ?: 37260
-        val cPort = env("YOLO_CONTROL_PORT")?.toIntOrNull() ?: (port + 1)
         val g = SiyiGimbal(gHost, gPort).also { it.start() }
         gimbal = g
         follower = GimbalFollower(
@@ -128,9 +145,29 @@ fun main() {
             invertYaw = env("YOLO_TRACK_INVERT_YAW")?.lowercase() == "on",
             invertPitch = env("YOLO_TRACK_INVERT_PITCH")?.lowercase() == "on"
         )
-        control = SiyiControlServer(g, cPort, port, tracking, follower).also { it.start() }
-        for (ip in lanAddresses()) println("  video + gimbal control: http://$ip:$cPort  (→ $gHost:$gPort)")
     }
+
+    // The control/viewer panel always runs (even without a gimbal) so a CSI/USB
+    // user still gets the live video + manual-capture overlay in the browser.
+    val cPort = env("YOLO_CONTROL_PORT")?.toIntOrNull() ?: (port + 1)
+    val control = SiyiControlServer(
+        gimbal, cPort, port, tracking, follower,
+        onLock = { norm -> manualLockReq.set(norm) },
+        onClearLock = { manualClear.set(true) }
+    ).also { it.start() }
+    val panelKind = if (gimbal != null) "(gimbal control + manual capture)" else "(video + manual capture)"
+    for (ip in lanAddresses()) println("  panel: http://$ip:$cPort  $panelKind")
+
+    // ── Optional hardware H.264 recording (YOLO_RECORD=/path/out.mp4) ──────────
+    // Encodes the annotated video with the board's hardware H.264 encoder (Pi
+    // v4l2m2m / nvenc / vaapi…), software libx264 only as a fallback — so the
+    // encode load stays off the CPU that's running inference. Created lazily on
+    // the first frame, once the real capture geometry is known.
+    val recordPath    = env("YOLO_RECORD")
+    val recordBitrate = env("YOLO_RECORD_BITRATE")?.toIntOrNull() ?: 4000
+    val recordFps     = env("YOLO_CAM_FPS")?.toIntOrNull() ?: 30
+    val recorder      = AtomicReference<H264Recorder?>(null)
+    val recordDisabled = AtomicBoolean(recordPath == null)   // true once we've given up / never asked
 
     // Decoupled pipeline: the capture thread streams every frame at full camera
     // FPS with the last known boxes; inference runs on a separate thread over the
@@ -152,9 +189,10 @@ fun main() {
     val video = VideoInput(
         source  = source,
         onFrame = { img ->
-            // Only spend CPU while someone is watching; the server keeps listening
-            // so the feed is instant on connect.
-            if (mjpeg.hasClients()) {
+            // Spend CPU while someone is watching, or while we're recording to a
+            // file (which must run regardless of viewers); otherwise idle — the
+            // server keeps listening so the feed is instant on connect.
+            if (mjpeg.hasClients() || recordPath != null) {
                 if (!loggedFrame) {
                     loggedFrame = true
                     println("  video frame: ${img.width}x${img.height}")
@@ -196,11 +234,28 @@ fun main() {
         while (!Thread.currentThread().isInterrupted) {
             val f = latestFrame.getAndSet(null)
             if (f == null) { try { Thread.sleep(2) } catch (e: InterruptedException) { break }; continue }
+
+            // Apply pending manual-capture requests (owned by this thread) and
+            // advance the visual tracker so its box stays glued to the object.
+            manualLockReq.getAndSet(null)?.let { r ->
+                objTracker.lock(f, r[0] * f.width, r[1] * f.height, r[2] * f.width, r[3] * f.height)
+            }
+            if (manualClear.getAndSet(false)) { objTracker.reset(); manualTarget.set(null) }
+            val mbox = if (objTracker.locked) objTracker.update(f) else null
+            manualTarget.set(mbox)
+
+            // Lazily bring up the hardware recorder now that we know the geometry.
+            if (!recordDisabled.get() && recorder.get() == null) {
+                val rec = H264Recorder(recordPath!!, f.width, f.height, recordFps, recordBitrate)
+                if (rec.start()) recorder.set(rec) else recordDisabled.set(true)
+            }
+
             val hud = "FPS ${streamFps.get()}  |  det ${detFps.get()}"
             runCatching {
-                mjpeg.pushFrame(
-                    Render.draw(f, latestDets.get(), hud, labels, targetBox.get(), tracking.get()), jpegQ
-                )
+                val annotated = Render.draw(f, latestDets.get(), hud, labels,
+                    targetBox.get(), tracking.get(), mbox)
+                mjpeg.pushFrame(annotated, jpegQ)
+                recorder.get()?.submit(annotated)
             }
             streamMeter.tick()?.let { streamFps.set(it) }
         }
@@ -211,8 +266,15 @@ fun main() {
     val followThread = follower?.let { fol ->
         Thread({
             while (!Thread.currentThread().isInterrupted) {
-                if (tracking.get()) targetBox.set(fol.step(latestDets.get(), frameW.get(), frameH.get()))
-                else { fol.stop(); targetBox.set(null) }
+                if (tracking.get()) {
+                    // A manual lock wins: steer the gimbal onto the hand-picked box
+                    // (works for anything, even classes YOLO never detects). With no
+                    // manual lock, fall back to following the YOLO detections.
+                    val mb = manualTarget.get()
+                    val dets = if (mb != null) listOf(Detection(mb.x1, mb.y1, mb.x2, mb.y2, mb.conf, -1))
+                               else latestDets.get()
+                    targetBox.set(fol.step(dets, frameW.get(), frameH.get()))
+                } else { fol.stop(); targetBox.set(null) }
                 try { Thread.sleep(66) } catch (e: InterruptedException) { break }
             }
         }, "gimbal-follow").apply { isDaemon = true; start() }
@@ -225,7 +287,8 @@ fun main() {
         runCatching { followThread?.interrupt() }
         runCatching { follower?.stop() }
         runCatching { inferExec.shutdownNow() }
-        runCatching { control?.stop() }
+        runCatching { recorder.get()?.stop() }
+        runCatching { control.stop() }
         runCatching { gimbal?.close() }
         runCatching { mjpeg.stop() }
         runCatching { onnx.close() }
