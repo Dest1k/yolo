@@ -29,8 +29,9 @@ Config via environment variables (same names as the JVM app where they overlap):
                 built-in names (the model already carries COCO names)
   YOLO_FILTER   keep only these classes (comma-separated names or indices,
                 e.g. "person" or "0,2"); applies to drawing/tracking/follow
-  YOLO_CONF     score threshold 0..1                                  (default: 0.3)
+  YOLO_CONF     score threshold 0..1                                  (default: 0.4)
   YOLO_MAX_DETS max detections per frame                              (default: 25)
+  YOLO_MAX_AREA drop boxes bigger than this fraction of the frame     (default: 0.9)
   YOLO_PORT     MJPEG server / control panel port                     (default: 8080)
   YOLO_JPEG_Q   MJPEG quality 1..100                                  (default: 75)
   YOLO_CAM_W / YOLO_CAM_H / YOLO_CAM_FPS  capture geometry            (default: 1280x720x30)
@@ -616,7 +617,7 @@ def follow_loop(state):
         time.sleep(0.066)
 
 
-def inference_loop(state, detector, mp, conf, track_on, filter_set=None):
+def inference_loop(state, detector, mp, conf, track_on, filter_set=None, max_area=0.9):
     tracker = Tracker() if track_on else None
     count, t0 = 0, time.time()
     while state.running:
@@ -625,6 +626,8 @@ def inference_loop(state, detector, mp, conf, track_on, filter_set=None):
         if frame is None:
             time.sleep(0.01)
             continue
+        fh, fw = frame.shape[:2]
+        frame_area = float(fw * fh)
         rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         try:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -640,9 +643,17 @@ def inference_loop(state, detector, mp, conf, track_on, filter_set=None):
                     ids, names = filter_set
                     if cls not in ids and name.lower() not in names:
                         continue
-                dets.append((float(bb.origin_x), float(bb.origin_y),
-                             float(bb.origin_x + bb.width), float(bb.origin_y + bb.height),
-                             float(cat.score), int(cls)))
+                # Clamp to the frame and drop absurdly large boxes — a wide-angle /
+                # cluttered scene makes EfficientDet emit full-frame false positives
+                # (e.g. a "keyboard" over the whole image); those just stick around.
+                x1 = max(0.0, float(bb.origin_x)); y1 = max(0.0, float(bb.origin_y))
+                x2 = min(float(fw), float(bb.origin_x + bb.width))
+                y2 = min(float(fh), float(bb.origin_y + bb.height))
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                if (x2 - x1) * (y2 - y1) > max_area * frame_area:
+                    continue
+                dets.append((x1, y1, x2, y2, float(cat.score), int(cls)))
         except Exception as e:           # keep the stream alive on a bad frame
             sys.stderr.write(f"inference error: {e}\n")
             dets = []
@@ -868,8 +879,9 @@ def main():
     source = env("YOLO_SOURCE", "0")
     labels = load_labels(env("YOLO_LABELS"))
     filter_set = parse_filter(env("YOLO_FILTER"))
-    conf = float(env("YOLO_CONF", "0.3"))
+    conf = float(env("YOLO_CONF", "0.4"))
     max_dets = int(env("YOLO_MAX_DETS", "25"))
+    max_area = float(env("YOLO_MAX_AREA", "0.9"))   # drop boxes bigger than this fraction of the frame
     port = int(env("YOLO_PORT", "8080"))
     cam_w = int(env("YOLO_CAM_W", "1280"))
     cam_h = int(env("YOLO_CAM_H", "720"))
@@ -881,7 +893,7 @@ def main():
 
     print("YOLO MediaPipe sidecar (CPU / XNNPACK)")
     print(f"  model={model} source={source} conf={conf} max_dets={max_dets} "
-          f"port={port} track={'on' if track_on else 'off'}")
+          f"max_area={max_area} port={port} track={'on' if track_on else 'off'}")
 
     try:
         import mediapipe as mp
@@ -929,7 +941,7 @@ def main():
 
     threading.Thread(target=capture_loop, args=(state, cap), daemon=True).start()
     threading.Thread(target=inference_loop,
-                     args=(state, detector, mp, conf, track_on, filter_set),
+                     args=(state, detector, mp, conf, track_on, filter_set, max_area),
                      daemon=True).start()
 
     for ip in lan_ips():

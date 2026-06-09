@@ -80,8 +80,9 @@ the manual lock takes priority for follow. **H** toggles the gimbal controls
 | `YOLO_SOURCE` | `0`/`1` USB cam, `rpicam`/`libcamera` (Pi CSI), `rtsp://…` / http MJPEG URL, or a GStreamer pipeline | `0` |
 | `YOLO_LABELS` | path to labels.txt (one per line) to override the model's names | model names |
 | `YOLO_FILTER` | keep only these classes (names or indices, comma-separated) | all |
-| `YOLO_CONF` | score threshold `0..1` | `0.3` |
+| `YOLO_CONF` | score threshold `0..1` (raise to `0.5`+ on noisy/wide-angle scenes) | `0.4` |
 | `YOLO_MAX_DETS` | max detections per frame | `25` |
+| `YOLO_MAX_AREA` | drop boxes bigger than this fraction of the frame (full-frame false positives) | `0.9` |
 | `YOLO_PORT` | MJPEG / control panel port | `8080` |
 | `YOLO_JPEG_Q` | MJPEG quality `1..100` | `75` |
 | `YOLO_CAM_W` / `YOLO_CAM_H` / `YOLO_CAM_FPS` | capture geometry | `1280` / `720` / `30` |
@@ -90,6 +91,22 @@ the manual lock takes priority for follow. **H** toggles the gimbal controls
 | `YOLO_GIMBAL_HOST` / `YOLO_GIMBAL_PORT` | SIYI camera UDP address | `192.168.144.25` / `37260` |
 | `YOLO_TRACK_SPEED` | max gimbal follow speed | `40` |
 | `YOLO_TRACK_INVERT_YAW` / `YOLO_TRACK_INVERT_PITCH` | flip an axis if it chases away | `off` |
+
+### Noisy detections / a box "sticks" over the whole frame
+
+EfficientDet-Lite0 is a small COCO model and struggles on dark, cluttered or
+wide-angle/fisheye scenes — it can emit a low-confidence full-frame false positive
+(a classic is a "keyboard" over the whole image). Two guards handle it:
+
+- **`YOLO_MAX_AREA`** (default `0.9`) drops any box bigger than that fraction of the
+  frame — those are almost always junk. Lower it (e.g. `0.6`) if huge boxes persist.
+- **`YOLO_CONF`** — raise it (`0.5`–`0.6`) to cut weak detections.
+
+If a junk box still appears to "freeze", it's the IoU tracker holding it for ~0.8 s
+to smooth gaps; run with **`YOLO_TRACK=off`** to confirm, then rely on the area/conf
+guards. A genuinely frozen *frame* (everything stops) instead means the camera
+stalled — check the capture source. For better accuracy on hard scenes, use
+EfficientDet-Lite2, or run your own YOLO model via the JVM `:desktop:runHeadless`.
 
 > CSI on Pi 5: `YOLO_SOURCE=rpicam` spawns `rpicam-vid` (needs `rpicam-apps`).
 > For a USB cam use `YOLO_SOURCE=0`. For an exotic camera you can pass a full
