@@ -49,9 +49,105 @@ wget -O ~/models/efficientdet_lite2.tflite \
   https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/int8/1/efficientdet_lite2.tflite
 ```
 
-You can also train your own with **MediaPipe Model Maker** (`pip install
-mediapipe-model-maker`, on a PC) and export a `.tflite` — it carries its class
-names, so the panel labels them automatically. `YOLO_LABELS` overrides them.
+You can also **train your own** model — see "Train a custom model" below.
+
+## Train a custom model (your own classes)
+
+Use **MediaPipe Model Maker** with the ready script
+[`train_object_detector.py`](train_object_detector.py). It reads Pascal VOC XML
+(LabelImg / Roboflow VOC export) directly and exports a `.tflite` with class-name
+metadata — so the sidecar labels your classes automatically (`YOLO_LABELS`
+overrides if needed).
+
+> ⚠️ **Do NOT train on native Windows.** MediaPipe Model Maker isn't supported
+> there — you'll hit `tensorflow_text` / `tensorflow_addons` / protobuf
+> `runtime_version` errors no matter how you patch it. Use Google Colab (easiest)
+> or WSL2 / Linux / macOS with Python 3.9–3.11. The training itself is unchanged;
+> only the host differs.
+
+Dataset layout (Pascal VOC):
+```
+mediapipe_dataset/
+  train/  images/*.jpg   Annotations/*.xml
+  val/    images/*.jpg   Annotations/*.xml
+```
+
+### WSL2 setup on your Windows PC (recommended)
+
+MediaPipe Model Maker needs **Python 3.9–3.11** — Ubuntu 24.04 ships 3.12, so we
+install 3.11 explicitly.
+
+One-time, in **PowerShell (admin)**:
+```powershell
+wsl --install            # installs WSL2 + Ubuntu; reboot when asked
+```
+Then open **Ubuntu** and set up a clean venv:
+```bash
+sudo apt update
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt install -y python3.11 python3.11-venv python3.11-dev libgl1 libglib2.0-0
+python3.11 -m venv ~/mm && source ~/mm/bin/activate
+pip install --upgrade pip
+pip install mediapipe-model-maker          # pulls a matching TF/protobuf — no Windows hacks
+```
+
+Get the script + your dataset, then train (your Windows files are under `/mnt/c`):
+```bash
+# copy train_object_detector.py next to your dataset, or pull this repo:
+cd /mnt/c/Users/<you>/Desktop/test/merged_dataset
+cp /mnt/c/.../yolo/tools/mediapipe-sidecar/train_object_detector.py .
+python train_object_detector.py
+```
+Result: `exported_model/model.tflite` → copy to the Pi, run the sidecar with
+`YOLO_MODEL=/path/to/model.tflite`.
+
+#### GPU vs CPU (RTX 5080 / Ultra 9 275HX)
+
+The script auto-detects the GPU and prints which device it actually uses. **Heads
+up:** the RTX 5080 is **Blackwell (sm_120)**, newer than the TensorFlow that Model
+Maker pins — so the GPU may error (`no kernel image is available…`) or just not be
+picked up. That's fine: a 24-thread Ultra 9 275HX trains EfficientDet-Lite0 on a
+custom dataset quickly, and the script is tuned to use all cores.
+
+- **Try the GPU first.** On Windows install the latest **NVIDIA driver** (it brings
+  WSL CUDA); check inside Ubuntu with `nvidia-smi`. If TensorFlow still doesn't list
+  it (`python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"`
+  prints `[]`), use CPU.
+- **If the GPU works**, push throughput: `MM_BATCH=48 MM_MIXED=1`.
+- **If the GPU errors**, force CPU: `MM_FORCE_CPU=1` (and e.g. `MM_BATCH=16`).
+
+Performance knobs (env vars):
+
+| Var | Meaning | Default |
+|---|---|---|
+| `MM_BATCH` | batch size (raise it — you have the RAM/VRAM) | `16` |
+| `MM_EPOCHS` | training epochs | `50` |
+| `MM_MODEL` | `lite0` (fast) or `lite2` (accurate, slower) | `lite0` |
+| `MM_LR` | learning rate (raise with big batches) | Model Maker default |
+| `MM_THREADS` | CPU op threads | all logical cores |
+| `MM_FORCE_CPU` | `1` = ignore the GPU (use on Blackwell if it errors) | `0` |
+| `MM_MIXED` | `1` = mixed_float16 (GPU speedup) | `0` |
+| `MM_XLA` | `1` = XLA JIT (may speed up / may break) | `0` |
+| `MM_CACHE` | dataset cache dir | `cache` |
+
+Examples:
+```bash
+# GPU, max throughput
+MM_BATCH=48 MM_MIXED=1 python train_object_detector.py
+# CPU only (Blackwell fallback), 24 threads
+MM_FORCE_CPU=1 MM_BATCH=16 python train_object_detector.py
+```
+
+### Alternative — Google Colab (zero setup, free GPU)
+
+```python
+!pip install -q mediapipe-model-maker
+# upload + unzip your dataset and train_object_detector.py, then:
+!python train_object_detector.py
+# download exported_model/model.tflite
+```
+
 
 ## 3. Run
 
