@@ -23,6 +23,8 @@ Performance tuning (all via env vars, with sensible defaults):
   MM_XLA          1 = XLA JIT (may speed up / may break)  (default 0)
   MM_CACHE        dataset cache dir                  (default ./cache)
   MM_MAX_IMAGES   cap the training set (faster runs) (default: all)
+  MM_MAX_VAL      cap the validation set (COCO eval each epoch is slow on CPU!)
+                  (default 500; 0 = use all of it)
   MM_QUIET        1 = silence TF/Keras/TFA chatter   (default 1; set 0 to debug)
   MM_QUANT        float | int8 — int8 = QAT, smaller/faster on the Pi  (default float)
   MM_QAT_EPOCHS   int8 QAT fine-tune epochs          (default 10)
@@ -221,13 +223,20 @@ def main():
         _normalise_voc(d)
 
     max_images = int(_env("MM_MAX_IMAGES", "0")) or None   # cap the training set for faster runs
+    # Validation runs a COCO-mAP pass at every epoch end (and after QAT). On CPU that
+    # is single-threaded and SLOW — a full 5k-image val set looks like a 30-min hang
+    # at ~20% CPU. Cap it (default 500) so epochs finish; raise MM_MAX_VAL for a more
+    # accurate final mAP, or set it to 0 to use the whole val set.
+    max_val = _env("MM_MAX_VAL")
+    max_val = (int(max_val) or None) if max_val is not None else 500
     print("Loading dataset (Pascal VOC)…")
     train_data = object_detector.Dataset.from_pascal_voc_folder(
         TRAIN_DIR, cache_dir=os.path.join(CACHE, "train"), max_num_images=max_images)
     val_data = object_detector.Dataset.from_pascal_voc_folder(
-        VAL_DIR, cache_dir=os.path.join(CACHE, "val"))
+        VAL_DIR, cache_dir=os.path.join(CACHE, "val"), max_num_images=max_val)
     print(f"  train: {train_data.size} images, classes: {train_data.label_names}")
-    print(f"  val:   {val_data.size} images")
+    print(f"  val:   {val_data.size} images"
+          + (f" (capped at {max_val}; COCO eval is slow on CPU — MM_MAX_VAL=0 for all)" if max_val else ""))
 
     steps = math.ceil(train_data.size / BATCH_SIZE)
     print(f"  ≈ {steps} steps/epoch × {EPOCHS} epochs = {steps * EPOCHS} steps total")

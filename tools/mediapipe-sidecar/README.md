@@ -154,6 +154,7 @@ Performance / run knobs (env vars):
 |---|---|---|
 | `MM_EPOCHS` | training epochs (lower = faster) | `50` |
 | `MM_MAX_IMAGES` | cap the training set for quick runs | all |
+| `MM_MAX_VAL` | cap the validation set (COCO eval each epoch is slow on CPU) | `500` |
 | `MM_BATCH` | batch size (raise it — you have the RAM/VRAM) | `16` |
 | `MM_MODEL` | model name; auto-resolves to what's installed (`lite0`, `mobilenet`…) | `lite0` |
 | `MM_LR` | learning rate (raise with big batches) | Model Maker default |
@@ -175,6 +176,11 @@ MM_MODEL=320 MM_QUANT=int8 python train_object_detector.py
 # full run, see every TF log (debugging)
 MM_QUIET=0 python train_object_detector.py
 ```
+
+> **"It hangs at the end of an epoch at ~20% CPU"** — that's the per-epoch COCO
+> validation (single-threaded, slow on CPU), not a crash. The validation set is now
+> capped at `MM_MAX_VAL=500` so epochs finish; set `MM_MAX_VAL=0` for the full set
+> when you want an accurate final mAP.
 
 #### int8 (the FPS lever on the Pi)
 
