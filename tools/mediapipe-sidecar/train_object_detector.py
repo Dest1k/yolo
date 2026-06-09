@@ -112,6 +112,11 @@ def _resolve_model(name):
     Maker. Enum members vary by version — recent releases dropped EfficientDet and
     expose only MobileNet detectors — so map friendly names and fall back sanely.
     Any of these trains a .tflite the sidecar runs identically.
+
+    NOTE on input resolution: unlike YOLO (free imgsz), each model variant has a
+    FIXED input size baked in. You pick it by choosing the variant (or by passing
+    256/320/384 directly). The .tflite stores the size in metadata and the sidecar
+    resizes frames to it automatically — nothing to set there.
     """
     sm = object_detector.SupportedModels
     available = [m.name for m in sm]
@@ -119,6 +124,8 @@ def _resolve_model(name):
         "lite0": "EFFICIENTDET_LITE0", "lite2": "EFFICIENTDET_LITE2", "lite4": "EFFICIENTDET_LITE4",
         "mobilenet": "MOBILENET_V2", "mobilenet_i320": "MOBILENET_V2_I320",
         "mobilenet_multi": "MOBILENET_MULTI_AVG",
+        # pick by input resolution directly (intuitive if you used 320 before)
+        "256": "MOBILENET_V2", "320": "MOBILENET_V2_I320", "384": "MOBILENET_MULTI_AVG_I384",
     }.get(name.lower(), name.upper())
     # Try the requested model first, then graceful fallbacks across versions.
     for cand in (wanted, "EFFICIENTDET_LITE0", "MOBILENET_V2", "MOBILENET_MULTI_AVG", *available):
@@ -127,6 +134,15 @@ def _resolve_model(name):
                 print(f"  note: '{name}' → not in this Model Maker; using {cand}")
             return getattr(sm, cand)
     raise SystemExit(f"No usable model. SupportedModels in this version: {available}")
+
+
+# Input resolution baked into each variant (for display; the .tflite metadata is
+# the source of truth and the sidecar reads it automatically).
+_INPUT_RES = {
+    "MOBILENET_V2": 256, "MOBILENET_V2_I320": 320,
+    "MOBILENET_MULTI_AVG": 256, "MOBILENET_MULTI_AVG_I384": 384,
+    "EFFICIENTDET_LITE0": 320, "EFFICIENTDET_LITE2": 448, "EFFICIENTDET_LITE4": 640,
+}
 
 
 def _normalise_voc(split_dir):
@@ -157,9 +173,11 @@ def _make_hparams(**kw):
 def main():
     import math
     spec = _resolve_model(MODEL_NAME)
+    res = _INPUT_RES.get(spec.name)
+    res_str = f"{res}×{res}" if res else "model default"
     dev = f"GPU ×{len(_gpus)} ({_gpus[0].name})" if _gpus else "CPU"
     print(f"Device: {dev}   threads={_THREADS}   batch={BATCH_SIZE}   epochs={EPOCHS}   "
-          f"model={spec.name}   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
+          f"model={spec.name} (input {res_str})   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
     print(f"  Model Maker supports: {[m.name for m in object_detector.SupportedModels]}")
     if not _gpus and not _FORCE_CPU:
         print("  (no usable GPU — training on CPU. Blackwell isn't supported by Model Maker's"

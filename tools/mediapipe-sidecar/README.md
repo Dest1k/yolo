@@ -105,8 +105,20 @@ Result: `exported_model/model.tflite` → copy to the Pi, run the sidecar with
 
 The script prints the models your installed Model Maker actually supports and
 auto-picks one — recent versions expose **MobileNetV2** (EfficientDet was dropped
-from Model Maker), which the sidecar runs identically. `MM_MODEL` accepts `lite0`,
-`lite2`, `mobilenet`, … and falls back gracefully if the exact one isn't present.
+from Model Maker), which the sidecar runs identically.
+
+**Input resolution** isn't a free number like YOLO's `imgsz` — it's *fixed per
+model variant*. Pick it via `MM_MODEL` (you can pass the resolution directly):
+
+| `MM_MODEL` | model | input |
+|---|---|---|
+| `mobilenet` / `256` | `MOBILENET_V2` | 256×256 |
+| `320` / `mobilenet_i320` | `MOBILENET_V2_I320` | 320×320 |
+| `384` | `MOBILENET_MULTI_AVG_I384` | 384×384 |
+
+The `.tflite` stores its input size in metadata, and the sidecar resizes frames to
+it automatically — there's no `YOLO_INPUT` to set (unlike the JVM ONNX path). So to
+train "like 320 before", use `MM_MODEL=320`.
 
 If training later dies on `cannot import name 'runtime_version' from
 'google.protobuf'` (a too-new `tensorflow-metadata` vs the pinned protobuf), pin it
