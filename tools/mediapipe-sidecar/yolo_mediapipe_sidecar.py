@@ -558,7 +558,11 @@ def open_source(src, w, h, fps):
     if src.lower() in ("rpicam", "libcamera", "csi"):
         return RpicamCapture(w, h, fps)
     if src.isdigit():
-        cap = cv2.VideoCapture(int(src))
+        # Explicit V4L2 backend + MJPG: most USB webcams only do the requested
+        # resolution in MJPG (raw YUYV is capped/absent), and asking for YUYV often
+        # yields black or very low FPS on a Pi. MJPG fixes both.
+        cap = cv2.VideoCapture(int(src), cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         cap.set(cv2.CAP_PROP_FPS, fps)

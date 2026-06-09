@@ -92,6 +92,14 @@ the manual lock takes priority for follow. **H** toggles the gimbal controls
 | `YOLO_TRACK_SPEED` | max gimbal follow speed | `40` |
 | `YOLO_TRACK_INVERT_YAW` / `YOLO_TRACK_INVERT_PITCH` | flip an axis if it chases away | `off` |
 
+### Black screen (no image), but the stream FPS looks fine
+
+The frames are flowing but empty — almost always the **wrong source**. The default
+`YOLO_SOURCE=0` opens a USB/V4L2 device; on a Pi a **CSI camera is not at index 0**
+(`cv2.VideoCapture(0)` reads black). Use `YOLO_SOURCE=rpicam` for the ribbon camera
+(`rpicam-hello --list-cameras` should list it). For a real USB cam at index 0 the
+sidecar now forces the V4L2 backend + MJPG, which fixes most black/low-FPS cases.
+
 ### Noisy detections / a box "sticks" over the whole frame
 
 EfficientDet-Lite0 is a small COCO model and struggles on dark, cluttered or
