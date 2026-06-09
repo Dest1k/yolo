@@ -92,15 +92,28 @@ pip install --upgrade pip
 pip install mediapipe-model-maker          # pulls a matching TF/protobuf — no Windows hacks
 ```
 
-Get the script + your dataset, then train (your Windows files are under `/mnt/c`):
+Get the script next to your dataset (your Windows files are under `/mnt/c`), then
+train. Grab just the one file with `curl` (replace with your dataset path):
 ```bash
-# copy train_object_detector.py next to your dataset, or pull this repo:
-cd /mnt/c/Users/<you>/Desktop/test/merged_dataset
-cp /mnt/c/.../yolo/tools/mediapipe-sidecar/train_object_detector.py .
+cd /mnt/c/Users/dest/Desktop/test/merged_dataset
+curl -L -o train_object_detector.py \
+  https://raw.githubusercontent.com/dest1k/yolo/main/tools/mediapipe-sidecar/train_object_detector.py
 python train_object_detector.py
 ```
 Result: `exported_model/model.tflite` → copy to the Pi, run the sidecar with
 `YOLO_MODEL=/path/to/model.tflite`.
+
+The script prints the models your installed Model Maker actually supports and
+auto-picks one — recent versions expose **MobileNetV2** (EfficientDet was dropped
+from Model Maker), which the sidecar runs identically. `MM_MODEL` accepts `lite0`,
+`lite2`, `mobilenet`, … and falls back gracefully if the exact one isn't present.
+
+If training later dies on `cannot import name 'runtime_version' from
+'google.protobuf'` (a too-new `tensorflow-metadata` vs the pinned protobuf), pin it
+down once and re-run:
+```bash
+pip install "tensorflow-metadata<1.16" "tensorflow-datasets==4.9.3"
+```
 
 #### GPU vs CPU (RTX 5080 / Ultra 9 275HX)
 
@@ -123,7 +136,7 @@ Performance knobs (env vars):
 |---|---|---|
 | `MM_BATCH` | batch size (raise it — you have the RAM/VRAM) | `16` |
 | `MM_EPOCHS` | training epochs | `50` |
-| `MM_MODEL` | `lite0` (fast) or `lite2` (accurate, slower) | `lite0` |
+| `MM_MODEL` | model name; auto-resolves to what's installed (`lite0`, `lite2`, `mobilenet`…) | `lite0` |
 | `MM_LR` | learning rate (raise with big batches) | Model Maker default |
 | `MM_THREADS` | CPU op threads | all logical cores |
 | `MM_FORCE_CPU` | `1` = ignore the GPU (use on Blackwell if it errors) | `0` |

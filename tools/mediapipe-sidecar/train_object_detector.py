@@ -80,12 +80,31 @@ EXPORT_DIR = "exported_model"
 EPOCHS     = int(_env("MM_EPOCHS", "50"))
 BATCH_SIZE = int(_env("MM_BATCH", "16"))
 CACHE      = _env("MM_CACHE", "cache")
-_MODELS = {
-    "lite0": object_detector.SupportedModels.EFFICIENTDET_LITE0,
-    "lite2": object_detector.SupportedModels.EFFICIENTDET_LITE2,
-}
-MODEL = _MODELS.get((_env("MM_MODEL", "lite0")).lower(), object_detector.SupportedModels.EFFICIENTDET_LITE0)
+MODEL_NAME = _env("MM_MODEL", "lite0")   # resolved against the installed version below
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _resolve_model(name):
+    """
+    Pick a SupportedModels member that actually exists in the installed Model
+    Maker. Enum members vary by version — recent releases dropped EfficientDet and
+    expose only MobileNet detectors — so map friendly names and fall back sanely.
+    Any of these trains a .tflite the sidecar runs identically.
+    """
+    sm = object_detector.SupportedModels
+    available = [m.name for m in sm]
+    wanted = {
+        "lite0": "EFFICIENTDET_LITE0", "lite2": "EFFICIENTDET_LITE2", "lite4": "EFFICIENTDET_LITE4",
+        "mobilenet": "MOBILENET_V2", "mobilenet_i320": "MOBILENET_V2_I320",
+        "mobilenet_multi": "MOBILENET_MULTI_AVG",
+    }.get(name.lower(), name.upper())
+    # Try the requested model first, then graceful fallbacks across versions.
+    for cand in (wanted, "EFFICIENTDET_LITE0", "MOBILENET_V2", "MOBILENET_MULTI_AVG", *available):
+        if hasattr(sm, cand):
+            if cand != wanted:
+                print(f"  note: '{name}' → not in this Model Maker; using {cand}")
+            return getattr(sm, cand)
+    raise SystemExit(f"No usable model. SupportedModels in this version: {available}")
 
 
 def _normalise_voc(split_dir):
@@ -103,9 +122,11 @@ def _normalise_voc(split_dir):
 
 
 def main():
+    model = _resolve_model(MODEL_NAME)
     dev = f"GPU ×{len(_gpus)} ({_gpus[0].name})" if _gpus else "CPU"
     print(f"Device: {dev}   threads={_THREADS}   batch={BATCH_SIZE}   epochs={EPOCHS}   "
-          f"model={_env('MM_MODEL', 'lite0')}   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
+          f"model={model.name}   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
+    print(f"  Model Maker supports: {[m.name for m in object_detector.SupportedModels]}")
     if not _gpus and not _FORCE_CPU:
         print("  (no usable GPU seen — training on CPU; on Blackwell this is often the fast, safe path)")
 
@@ -122,7 +143,7 @@ def main():
     if _env("MM_LR"):
         hp_kwargs["learning_rate"] = float(_env("MM_LR"))
     options = object_detector.ObjectDetectorOptions(
-        supported_model=MODEL, hparams=object_detector.HParams(**hp_kwargs))
+        supported_model=model, hparams=object_detector.HParams(**hp_kwargs))
 
     print("Training…")
     model = object_detector.ObjectDetector.create(
