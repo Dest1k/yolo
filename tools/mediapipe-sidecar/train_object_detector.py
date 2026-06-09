@@ -22,6 +22,8 @@ Performance tuning (all via env vars, with sensible defaults):
   MM_MIXED        1 = mixed_float16 (GPU speedup)    (default 0)
   MM_XLA          1 = XLA JIT (may speed up / may break)  (default 0)
   MM_CACHE        dataset cache dir                  (default ./cache)
+  MM_MAX_IMAGES   cap the training set (faster runs) (default: all)
+  MM_QUIET        1 = silence TF/Keras/TFA chatter   (default 1; set 0 to debug)
 
 GPU note (RTX 50-series / Blackwell, sm_120): the TensorFlow that Model Maker
 pins is older than Blackwell, so the GPU may error ("no kernel image is available
@@ -51,13 +53,33 @@ def _env(k, d=None): return os.environ.get(k, d)
 
 _FORCE_CPU = _env("MM_FORCE_CPU", "0") == "1"
 _THREADS = _env("MM_THREADS") or str(os.cpu_count() or 8)
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")            # quieter TF logs
+# Quiet by default (MM_QUIET=0 to see everything). Level 3 = errors only; this kills
+# the cuDNN/cuFFT/cuBLAS "already registered" + GPU dlopen spam at import.
+_QUIET = _env("MM_QUIET", "1") == "1"
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3" if _QUIET else "1")
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TF_NUM_INTRAOP_THREADS", _THREADS)    # use all the Ultra 9 cores
 os.environ.setdefault("TF_NUM_INTEROP_THREADS", "2")
 if _FORCE_CPU:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""                   # hide the GPU entirely
 
+import logging
+import warnings
 import tensorflow as tf
+
+# Silence the endless deprecation / "Gradients do not exist" / TFA / protobuf
+# chatter so the screen shows just the training progress.
+if _QUIET:
+    warnings.filterwarnings("ignore")
+    logging.getLogger("tensorflow").setLevel(logging.ERROR)
+    tf.get_logger().setLevel("ERROR")
+    tf.autograph.set_verbosity(0)
+    try:
+        from absl import logging as _absl_logging
+        _absl_logging.set_verbosity(_absl_logging.ERROR)
+    except Exception:
+        pass
 
 # GPU: enable memory growth (don't grab all VRAM up front) and report what we got.
 _gpus = [] if _FORCE_CPU else tf.config.list_physical_devices("GPU")
@@ -121,31 +143,54 @@ def _normalise_voc(split_dir):
         raise SystemExit(f"ERROR: missing {ann}  (put your Pascal VOC .xml there)")
 
 
+def _make_hparams(**kw):
+    """Build HParams keeping only fields this Model Maker version actually has."""
+    import dataclasses
+    try:
+        names = {f.name for f in dataclasses.fields(object_detector.HParams)}
+        kw = {k: v for k, v in kw.items() if k in names}
+    except Exception:
+        kw = {k: kw[k] for k in ("export_dir", "epochs", "batch_size") if k in kw}
+    return object_detector.HParams(**kw)
+
+
 def main():
-    model = _resolve_model(MODEL_NAME)
+    import math
+    spec = _resolve_model(MODEL_NAME)
     dev = f"GPU ×{len(_gpus)} ({_gpus[0].name})" if _gpus else "CPU"
     print(f"Device: {dev}   threads={_THREADS}   batch={BATCH_SIZE}   epochs={EPOCHS}   "
-          f"model={model.name}   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
+          f"model={spec.name}   mixed={_env('MM_MIXED', '0')}   xla={_env('MM_XLA', '0')}")
     print(f"  Model Maker supports: {[m.name for m in object_detector.SupportedModels]}")
     if not _gpus and not _FORCE_CPU:
-        print("  (no usable GPU seen — training on CPU; on Blackwell this is often the fast, safe path)")
+        print("  (no usable GPU — training on CPU. Blackwell isn't supported by Model Maker's"
+              " TensorFlow; for GPU use Google Colab. See the README.)")
 
     for d in (TRAIN_DIR, VAL_DIR):
         _normalise_voc(d)
 
+    max_images = int(_env("MM_MAX_IMAGES", "0")) or None   # cap the training set for faster runs
     print("Loading dataset (Pascal VOC)…")
-    train_data = object_detector.Dataset.from_pascal_voc_folder(TRAIN_DIR, cache_dir=os.path.join(CACHE, "train"))
-    val_data   = object_detector.Dataset.from_pascal_voc_folder(VAL_DIR,   cache_dir=os.path.join(CACHE, "val"))
+    train_data = object_detector.Dataset.from_pascal_voc_folder(
+        TRAIN_DIR, cache_dir=os.path.join(CACHE, "train"), max_num_images=max_images)
+    val_data = object_detector.Dataset.from_pascal_voc_folder(
+        VAL_DIR, cache_dir=os.path.join(CACHE, "val"))
     print(f"  train: {train_data.size} images, classes: {train_data.label_names}")
     print(f"  val:   {val_data.size} images")
 
-    hp_kwargs = dict(export_dir=EXPORT_DIR, epochs=EPOCHS, batch_size=BATCH_SIZE)
+    steps = math.ceil(train_data.size / BATCH_SIZE)
+    print(f"  ≈ {steps} steps/epoch × {EPOCHS} epochs = {steps * EPOCHS} steps total")
+    if train_data.size > 5000 and max_images is None and not _gpus:
+        print("  TIP: big dataset on CPU is slow. Try MM_EPOCHS=10 and/or "
+              "MM_MAX_IMAGES=4000 for a quick first model.")
+
+    hp_kwargs = dict(export_dir=EXPORT_DIR, epochs=EPOCHS, batch_size=BATCH_SIZE,
+                     steps_per_epoch=steps)   # steps_per_epoch makes Keras show a real ETA
     if _env("MM_LR"):
         hp_kwargs["learning_rate"] = float(_env("MM_LR"))
     options = object_detector.ObjectDetectorOptions(
-        supported_model=model, hparams=object_detector.HParams(**hp_kwargs))
+        supported_model=spec, hparams=_make_hparams(**hp_kwargs))
 
-    print("Training…")
+    print("Training… (per-epoch line shows step/total · time/step · losses · ETA)")
     model = object_detector.ObjectDetector.create(
         train_data=train_data, validation_data=val_data, options=options)
 

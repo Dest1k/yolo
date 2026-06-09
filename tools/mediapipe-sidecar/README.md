@@ -117,42 +117,45 @@ pip install "tensorflow-metadata<1.16" "tensorflow-datasets==4.9.3"
 
 #### GPU vs CPU (RTX 5080 / Ultra 9 275HX)
 
-The script auto-detects the GPU and prints which device it actually uses. **Heads
-up:** the RTX 5080 is **Blackwell (sm_120)**, newer than the TensorFlow that Model
-Maker pins — so the GPU may error (`no kernel image is available…`) or just not be
-picked up. That's fine: a 24-thread Ultra 9 275HX trains EfficientDet-Lite0 on a
-custom dataset quickly, and the script is tuned to use all cores.
+The script auto-detects the GPU and prints which device it uses. **Reality check:**
+the RTX 5080 is **Blackwell (sm_120)**, newer than the TensorFlow that Model Maker
+pins, and that TF doesn't ship CUDA kernels for it — so in WSL you'll see
+`Skipping registering GPU devices` and it trains on the **CPU**. That's expected,
+not a misconfig. A 24-thread Ultra 9 275HX handles it; the script uses all cores.
 
-- **Try the GPU first.** On Windows install the latest **NVIDIA driver** (it brings
-  WSL CUDA); check inside Ubuntu with `nvidia-smi`. If TensorFlow still doesn't list
-  it (`python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"`
-  prints `[]`), use CPU.
-- **If the GPU works**, push throughput: `MM_BATCH=48 MM_MIXED=1`.
-- **If the GPU errors**, force CPU: `MM_FORCE_CPU=1` (and e.g. `MM_BATCH=16`).
+- **Want a GPU?** Use **Google Colab** (free, supported GPU) — see below. There's no
+  practical way to use a Blackwell GPU with Model Maker's pinned TF locally today.
+- The output is **quiet by default** (`MM_QUIET=1`): the cuDNN/TFA/"Gradients do not
+  exist"/deprecation spam is silenced, leaving Keras's per-epoch progress line
+  (`step/total · time/step · losses · ETA`). Set `MM_QUIET=0` to see everything.
+- **Big dataset?** 46k images × 50 epochs on CPU is ~a day. For a quick first model
+  use `MM_EPOCHS=10` and/or `MM_MAX_IMAGES=4000`.
 
-Performance knobs (env vars):
+Performance / run knobs (env vars):
 
 | Var | Meaning | Default |
 |---|---|---|
+| `MM_EPOCHS` | training epochs (lower = faster) | `50` |
+| `MM_MAX_IMAGES` | cap the training set for quick runs | all |
 | `MM_BATCH` | batch size (raise it — you have the RAM/VRAM) | `16` |
-| `MM_EPOCHS` | training epochs | `50` |
-| `MM_MODEL` | model name; auto-resolves to what's installed (`lite0`, `lite2`, `mobilenet`…) | `lite0` |
+| `MM_MODEL` | model name; auto-resolves to what's installed (`lite0`, `mobilenet`…) | `lite0` |
 | `MM_LR` | learning rate (raise with big batches) | Model Maker default |
 | `MM_THREADS` | CPU op threads | all logical cores |
-| `MM_FORCE_CPU` | `1` = ignore the GPU (use on Blackwell if it errors) | `0` |
-| `MM_MIXED` | `1` = mixed_float16 (GPU speedup) | `0` |
+| `MM_QUIET` | `1` = quiet output (just progress); `0` = full TF logs | `1` |
+| `MM_FORCE_CPU` | `1` = ignore the GPU | `0` |
+| `MM_MIXED` | `1` = mixed_float16 (only helps a working GPU) | `0` |
 | `MM_XLA` | `1` = XLA JIT (may speed up / may break) | `0` |
 | `MM_CACHE` | dataset cache dir | `cache` |
 
 Examples:
 ```bash
-# GPU, max throughput
-MM_BATCH=48 MM_MIXED=1 python train_object_detector.py
-# CPU only (Blackwell fallback), 24 threads
-MM_FORCE_CPU=1 MM_BATCH=16 python train_object_detector.py
+# quick first model on CPU: 10 epochs, 4k images, clean output
+MM_EPOCHS=10 MM_MAX_IMAGES=4000 python train_object_detector.py
+# full run, see every TF log (debugging)
+MM_QUIET=0 python train_object_detector.py
 ```
 
-### Alternative — Google Colab (zero setup, free GPU)
+### Alternative — Google Colab (zero setup, free + supported GPU)
 
 ```python
 !pip install -q mediapipe-model-maker
