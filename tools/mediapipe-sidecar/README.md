@@ -72,6 +72,11 @@ mediapipe_dataset/
   val/    images/*.jpg   Annotations/*.xml
 ```
 
+Already have a **YOLO dataset** (the one you trained YOLO with)? Convert it with
+[`yolo_to_voc.py`](yolo_to_voc.py) — set `CLASSES` to your `data.yaml` `names:` (same
+order!) and run it from the dataset root; it writes `mediapipe_dataset/` ready for
+the trainer (skipping degenerate boxes and out-of-range class ids).
+
 ### WSL2 setup on your Windows PC (recommended)
 
 MediaPipe Model Maker needs **Python 3.9–3.11** — Ubuntu 24.04 ships 3.12, so we
