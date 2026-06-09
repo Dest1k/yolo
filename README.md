@@ -366,6 +366,26 @@ NPU на ~6 TOPS. Для него в репозитории лежит **Python-
 управляется из Python, поскольку у его рантайма нет Java-биндинга. Конвертация
 модели ONNX → `.rknn` и запуск описаны в [`tools/rknn-sidecar/README.md`](tools/rknn-sidecar/README.md).
 
+### Raspberry Pi 5 — MediaPipe Object Detection (CPU/XNNPACK)
+
+Если хочется использовать модели **MediaPipe Object Detection** (EfficientDet-Lite
+или свои из MediaPipe Model Maker), в репозитории есть **Python-сайдкар**
+(`tools/mediapipe-sidecar/`). Он гоняет `.tflite`-модель через MediaPipe Tasks и
+раздаёт такой же аннотированный MJPEG-поток и веб-панель, как JVM-версия —
+**включая ручной захват цели мышкой** и управление подвесом SIYI. На Pi 5
+MediaPipe считает на CPU через делегат **XNNPACK** (4 ядра A76) — это и есть
+рабочий «ускоренный» путь на Pi (пригодного GPU/NPU-делегата для VideoCore нет).
+Конвертировать ничего не нужно — указываешь `.tflite` и запускаешь. Установка,
+скачивание модели и запуск (в т.ч. CSI через `rpicam`) — в
+[`tools/mediapipe-sidecar/README.md`](tools/mediapipe-sidecar/README.md).
+
+```bash
+pip3 install mediapipe python3-opencv   # см. README сайдкара
+YOLO_MODEL=~/models/efficientdet_lite0.tflite YOLO_SOURCE=rpicam \
+  python3 tools/mediapipe-sidecar/yolo_mediapipe_sidecar.py
+# затем открой http://<IP-платы>:8080  (обведи объект рамкой, чтобы захватить)
+```
+
 ---
 
 ## GitHub Actions (CI)
