@@ -118,25 +118,33 @@ YOLO-FastestV2 trains directly on **YOLO-format** labels (no box conversion!) an
 is plain **PyTorch** — light, and it can use your GPU (incl. RTX 50xx/Blackwell with
 a CUDA-12.8 PyTorch build; see `train_yolofastest.py` for the pip line).
 
-Dataset layout (standard Ultralytics):
+Both training scripts are configured by a **`CONFIG` block at the top of the file**
+(no environment variables — Windows-friendly). Dataset layout (standard Ultralytics):
 ```
 <dataset>/images/{train,val}/*.jpg
 <dataset>/labels/{train,val}/*.txt   (YOLO: class xc yc w h, normalised)
 ```
 
 ```bash
-# a) build the file lists + .data/.names
-YF_DATASET=/path/to/yolo_dataset YF_CLASSES="Birds,Drones,Dron2" \
-  python make_yolofastest_data.py            # → yf_data/custom.data
-
-# b) install PyTorch (GPU build for Blackwell, or CPU), then train + get anchors
+# install PyTorch (GPU build for Blackwell, or CPU) + tools
 pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
-pip install opencv-python numpy tqdm
-YF_DATA=yf_data/custom.data python train_yolofastest.py
+pip install opencv-python numpy tqdm onnx onnxsim
+
+# edit the CONFIG block in train_yolofastest.py (DATASET, CLASSES, DEVICE, BATCH,
+# WORKERS, EPOCHS…), then just run it — it builds the .data, clones the repo,
+# computes anchors, patches the trainer for max utilisation, and trains:
+python train_yolofastest.py
 ```
-It clones the repo, runs `genanchors` for your data, trains, and prints the
-ONNX→`onnx2ncnn` export commands. Copy the resulting `.param`/`.bin` + `custom.names`
-to the Pi and run as in step 3 (set `YF_OUTPUTS` from `--inspect`).
+`make_yolofastest_data.py` does only the data-prep step (same CONFIG block) if you
+want it separately. The trainer prints the ONNX→`onnx2ncnn` export commands at the
+end; copy the resulting `.param`/`.bin` + `custom.names` to the Pi and run as in step 3.
+
+**Max-utilisation knobs** (in `train_yolofastest.py`'s CONFIG), tuned for an
+Ultra 9 275HX + RTX 5080 16GB + 64GB: `BATCH=96` (the model is tiny — raise to
+128/192 if the GPU is underused, lower on OOM), `WORKERS=16` (dataloader workers —
+the main lever for such a small net; the trainer patches them into the repo's
+loader), `CUDNN_BENCHMARK=True`, `DEVICE=gpu`. GPU on a Blackwell card needs the
+cu128 torch above; otherwise set `DEVICE=cpu`.
 
 ## 5. Autostart (systemd)
 
