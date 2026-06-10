@@ -436,25 +436,28 @@ class YoloFastestV2NCNN:
 
 # ── Manual single-object tracker ──────────────────────────────────────────────
 class ObjectTracker:
-    """Robust manual lock: OpenCV CSRT (or KCF) for frame-to-frame tracking, plus a
-    template **re-acquire** so the box re-locks when the object leaves the frame and
-    comes back. Falls back to a pure NCC tracker if OpenCV has neither. Tune with
-    MANUAL_TRACKER=csrt|kcf|ncc and MANUAL_REACQ=<0..1 match threshold>. The lock
-    stays active (searching) until you clear it with C/Esc."""
+    """Robust manual lock for a MOVING camera. Runs OpenCV CSRT/KCF on a downscaled
+    frame — much faster on a Pi, and the target shifts fewer pixels per frame, so a
+    fast pan no longer shakes it off — and re-acquires the locked appearance in an
+    expanding region around the last position when the tracker drops it (so it
+    doesn't jump to a similar object elsewhere). NCC fallback if OpenCV lacks
+    CSRT/KCF. Tune: MANUAL_TRACKER=csrt|kcf|ncc, MANUAL_TRACK_RES (px),
+    MANUAL_REACQ (0..1), MANUAL_MAX_MISS. Lock stays active until cleared (C/Esc)."""
 
     def __init__(self):
         self.locked = False
         self.box = None
         self.miss = 0
-        self.max_miss = int(env("MANUAL_MAX_MISS", "15"))   # hold last box this many lost frames
-        self.reacq_ncc = float(env("MANUAL_REACQ", "0.5"))
+        self.max_miss = int(env("MANUAL_MAX_MISS", "12"))
+        self.reacq_ncc = float(env("MANUAL_REACQ", "0.6"))
+        self.work = int(env("MANUAL_TRACK_RES", "480"))     # tracker runs at this max dim
         self._t = None
         self._ncc = None
-        self.anchor = None                                  # grayscale template for re-acquire
-        self.bw = self.bh = 0.0
-        self._n = 0
+        self.anchor = None                                  # grayscale template (work-frame scale)
+        self.bw = self.bh = 0.0                             # box size, full-res px
+        self.ds = 1.0
         self.kind = self._pick(env("MANUAL_TRACKER", "csrt").lower())
-        print(f"  manual tracker: {self.kind.upper()}")
+        print(f"  manual tracker: {self.kind.upper()} @ {self.work}px")
 
     @staticmethod
     def _ctor(kind):
@@ -474,19 +477,31 @@ class ObjectTracker:
                 return k
         return "ncc"
 
+    def _small(self, frame):
+        H, W = frame.shape[:2]
+        m = max(H, W)
+        ds = (self.work / m) if m > self.work else 1.0
+        if ds < 0.999:
+            return cv2.resize(frame, (max(1, int(W * ds)), max(1, int(H * ds)))), ds
+        return frame, 1.0
+
     def lock(self, frame, x1, y1, x2, y2):
         H, W = frame.shape[:2]
         x1 = max(0, min(int(x1), W - 2)); y1 = max(0, min(int(y1), H - 2))
         x2 = max(x1 + 2, min(int(x2), W)); y2 = max(y1 + 2, min(int(y2), H))
         self.box = (float(x1), float(y1), float(x2), float(y2))
         self.bw = float(x2 - x1); self.bh = float(y2 - y1); self.miss = 0
+        small, ds = self._small(frame); self.ds = ds
+        sx1, sy1 = int(x1 * ds), int(y1 * ds)
+        sx2, sy2 = max(sx1 + 2, int(x2 * ds)), max(sy1 + 2, int(y2 * ds))
         try:
             if self.kind in ("csrt", "kcf"):
                 self._t = self._ctor(self.kind)()
-                self._t.init(frame, (x1, y1, x2 - x1, y2 - y1))
-                g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                s = min(1.0, 64.0 / max(self.bw, self.bh))
-                self.anchor = cv2.resize(g[y1:y2, x1:x2], (max(8, int(self.bw * s)), max(8, int(self.bh * s))))
+                self._t.init(small, (sx1, sy1, sx2 - sx1, sy2 - sy1))
+                g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                roi = g[sy1:sy2, sx1:sx2]
+                s = min(1.0, 48.0 / max(1, max(roi.shape)))
+                self.anchor = cv2.resize(roi, (max(8, int(roi.shape[1] * s)), max(8, int(roi.shape[0] * s))))
             else:
                 self._ncc = _NCCTracker(); self._ncc.lock(frame, x1, y1, x2, y2)
             self.locked = True
@@ -502,53 +517,58 @@ class ObjectTracker:
             return None
         if self.kind == "ncc":
             r = self._ncc.update(frame)
-            if r is None:
-                self.locked = False
-            else:
+            self.locked = r is not None
+            if r is not None:
                 self.box = r
             return r
+        small, ds = self._small(frame); self.ds = ds
         try:
-            ok, b = self._t.update(frame)
+            ok, b = self._t.update(small)
         except Exception:
             ok, b = False, None
         if ok and b is not None:
             x, y, w, h = b
-            self.box = (float(x), float(y), float(x + w), float(y + h))
-            self.bw = float(w); self.bh = float(h); self.miss = 0
+            self.box = (x / ds, y / ds, (x + w) / ds, (y + h) / ds)
+            self.bw = w / ds; self.bh = h / ds; self.miss = 0
             return self.box
-        # Lost. Hold the last box briefly; after that, search the whole frame for the
-        # original appearance and re-init the tracker when the object reappears.
         self.miss += 1
         if self.miss <= self.max_miss:
-            return self.box
-        self._n += 1
-        if self.anchor is not None and self._n % 2 == 0:    # search every other frame
-            found = self._reacquire(frame)
-            if found is not None:
-                x1, y1, x2, y2 = found
-                try:
-                    self._t = self._ctor(self.kind)()
-                    self._t.init(frame, (int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
-                    self.box = found; self.bw = x2 - x1; self.bh = y2 - y1; self.miss = 0
-                    return found
-                except Exception:
-                    pass
-        return None     # still lost: no box drawn, but stays locked and keeps searching
+            return self.box                 # brief loss: hold the last box
+        found = self._reacquire(small, ds)  # then search near the last position
+        if found is not None:
+            fx1, fy1, fx2, fy2 = found
+            try:
+                self._t = self._ctor(self.kind)()
+                self._t.init(small, (int(fx1 * ds), int(fy1 * ds), int((fx2 - fx1) * ds), int((fy2 - fy1) * ds)))
+                self.box = found; self.bw = fx2 - fx1; self.bh = fy2 - fy1; self.miss = 0
+                return found
+            except Exception:
+                pass
+        return None                          # still lost: stays locked, keeps searching
 
-    def _reacquire(self, frame):
-        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY); H, W = g.shape
+    def _reacquire(self, small, ds):
+        if self.anchor is None:
+            return None
+        g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY); H, W = g.shape
+        cx = (self.box[0] + self.box[2]) / 2 * ds; cy = (self.box[1] + self.box[3]) / 2 * ds
+        bw_s = max(8.0, self.bw * ds); bh_s = max(8.0, self.bh * ds)
+        grow = 2.0 + min(20, self.miss) * 0.5
+        rx, ry = bw_s * grow, bh_s * grow
+        x0 = int(max(0, cx - bw_s / 2 - rx)); y0 = int(max(0, cy - bh_s / 2 - ry))
+        x1 = int(min(W, cx + bw_s / 2 + rx)); y1 = int(min(H, cy + bh_s / 2 + ry))
+        roi = g[y0:y1, x0:x1]; rh, rw = roi.shape[:2]
         best = None
-        for sc in (0.6, 0.8, 1.0, 1.3, 1.6):
-            tw = max(8, int(self.bw * sc)); th = max(8, int(self.bh * sc))
-            if tw >= W or th >= H:
+        for sc in (0.7, 0.85, 1.0, 1.2, 1.4):
+            tw = max(8, int(bw_s * sc)); th = max(8, int(bh_s * sc))
+            if tw >= rw or th >= rh:
                 continue
-            res = cv2.matchTemplate(g, cv2.resize(self.anchor, (tw, th)), cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(roi, cv2.resize(self.anchor, (tw, th)), cv2.TM_CCOEFF_NORMED)
             _, mx, _, loc = cv2.minMaxLoc(res)
             if best is None or mx > best[0]:
-                best = (mx, loc[0], loc[1], tw, th)
+                best = (mx, x0 + loc[0], y0 + loc[1], tw, th)
         if best and best[0] >= self.reacq_ncc:
             _, x, y, tw, th = best
-            return (float(x), float(y), float(x + tw), float(y + th))
+            return (x / ds, y / ds, (x + tw) / ds, (y + th) / ds)
         return None
 
 
