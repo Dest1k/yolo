@@ -169,6 +169,7 @@ class YoloFastestV2NCNN:
         self.in_name = env("YF_INPUT_BLOB") or (self._names("input") or ["in0"])[0]
         self.out_blobs = self._blob_list("YF_OUTPUTS", len(self.strides),
                                          [f"output_stride_{s}" for s in self.strides])
+        self._last_fail_log = 0.0
 
     def _names(self, kind):
         fn = getattr(self.net, f"{kind}_names", None)
@@ -186,49 +187,85 @@ class YoloFastestV2NCNN:
             return names
         return default
 
-    def inspect(self):
-        print("Model input blobs :", self._names("input"))
-        print("Model output blobs:", self._names("output"))
-        print("\nSet YF_OUTPUTS to the head outputs ordered by stride", self.strides,
-              "\nIf boxes are wrong try YF_BOX_DECODE=plain and/or YF_SCORE=mul, and check YF_ANCHORS_*")
-
-    def autoconfig(self):
-        """Auto-detect strides + output blobs from output grid sizes (one head per
-        stride). Skipped if YF_OUTPUTS was set explicitly."""
-        if env("YF_OUTPUTS"):
-            return
-        names = self._names("output")
-        if not names:
-            print("  auto: ncnn gave no output names — using defaults; run --inspect if no detections")
-            return
+    def _probe_outputs(self, names):
+        """Run one forward at the configured input and return {name: grid} for the
+        outputs that actually EXTRACT (ncnn ret==0). An output that fails extraction
+        (ncnn code -100) usually means YF_INPUT doesn't match the export size."""
+        out, fails = {}, {}
         try:
             ex = self.net.create_extractor()
             dummy = self.ncnn.Mat(self.input, self.input, 3); dummy.fill(0.0)
             ex.input(self.in_name, dummy)
-            grid = {}
             for nm in names:
                 try:
-                    _, m = ex.extract(nm)
-                except Exception:
-                    continue
+                    ret, m = ex.extract(nm)
+                except Exception as e:
+                    fails[nm] = str(e); continue
+                if ret != 0:
+                    fails[nm] = f"code {ret}"; continue
                 a = np.array(m)
                 if a.ndim == 3:
                     g = a.shape[1]
                 elif a.ndim == 2:
-                    g = int(round(math.sqrt(max(a.shape))))   # grid = larger dim
+                    g = int(round(math.sqrt(max(a.shape))))
                 else:
                     continue
-                grid[max(1, int(round(self.input / g)))] = nm   # stride → blob
-            if grid:
-                self.strides = sorted(grid)
-                self.out_blobs = [grid[s] for s in self.strides]
-                for s in self.strides:
-                    self.anchors.setdefault(s, self.DEFAULT_ANCHORS.get(s, self.DEFAULT_ANCHORS[32]))
-                print(f"  auto: strides={self.strides}  outputs={self.out_blobs}")
-            else:
-                print("  auto: couldn't read outputs — set YF_OUTPUTS from --inspect")
+                out[nm] = max(1, g)
         except Exception as e:
-            print(f"  auto: probe failed ({type(e).__name__}: {e}); set YF_OUTPUTS manually if no detections")
+            print(f"  probe: forward failed ({type(e).__name__}: {e})")
+        return out, fails
+
+    def inspect(self):
+        ins = self._names("input"); outs = self._names("output")
+        print("Model input blobs :", ins)
+        print("Model output blobs:", outs)
+        print(f"\nProbe forward at input={self.input} (input blob '{self.in_name}'):")
+        ok, fails = self._probe_outputs(outs or [])
+        for nm in (outs or []):
+            if nm in ok:
+                st = max(1, int(round(self.input / ok[nm])))
+                print(f"  {nm}: OK  grid≈{ok[nm]}  → stride {st}")
+            else:
+                print(f"  {nm}: FAILED ({fails.get(nm, '?')})")
+        if outs and not ok:
+            print("\n  ALL outputs failed → almost always YF_INPUT is wrong. Set it to the size\n"
+                  "  your model was exported at (try 256/320/352/416) and re-run --inspect.")
+        else:
+            print("\n  Use the OK outputs as YF_OUTPUTS (small→large stride). If boxes look wrong\n"
+                  "  later, try YF_BOX_DECODE=plain / YF_SCORE=mul, or run with --autotune.")
+
+    def autoconfig(self):
+        """Detect strides + working output blobs by actually extracting them. Auto-
+        corrects a bad YF_OUTPUTS, and flags a YF_INPUT mismatch if nothing extracts."""
+        real = self._names("output") or []
+        if not real:
+            print("  auto: ncnn gave no output names — set YF_OUTPUTS/YF_INPUT (see --inspect)")
+            return
+        ok, fails = self._probe_outputs(real)
+        if not ok:
+            print(f"  auto: NO output extracted at input={self.input} ({fails}). This is almost\n"
+                  f"        always YF_INPUT not matching the export size — try YF_INPUT=256/320/352/416.")
+            return
+        env_outs = env("YF_OUTPUTS")
+        chosen = None
+        if env_outs:
+            names = [x.strip() for x in env_outs.split(",") if x.strip()]
+            if all(n in ok for n in names):
+                chosen = names
+            else:
+                bad = [n for n in names if n not in ok]
+                print(f"  auto: YF_OUTPUTS {bad} don't extract — auto-detecting from {list(ok)}")
+        if chosen is None:
+            by_stride = {max(1, int(round(self.input / g))): nm for nm, g in ok.items()}
+            self.strides = sorted(by_stride)
+            chosen = [by_stride[s] for s in self.strides]
+        else:
+            self.strides = sorted({max(1, int(round(self.input / ok[n]))) for n in chosen})
+            chosen = [c for _, c in sorted((max(1, int(round(self.input / ok[c]))), c) for c in chosen)]
+        self.out_blobs = chosen
+        for s in self.strides:
+            self.anchors.setdefault(s, self.DEFAULT_ANCHORS.get(s, self.DEFAULT_ANCHORS[32]))
+        print(f"  auto: strides={self.strides}  outputs={self.out_blobs}")
 
     def _safe_detect(self, f):
         try:
@@ -248,6 +285,17 @@ class YoloFastestV2NCNN:
         self.box_mode, self.score_mode = best[1], best[2]
         print(f"  autotune: box={best[1]} score={best[2]} (score {best[0]:.1f})")
 
+    def _fail(self, blob, why):
+        """Rate-limited error so a broken model doesn't flood the log every frame."""
+        now = time.time()
+        if now - self._last_fail_log < 5:
+            return
+        self._last_fail_log = now
+        sys.stderr.write(
+            f"NCNN extract failed for '{blob}' ({why}). Real model outputs: "
+            f"{self._names('output')}. ncnn code -100 usually means YF_INPUT ({self.input}) "
+            f"doesn't match the export size — try YF_INPUT=256/320/352/416, or run --inspect.\n")
+
     def detect(self, bgr):
         h, w = bgr.shape[:2]
         ex = self.net.create_extractor()
@@ -259,9 +307,13 @@ class YoloFastestV2NCNN:
         dets = []
         for stride, ob in zip(self.strides, self.out_blobs):
             try:
-                _, m = ex.extract(ob)
+                ret, m = ex.extract(ob)
             except Exception as e:
-                sys.stderr.write(f"extract failed for {ob}: {e} — check YF_OUTPUTS\n")
+                ret, m = -1, None
+                self._fail(ob, e)
+            if ret != 0 or m is None:
+                self._fail(ob, f"ncnn code {ret}")
+                time.sleep(0.05)            # don't spin a hot empty loop on a broken model
                 return []
             out = np.array(m)   # [C, H, W]
             if out.ndim == 2:   # [C, H*W] → assume square grid

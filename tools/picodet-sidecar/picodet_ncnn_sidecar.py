@@ -170,6 +170,7 @@ class PicoDetNCNN:
         self.reg_blobs = self._blob_list("PICODET_REG_BLOBS", n,
             [f"dis_pred_stride_{s}" for s in self.strides])
         self.num_classes = None   # inferred from the first class blob on first frame
+        self._last_fail_log = 0.0
 
     def _names(self, kind):
         fn = getattr(self.net, f"{kind}_names", None)
@@ -188,23 +189,38 @@ class PicoDetNCNN:
         return default
 
     def inspect(self):
-        print("Model input blobs :", self._names("input"))
-        print("Model output blobs:", self._names("output"))
-        print("\nSet PICODET_CLS_BLOBS / PICODET_REG_BLOBS to the class-score and "
-              "box-distribution outputs, ordered by stride", self.strides)
+        ins = self._names("input"); outs = self._names("output")
+        print("Model input blobs :", ins)
+        print("Model output blobs:", outs)
+        print(f"\nProbe forward at input={self.input} (input blob '{self.in_name}'):")
+        shapes, fails = self._probe(outs or [], 80)
+        for nm in (outs or []):
+            if nm in shapes:
+                c, g = shapes[nm]
+                print(f"  {nm}: OK  channels={c} grid≈{g} → stride {max(1, int(round(self.input / g)))}")
+            else:
+                print(f"  {nm}: FAILED ({fails.get(nm, '?')})")
+        if outs and not shapes:
+            print("\n  ALL outputs failed → almost always PICODET_INPUT is wrong. Set it to the\n"
+                  "  size the model was exported at (try 320/416/640) and re-run --inspect.")
 
     def _probe(self, names, nc_hint):
-        """Forward one dummy frame and read each output's (channels, grid)."""
-        ex = self.net.create_extractor()
-        dummy = self.ncnn.Mat(self.input, self.input, 3)
-        dummy.fill(0.0)
-        ex.input(self.in_name, dummy)
-        out = {}
+        """Forward one dummy frame; return {name:(channels,grid)} for outputs that
+        EXTRACT (ret==0), plus a {name:reason} map for those that fail."""
+        out, fails = {}, {}
+        try:
+            ex = self.net.create_extractor()
+            dummy = self.ncnn.Mat(self.input, self.input, 3); dummy.fill(0.0)
+            ex.input(self.in_name, dummy)
+        except Exception as e:
+            return out, {"<forward>": str(e)}
         for nm in names:
             try:
-                _, m = ex.extract(nm)
-            except Exception:
-                continue
+                ret, m = ex.extract(nm)
+            except Exception as e:
+                fails[nm] = str(e); continue
+            if ret != 0 or m is None:
+                fails[nm] = f"code {ret}"; continue
             a = np.array(m)
             if a.ndim == 3:        # [C, H, W]
                 c, g = a.shape[0], a.shape[1]
@@ -217,7 +233,7 @@ class PicoDetNCNN:
             else:
                 continue
             out[nm] = (c, max(1, g))
-        return out
+        return out, fails
 
     def autoconfig(self, nc_hint):
         """Auto-detect strides / cls&reg blobs / reg_max from output shapes.
@@ -229,7 +245,11 @@ class PicoDetNCNN:
             print("  auto: ncnn gave no output names — using defaults; run --inspect if no detections")
             return
         try:
-            shapes = self._probe(names, nc_hint)
+            shapes, fails = self._probe(names, nc_hint)
+            if not shapes:
+                print(f"  auto: NO output extracted at input={self.input} ({fails}). Almost always\n"
+                      f"        PICODET_INPUT not matching the export size — try 320/416/640.")
+                return
             per = {}
             for nm, (c, g) in shapes.items():
                 per.setdefault(max(1, int(round(self.input / g))), []).append((nm, c))
@@ -280,16 +300,30 @@ class PicoDetNCNN:
         dets = []
         for stride, cb, rb in zip(self.strides, self.cls_blobs, self.reg_blobs):
             try:
-                _, cls_m = ex.extract(cb)
-                _, reg_m = ex.extract(rb)
+                rc, cls_m = ex.extract(cb)
+                rr, reg_m = ex.extract(rb)
             except Exception as e:
-                sys.stderr.write(f"extract failed for {cb}/{rb}: {e} — check PICODET_*_BLOBS\n")
+                rc, rr, cls_m, reg_m = -1, -1, None, None
+                self._fail(f"{cb}/{rb}", e)
+            if rc != 0 or rr != 0 or cls_m is None or reg_m is None:
+                self._fail(f"{cb}/{rb}", f"ncnn code {rc}/{rr}")
+                time.sleep(0.05)            # don't spin a hot empty loop on a broken model
                 return []
             cls = np.array(cls_m); reg = np.array(reg_m)
             dets += self._decode_level(cls, reg, stride)
         if not dets:
             return []
         return self._nms(dets, w, h)
+
+    def _fail(self, blob, why):
+        now = time.time()
+        if now - self._last_fail_log < 5:
+            return
+        self._last_fail_log = now
+        sys.stderr.write(
+            f"NCNN extract failed for '{blob}' ({why}). Real model outputs: "
+            f"{self._names('output')}. ncnn code -100 usually means PICODET_INPUT ({self.input}) "
+            f"doesn't match the export size — try 320/416/640, or run --inspect.\n")
 
     def _decode_level(self, cls, reg, stride):
         fh = (self.input + stride - 1) // stride

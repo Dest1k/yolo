@@ -67,7 +67,12 @@ PICODET_PARAM=… PICODET_BIN=… YOLO_SOURCE=rpicam python3 picodet_ncnn_sideca
 (It prints the chosen `cell_offset`; bake it into `PICODET_CELL_OFFSET`.)
 
 **If boxes are wrong / missing**, in order:
-- No detections at all → wrong `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS` (re-check `--inspect`).
+- **`NCNN extract failed … code -100` + "det" racing to ~300 fps** → extraction
+  fails (ncnn `-100` = alloc/forward failure), almost always **`PICODET_INPUT`
+  doesn't match the export size** (esp. after `ncnnoptimize`). Run `--inspect` (it
+  probes a forward and prints OK/FAIL + grid per output) and set `PICODET_INPUT`
+  to the export size (try 320/416/640).
+- No detections at all (extraction OK) → wrong `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS` (re-check `--inspect`).
 - Boxes shifted by ~half a cell → set `PICODET_CELL_OFFSET=0` (default 0.5).
 - Boxes the right shape but wrong scale → wrong `PICODET_INPUT` (must match how the
   model was exported: PicoDet-S 320/416, PicoDet-L 640).
@@ -77,8 +82,7 @@ PICODET_PARAM=… PICODET_BIN=… YOLO_SOURCE=rpicam python3 picodet_ncnn_sideca
 | Var | Meaning | Default |
 |---|---|---|
 | `PICODET_PARAM` / `PICODET_BIN` | ncnn model files | **required** |
-| `PICODET_INPUT` | square input size (S 320/416, L 640) | `416` |
-| `PICODET_STRIDES` | FPN strides | `8,16,32,64` |
+| `PICODET_INPUT` | square input size (S 320/416, L 640) | `416` || `PICODET_STRIDES` | FPN strides | `8,16,32,64` |
 | `PICODET_REG_MAX` | box-distribution bins − 1 | `7` |
 | `PICODET_CELL_OFFSET` | grid-cell centre offset (try `0` if shifted) | `0.5` |
 | `PICODET_CLS_BLOBS` / `PICODET_REG_BLOBS` | output blob names per stride (from `--inspect`) | common defaults |

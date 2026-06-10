@@ -65,7 +65,14 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 (or the systemd unit) so you don't re-run it each boot.
 
 **If boxes are wrong / missing**, in order:
-- Nothing detected → wrong `YF_OUTPUTS` (re-check `--inspect`).
+- **`NCNN extract failed … code -100` + "det" racing to ~300 fps** → extraction
+  itself fails (so `detect()` returns nothing instantly). ncnn `-100` is an
+  alloc/forward failure — almost always **`YF_INPUT` doesn't match the size the
+  model was exported at** (especially after `ncnnoptimize`, which can bake fixed
+  shapes). Run `--inspect` (it now does a probe forward and prints OK/FAIL + grid
+  per output) and set `YF_INPUT` to the export size (try 256/320/352/416). The
+  sidecar also auto-ignores a bad `YF_OUTPUTS` and re-detects working outputs.
+- Nothing detected (but extraction OK) → wrong `YF_OUTPUTS` (re-check `--inspect`).
 - Boxes the wrong size/position → switch the box formula: `YF_BOX_DECODE=plain`
   (default `v5`). Also make sure `YF_INPUT` matches the model (default 352) and the
   anchors are right (`YF_ANCHORS_16` / `YF_ANCHORS_32`, defaults = repo COCO anchors).
