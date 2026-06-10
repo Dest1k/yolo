@@ -361,14 +361,17 @@ class YoloFastestV2NCNN:
         nc = C - 5 * self.na
         if nc <= 0:
             return []
-        reg = flat[0:4 * self.na].reshape(self.na, 4, HW)
+        reg_block = flat[0:4 * self.na]
+        reg = reg_block.reshape(self.na, 4, HW)
         obj_raw = flat[4 * self.na:5 * self.na]                      # [na, HW]
         cls_raw = flat[5 * self.na:5 * self.na + nc]                 # [nc, HW] shared
-        # The export may already apply sigmoid(obj)/softmax(cls). Detect it (values
-        # already in [0,1]) so we don't double-activate and squash every score to ~0.
+        # The export may already apply the activations (sigmoid on obj & box offsets,
+        # softmax on cls). Detect it (values already in [0,1]) so we don't double-
+        # activate — which squashes scores to ~0 AND blows box sizes up.
         if self._act is None:
-            self._act = (bool(obj_raw.min() < -0.01 or obj_raw.max() > 1.01),
-                         bool(cls_raw.min() < -0.01 or cls_raw.max() > 1.01))
+            self._act = (bool(obj_raw.min() < -0.01 or obj_raw.max() > 1.01),     # obj needs sigmoid
+                         bool(cls_raw.min() < -0.01 or cls_raw.max() > 1.01),     # cls needs softmax
+                         bool(reg_block.min() < -0.01 or reg_block.max() > 1.01))  # reg needs sigmoid
         obj = _sigmoid(obj_raw) if self._act[0] else obj_raw
         cls = _softmax(cls_raw, axis=0) if self._act[1] else cls_raw
         cls_p = cls.max(0); cls_id = cls.argmax(0)                   # [HW]
@@ -377,9 +380,9 @@ class YoloFastestV2NCNN:
             sc = (np.sqrt(obj * cls_p) if self.score_mode == "sqrt" else obj * cls_p)
             sys.stderr.write(
                 f"decode dbg: C={C} nc={nc} obj[{obj_raw.min():.2f},{obj_raw.max():.2f}] "
-                f"cls[{cls_raw.min():.2f},{cls_raw.max():.2f}] sig_obj={self._act[0]} "
-                f"soft_cls={self._act[1]} max_score={float(sc.max()):.3f} "
-                f"#>={self.conf}:{int((sc >= self.conf).sum())}\n")
+                f"cls[{cls_raw.min():.2f},{cls_raw.max():.2f}] reg[{reg_block.min():.2f},{reg_block.max():.2f}] "
+                f"act(obj={self._act[0]},cls={self._act[1]},reg={self._act[2]}) "
+                f"max_score={float(sc.max()):.3f} #>={self.conf}:{int((sc >= self.conf).sum())}\n")
         gy, gx = np.divmod(np.arange(HW), W)
         anc = self.anchors[stride]
         sx, sy = ow / self.input, oh / self.input
@@ -392,16 +395,19 @@ class YoloFastestV2NCNN:
             tx, ty, tw, th = reg[a, 0, keep], reg[a, 1, keep], reg[a, 2, keep], reg[a, 3, keep]
             aw, ah = anc[a * 2], anc[a * 2 + 1]
             cxg, cyg = gx[keep], gy[keep]
+            # If reg is already activated in the model, don't sigmoid it again.
+            sg = (lambda t: t) if not self._act[2] else _sigmoid
+            sx_, sy_, sw_, sh_ = sg(tx), sg(ty), sg(tw), sg(th)
             if self.box_mode == "plain":
-                bcx = (_sigmoid(tx) + cxg) * stride
-                bcy = (_sigmoid(ty) + cyg) * stride
+                bcx = (sx_ + cxg) * stride
+                bcy = (sy_ + cyg) * stride
                 bw = np.exp(tw) * aw
                 bh = np.exp(th) * ah
             else:  # v5
-                bcx = (_sigmoid(tx) * 2 - 0.5 + cxg) * stride
-                bcy = (_sigmoid(ty) * 2 - 0.5 + cyg) * stride
-                bw = (_sigmoid(tw) * 2) ** 2 * aw
-                bh = (_sigmoid(th) * 2) ** 2 * ah
+                bcx = (sx_ * 2 - 0.5 + cxg) * stride
+                bcy = (sy_ * 2 - 0.5 + cyg) * stride
+                bw = (sw_ * 2) ** 2 * aw
+                bh = (sh_ * 2) ** 2 * ah
             x1 = (bcx - bw / 2) * sx; y1 = (bcy - bh / 2) * sy
             x2 = (bcx + bw / 2) * sx; y2 = (bcy + bh / 2) * sy
             for i in range(keep.size):
@@ -599,10 +605,12 @@ class Tracker:
 
     def update(self, dets, now):
         dets = [d for d in dets if len(d) >= 6]      # ignore malformed detections
-        matched = [False] * len(self.tracks)
+        n = len(self.tracks)            # match only against pre-existing tracks
+        matched = [False] * n
         for d in dets:
             best, bi = -1, self.iou_th
-            for i, (box, _) in enumerate(self.tracks):
+            for i in range(n):
+                box = self.tracks[i][0]
                 if matched[i] or box[5] != d[5]:
                     continue
                 v = self._iou(box, d)

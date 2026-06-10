@@ -209,10 +209,12 @@ class Tracker:
         return inter / ua if ua > 0 else 0.0
 
     def update(self, dets, now):
-        matched = [False] * len(self.tracks)
+        n = len(self.tracks)            # match only against pre-existing tracks
+        matched = [False] * n
         for d in dets:
             best, best_iou = -1, self.iou_th
-            for i, (box, _) in enumerate(self.tracks):
+            for i in range(n):
+                box = self.tracks[i][0]
                 if matched[i] or box[5] != d[5]:
                     continue
                 v = self._iou(box, d)

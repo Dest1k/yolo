@@ -325,10 +325,12 @@ class Tracker:
 
     def update(self, dets, now):
         dets = [d for d in dets if len(d) >= 6]      # ignore malformed detections
-        matched = [False] * len(self.tracks)
+        n = len(self.tracks)            # match only against pre-existing tracks
+        matched = [False] * n
         for d in dets:
             best, best_iou = -1, self.iou_th
-            for i, (box, _) in enumerate(self.tracks):
+            for i in range(n):
+                box = self.tracks[i][0]
                 if matched[i] or box[5] != d[5]:
                     continue
                 v = self._iou(box, d)
