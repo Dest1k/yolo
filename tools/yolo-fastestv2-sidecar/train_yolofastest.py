@@ -47,7 +47,8 @@ CUDNN_BENCHMARK = True      # fixed input size → let cuDNN pick the fastest ke
 # ── Plumbing ──────────────────────────────────────────────────────────────────
 OUT        = "yf_data"                 # where the .data/lists are written
 REPO_DIR   = "Yolo-FastestV2"          # where the upstream repo is cloned
-GENANCHORS = True                      # recompute anchors for your data (recommended)
+GENANCHORS = False                     # recompute anchors for your data. Off first (default
+                                       # anchors work fine); turn True once training runs to optimise.
 ANCHORS    = "12.64,19.39, 37.88,51.48, 55.71,138.31, 126.91,78.23, 131.57,214.55, 279.92,258.87"
 # =============================================================================
 
