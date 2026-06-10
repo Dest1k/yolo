@@ -131,17 +131,23 @@ def parse_filter(spec):
 
 # ── Manual single-object tracker ──────────────────────────────────────────────
 class ObjectTracker:
-    """Robust manual lock. Prefers OpenCV's **CSRT** tracker (handles camera pan /
-    rotation / scale / partial occlusion far better than template matching), then
-    KCF, then a built-in NCC fallback. Pick with MANUAL_TRACKER=csrt|kcf|ncc."""
+    """Robust manual lock: OpenCV CSRT (or KCF) for frame-to-frame tracking, plus a
+    template **re-acquire** so the box re-locks when the object leaves the frame and
+    comes back. Falls back to a pure NCC tracker if OpenCV has neither. Tune with
+    MANUAL_TRACKER=csrt|kcf|ncc and MANUAL_REACQ=<0..1 match threshold>. The lock
+    stays active (searching) until you clear it with C/Esc."""
 
     def __init__(self):
         self.locked = False
         self.box = None
         self.miss = 0
-        self.max_miss = int(env("MANUAL_MAX_MISS", "30"))
+        self.max_miss = int(env("MANUAL_MAX_MISS", "15"))   # hold last box this many lost frames
+        self.reacq_ncc = float(env("MANUAL_REACQ", "0.5"))
         self._t = None
         self._ncc = None
+        self.anchor = None                                  # grayscale template for re-acquire
+        self.bw = self.bh = 0.0
+        self._n = 0
         self.kind = self._pick(env("MANUAL_TRACKER", "csrt").lower())
         print(f"  manual tracker: {self.kind.upper()}")
 
@@ -167,11 +173,15 @@ class ObjectTracker:
         H, W = frame.shape[:2]
         x1 = max(0, min(int(x1), W - 2)); y1 = max(0, min(int(y1), H - 2))
         x2 = max(x1 + 2, min(int(x2), W)); y2 = max(y1 + 2, min(int(y2), H))
-        self.box = (float(x1), float(y1), float(x2), float(y2)); self.miss = 0
+        self.box = (float(x1), float(y1), float(x2), float(y2))
+        self.bw = float(x2 - x1); self.bh = float(y2 - y1); self.miss = 0
         try:
             if self.kind in ("csrt", "kcf"):
                 self._t = self._ctor(self.kind)()
                 self._t.init(frame, (x1, y1, x2 - x1, y2 - y1))
+                g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                s = min(1.0, 64.0 / max(self.bw, self.bh))
+                self.anchor = cv2.resize(g[y1:y2, x1:x2], (max(8, int(self.bw * s)), max(8, int(self.bh * s))))
             else:
                 self._ncc = _NCCTracker(); self._ncc.lock(frame, x1, y1, x2, y2)
             self.locked = True
@@ -179,7 +189,8 @@ class ObjectTracker:
             sys.stderr.write(f"manual lock failed: {e}\n"); self.locked = False
 
     def reset(self):
-        self.locked = False; self.box = None; self._t = None; self._ncc = None; self.miss = 0
+        self.locked = False; self.box = None; self._t = None; self._ncc = None
+        self.anchor = None; self.miss = 0
 
     def update(self, frame):
         if not self.locked:
@@ -197,16 +208,46 @@ class ObjectTracker:
             ok, b = False, None
         if ok and b is not None:
             x, y, w, h = b
-            self.box = (float(x), float(y), float(x + w), float(y + h)); self.miss = 0
+            self.box = (float(x), float(y), float(x + w), float(y + h))
+            self.bw = float(w); self.bh = float(h); self.miss = 0
             return self.box
+        # Lost. Hold the last box briefly; after that, search the whole frame for the
+        # original appearance and re-init the tracker when the object reappears.
         self.miss += 1
-        if self.miss > self.max_miss:
-            self.locked = False
-            return None
-        return self.box
+        if self.miss <= self.max_miss:
+            return self.box
+        self._n += 1
+        if self.anchor is not None and self._n % 2 == 0:    # search every other frame
+            found = self._reacquire(frame)
+            if found is not None:
+                x1, y1, x2, y2 = found
+                try:
+                    self._t = self._ctor(self.kind)()
+                    self._t.init(frame, (int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
+                    self.box = found; self.bw = x2 - x1; self.bh = y2 - y1; self.miss = 0
+                    return found
+                except Exception:
+                    pass
+        return None     # still lost: no box drawn, but stays locked and keeps searching
+
+    def _reacquire(self, frame):
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY); H, W = g.shape
+        best = None
+        for sc in (0.6, 0.8, 1.0, 1.3, 1.6):
+            tw = max(8, int(self.bw * sc)); th = max(8, int(self.bh * sc))
+            if tw >= W or th >= H:
+                continue
+            res = cv2.matchTemplate(g, cv2.resize(self.anchor, (tw, th)), cv2.TM_CCOEFF_NORMED)
+            _, mx, _, loc = cv2.minMaxLoc(res)
+            if best is None or mx > best[0]:
+                best = (mx, loc[0], loc[1], tw, th)
+        if best and best[0] >= self.reacq_ncc:
+            _, x, y, tw, th = best
+            return (float(x), float(y), float(x + tw), float(y + th))
+        return None
 
 
-# ── NCC template-match fallback (used only when OpenCV has no CSRT/KCF) ────────
+# ── NCC template-match fallback (used only when OpenCV has no CSRT/KCF) ────
 class _NCCTracker:
     def __init__(self, track_ncc=0.42, adapt_ncc=0.72, reacq_ncc=0.55, max_miss=90):
         self.track_ncc = track_ncc
