@@ -550,6 +550,27 @@ YOLO_MODEL=~/models/efficientdet_lite0.tflite YOLO_SOURCE=rpicam \
 # затем открой http://<IP-платы>:8080  (обведи объект рамкой, чтобы захватить)
 ```
 
+### Raspberry Pi 5 — PicoDet (NCNN, быстрый CPU-инференс)
+
+**PicoDet** (PaddleDetection) — один из самых быстрых детекторов на ARM-CPU. Для
+него есть **Python-сайдкар на NCNN** (`tools/picodet-sidecar/`): раздаёт такой же
+аннотированный MJPEG-поток и панель (с ручным захватом и подвесом), но декодирует
+GFL-голову PicoDet сам (NCNN не умеет встроенный NMS PicoDet). В комплекте —
+конвертер датасета в COCO (`dataset_to_coco.py`) и обёртка для обучения через
+PaddleDetection (`train_picodet.py`). Имена выходных блобов/`cell_offset` зависят
+от экспорта, поэтому при первом запуске используй `--inspect` — подробно в
+[`tools/picodet-sidecar/README.md`](tools/picodet-sidecar/README.md).
+
+```bash
+pip3 install ncnn numpy python3-opencv
+PICODET_PARAM=picodet.param PICODET_BIN=picodet.bin python3 \
+  tools/picodet-sidecar/picodet_ncnn_sidecar.py --inspect   # узнать имена блобов
+```
+
+> ⚠️ Обучение PicoDet идёт через **PaddleDetection** (тяжело, ~300 эпох) и требует
+> поддерживаемого NVIDIA GPU — Blackwell (RTX 50xx) не подойдёт и тут, нужен
+> Colab/облако. Инференс на Pi от этого не зависит.
+
 ---
 
 ## GitHub Actions (CI)
