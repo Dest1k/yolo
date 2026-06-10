@@ -55,6 +55,15 @@ there, since anchors can't be read from the model.)
 Only if auto-detect fails on a non-standard export do you set `YF_OUTPUTS` by hand
 (`--inspect` lists names; the env var overrides auto-detect).
 
+**`--autotune`** removes the last manual bit (the box/score formula): point the
+camera at your objects and add `--autotune` once — it samples ~30 frames, tries
+`v5`/`plain` × `sqrt`/`mul`, and keeps the combo whose boxes look sanest:
+```bash
+YF_PARAM=… YF_BIN=… YOLO_SOURCE=rpicam python3 yolofastest_ncnn_sidecar.py --autotune
+```
+It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`YF_SCORE`
+(or the systemd unit) so you don't re-run it each boot.
+
 **If boxes are wrong / missing**, in order:
 - Nothing detected → wrong `YF_OUTPUTS` (re-check `--inspect`).
 - Boxes the wrong size/position → switch the box formula: `YF_BOX_DECODE=plain`

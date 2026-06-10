@@ -117,6 +117,24 @@ def _softmax(x, axis=-1):
     return e / e.sum(axis=axis, keepdims=True)
 
 
+def _sanity_score(dets, w, h):
+    """Heuristic 'do these detections look sane' score, for --autotune. Rewards
+    plausible in-frame boxes (by area/aspect/confidence), penalises out-of-frame
+    or absurd ones — the right decode config scores highest on a real scene."""
+    score = 0.0
+    for (x1, y1, x2, y2, conf, cls) in dets:
+        bw, bh = x2 - x1, y2 - y1
+        if bw <= 1 or bh <= 1:
+            continue
+        if x1 < -2 or y1 < -2 or x2 > w + 2 or y2 > h + 2:
+            score -= 1.0
+            continue
+        area = (bw * bh) / (w * h + 1e-6)
+        ar = bw / max(1e-6, bh)
+        score += float(conf) if (0.0005 <= area <= 0.6 and 0.1 <= ar <= 10) else -0.2
+    return score
+
+
 class PicoDetNCNN:
     # ImageNet BGR mean / (std*255) — PicoDet's standard normalisation.
     DEFAULT_MEAN = (103.53, 116.28, 123.675)
@@ -232,6 +250,24 @@ class PicoDetNCNN:
                       "PICODET_CLS_BLOBS/PICODET_REG_BLOBS from --inspect")
         except Exception as e:
             print(f"  auto: probe failed ({type(e).__name__}: {e}); set blobs manually if no detections")
+
+    def _safe_detect(self, f):
+        try:
+            return self.detect(f)
+        except Exception:
+            return []
+
+    def autotune(self, frames):
+        """Pick the decode constant that makes boxes look sanest on real frames.
+        For PicoDet that's the grid cell offset (0 vs 0.5)."""
+        best = None
+        for off in (0.5, 0.0):
+            self.cell_offset = off
+            s = sum(_sanity_score(self._safe_detect(f), f.shape[1], f.shape[0]) for f in frames)
+            if best is None or s > best[0]:
+                best = (s, off)
+        self.cell_offset = best[1]
+        print(f"  autotune: cell_offset={best[1]} (score {best[0]:.1f})")
 
     def detect(self, bgr):
         h, w = bgr.shape[:2]
@@ -941,6 +977,18 @@ def main():
     cap = open_source(source, cam_w, cam_h, cam_fps)
     if not cap.isOpened():
         sys.stderr.write(f"ERROR: cannot open video source '{source}'\n"); sys.exit(1)
+
+    if "--autotune" in sys.argv:
+        print("  autotune: sampling frames (point the camera at your objects)…")
+        frames, t = [], time.time()
+        while len(frames) < 30 and time.time() - t < 8:
+            ok, f = cap.read()
+            if ok and f is not None:
+                frames.append(f)
+        if frames:
+            detector.autotune(frames)
+        else:
+            print("  autotune: no frames captured — keeping defaults")
 
     state = State(); state.labels = labels; state.jpeg_q = jpeg_q
     if filter_set is not None:

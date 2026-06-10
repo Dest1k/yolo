@@ -59,6 +59,13 @@ Only if auto-detect can't classify a non-standard export do you set blobs by han
 run `--inspect` to list names and set `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS`
 (those env vars override the auto-detect).
 
+**`--autotune`** picks the remaining decode constant (the grid `cell_offset`) by
+sampling ~30 frames of your scene and keeping the sanest-looking boxes:
+```bash
+PICODET_PARAM=… PICODET_BIN=… YOLO_SOURCE=rpicam python3 picodet_ncnn_sidecar.py --autotune
+```
+(It prints the chosen `cell_offset`; bake it into `PICODET_CELL_OFFSET`.)
+
 **If boxes are wrong / missing**, in order:
 - No detections at all → wrong `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS` (re-check `--inspect`).
 - Boxes shifted by ~half a cell → set `PICODET_CELL_OFFSET=0` (default 0.5).

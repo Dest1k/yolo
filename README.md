@@ -594,6 +594,41 @@ YF_PARAM=Yolo-FastestV2/model/yolo-fastestv2.param \
 
 ---
 
+## Форматы моделей и конвертеры
+
+Каждый рантайм хочет свой формат. Сводка «откуда что взять»:
+
+| Куда (рантайм) | Формат | Как получить из стоковой модели |
+|---|---|---|
+| **Desktop (JVM)** | `.onnx` / `.pt` | `YOLO('yolov10n.pt').export(format='onnx', imgsz=320, simplify=True)` (Ultralytics). `.pt` (TorchScript) — тоже грузится |
+| **RKNN-сайдкар** (Orange Pi 5 / NPU) | `.rknn` | `.onnx` → **rknn-toolkit2** на x86-хосте (см. [rknn README](tools/rknn-sidecar/README.md)) |
+| **MediaPipe-сайдкар** (Pi 5) | `.tflite` | **конвертировать не надо** — скачать готовую EfficientDet-Lite или обучить через Model Maker ([README](tools/mediapipe-sidecar/README.md)) |
+| **PicoDet-сайдкар** (Pi 5, NCNN) | `.param` + `.bin` | PaddleDetection → ONNX (**без NMS**) → `onnxsim` → `onnx2ncnn` ([README](tools/picodet-sidecar/README.md)) |
+| **YOLO-FastestV2-сайдкар** (Pi 5, NCNN) | `.param` + `.bin` | репо → ONNX → `onnxsim` → `onnx2ncnn` ([README](tools/yolo-fastestv2-sidecar/README.md)) |
+
+Базовые инструменты конвертации:
+```bash
+# PT → ONNX (Ultralytics YOLO)
+pip install ultralytics
+python -c "from ultralytics import YOLO; YOLO('yolov10n.pt').export(format='onnx', imgsz=320, simplify=True)"
+
+# ONNX → упростить (всегда полезно перед onnx2ncnn)
+pip install onnxsim && python -m onnxsim model.onnx model-sim.onnx
+
+# ONNX → NCNN (.param/.bin) — бинарь onnx2ncnn из сборки инструментов ncnn
+onnx2ncnn model-sim.onnx model.param model.bin
+
+# ONNX → RKNN — на x86 Linux, см. rknn-sidecar/README.md
+# (PT/ONNX → TFLite для MediaPipe обычно не нужен — там свой Model Maker)
+```
+
+Подробные пошаговые рецепты (включая нюансы экспорта, например PicoDet **без NMS**
+для NCNN) — в README соответствующего сайдкара. NCNN-сайдкары при первом запуске
+сами определяют структуру модели (`auto: …`), а формулу декода можно подобрать
+флагом `--autotune` — конвертация остаётся единственным ручным шагом.
+
+---
+
 ## GitHub Actions (CI)
 
 Три задачи запускаются на каждый пуш:

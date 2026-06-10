@@ -114,6 +114,24 @@ def _softmax(x, axis=0):
     return e / e.sum(axis=axis, keepdims=True)
 
 
+def _sanity_score(dets, w, h):
+    """Heuristic 'do these detections look sane' score, for --autotune. Rewards
+    plausible in-frame boxes, penalises out-of-frame / absurd ones — the right
+    box/score formula scores highest on a real scene."""
+    score = 0.0
+    for (x1, y1, x2, y2, conf, cls) in dets:
+        bw, bh = x2 - x1, y2 - y1
+        if bw <= 1 or bh <= 1:
+            continue
+        if x1 < -2 or y1 < -2 or x2 > w + 2 or y2 > h + 2:
+            score -= 1.0
+            continue
+        area = (bw * bh) / (w * h + 1e-6)
+        ar = bw / max(1e-6, bh)
+        score += float(conf) if (0.0005 <= area <= 0.6 and 0.1 <= ar <= 10) else -0.2
+    return score
+
+
 # ── YOLO-FastestV2 NCNN inference + anchor decode ─────────────────────────────
 class YoloFastestV2NCNN:
     # Repo COCO anchors (pixels at the 352 input), per stride.
@@ -211,6 +229,24 @@ class YoloFastestV2NCNN:
                 print("  auto: couldn't read outputs — set YF_OUTPUTS from --inspect")
         except Exception as e:
             print(f"  auto: probe failed ({type(e).__name__}: {e}); set YF_OUTPUTS manually if no detections")
+
+    def _safe_detect(self, f):
+        try:
+            return self.detect(f)
+        except Exception:
+            return []
+
+    def autotune(self, frames):
+        """Pick the box/score formula that makes boxes look sanest on real frames."""
+        best = None
+        for bm in ("v5", "plain"):
+            for sm in ("sqrt", "mul"):
+                self.box_mode, self.score_mode = bm, sm
+                s = sum(_sanity_score(self._safe_detect(f), f.shape[1], f.shape[0]) for f in frames)
+                if best is None or s > best[0]:
+                    best = (s, bm, sm)
+        self.box_mode, self.score_mode = best[1], best[2]
+        print(f"  autotune: box={best[1]} score={best[2]} (score {best[0]:.1f})")
 
     def detect(self, bgr):
         h, w = bgr.shape[:2]
@@ -922,6 +958,18 @@ def main():
     cap = open_source(source, cam_w, cam_h, cam_fps)
     if not cap.isOpened():
         sys.stderr.write(f"ERROR: cannot open video source '{source}'\n"); sys.exit(1)
+
+    if "--autotune" in sys.argv:
+        print("  autotune: sampling frames (point the camera at your objects)…")
+        frames, t = [], time.time()
+        while len(frames) < 30 and time.time() - t < 8:
+            ok, f = cap.read()
+            if ok and f is not None:
+                frames.append(f)
+        if frames:
+            detector.autotune(frames)
+        else:
+            print("  autotune: no frames captured — keeping defaults")
 
     state = State(); state.labels = labels; state.jpeg_q = jpeg_q
     if filter_set is not None:
