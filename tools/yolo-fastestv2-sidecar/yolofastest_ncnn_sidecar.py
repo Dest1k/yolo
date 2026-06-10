@@ -150,6 +150,8 @@ class YoloFastestV2NCNN:
         self.nms = float(env("YOLO_NMS", "0.45"))
         self.box_mode = (env("YF_BOX_DECODE", "v5") or "v5").lower()
         self.score_mode = (env("YF_SCORE", "sqrt") or "sqrt").lower()
+        self._act = None        # auto-detected: (obj needs sigmoid, cls needs softmax)
+        self._dbg = True        # print decode diagnostics once
         self.anchors = {}
         for s in self.strides:
             ev = env(f"YF_ANCHORS_{s}")
@@ -360,9 +362,24 @@ class YoloFastestV2NCNN:
         if nc <= 0:
             return []
         reg = flat[0:4 * self.na].reshape(self.na, 4, HW)
-        obj = _sigmoid(flat[4 * self.na:5 * self.na])               # [na, HW]
-        cls = _softmax(flat[5 * self.na:5 * self.na + nc], axis=0)   # [nc, HW] shared
+        obj_raw = flat[4 * self.na:5 * self.na]                      # [na, HW]
+        cls_raw = flat[5 * self.na:5 * self.na + nc]                 # [nc, HW] shared
+        # The export may already apply sigmoid(obj)/softmax(cls). Detect it (values
+        # already in [0,1]) so we don't double-activate and squash every score to ~0.
+        if self._act is None:
+            self._act = (bool(obj_raw.min() < -0.01 or obj_raw.max() > 1.01),
+                         bool(cls_raw.min() < -0.01 or cls_raw.max() > 1.01))
+        obj = _sigmoid(obj_raw) if self._act[0] else obj_raw
+        cls = _softmax(cls_raw, axis=0) if self._act[1] else cls_raw
         cls_p = cls.max(0); cls_id = cls.argmax(0)                   # [HW]
+        if self._dbg:
+            self._dbg = False
+            sc = (np.sqrt(obj * cls_p) if self.score_mode == "sqrt" else obj * cls_p)
+            sys.stderr.write(
+                f"decode dbg: C={C} nc={nc} obj[{obj_raw.min():.2f},{obj_raw.max():.2f}] "
+                f"cls[{cls_raw.min():.2f},{cls_raw.max():.2f}] sig_obj={self._act[0]} "
+                f"soft_cls={self._act[1]} max_score={float(sc.max()):.3f} "
+                f"#>={self.conf}:{int((sc >= self.conf).sum())}\n")
         gy, gx = np.divmod(np.arange(HW), W)
         anc = self.anchors[stride]
         sx, sy = ow / self.input, oh / self.input
