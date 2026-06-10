@@ -175,6 +175,64 @@ class PicoDetNCNN:
         print("\nSet PICODET_CLS_BLOBS / PICODET_REG_BLOBS to the class-score and "
               "box-distribution outputs, ordered by stride", self.strides)
 
+    def _probe(self, names, nc_hint):
+        """Forward one dummy frame and read each output's (channels, grid)."""
+        ex = self.net.create_extractor()
+        dummy = self.ncnn.Mat(self.input, self.input, 3)
+        dummy.fill(0.0)
+        ex.input(self.in_name, dummy)
+        out = {}
+        for nm in names:
+            try:
+                _, m = ex.extract(nm)
+            except Exception:
+                continue
+            a = np.array(m)
+            if a.ndim == 3:        # [C, H, W]
+                c, g = a.shape[0], a.shape[1]
+            elif a.ndim == 2:      # [G, C] or [C, G] — pick channels via the nc hint
+                d0, d1 = a.shape
+                if d1 == nc_hint or (d1 % 4 == 0 and d0 != nc_hint and d1 < d0):
+                    c, g = d1, int(round(math.sqrt(d0)))
+                else:
+                    c, g = d0, int(round(math.sqrt(d1)))
+            else:
+                continue
+            out[nm] = (c, max(1, g))
+        return out
+
+    def autoconfig(self, nc_hint):
+        """Auto-detect strides / cls&reg blobs / reg_max from output shapes.
+        Skipped if PICODET_CLS_BLOBS/REG_BLOBS were set explicitly."""
+        if env("PICODET_CLS_BLOBS") and env("PICODET_REG_BLOBS"):
+            return
+        names = self._names("output")
+        if not names:
+            print("  auto: ncnn gave no output names — using defaults; run --inspect if no detections")
+            return
+        try:
+            shapes = self._probe(names, nc_hint)
+            per = {}
+            for nm, (c, g) in shapes.items():
+                per.setdefault(max(1, int(round(self.input / g))), []).append((nm, c))
+            strides, cls_b, reg_b, reg_max = [], [], [], None
+            for st in sorted(per):
+                outs = per[st]
+                cls = [nm for nm, c in outs if c == nc_hint]
+                reg = [(nm, c) for nm, c in outs if c % 4 == 0 and c != nc_hint]
+                if len(cls) == 1 and len(reg) == 1:
+                    strides.append(st); cls_b.append(cls[0]); reg_b.append(reg[0][0])
+                    reg_max = reg[0][1] // 4 - 1
+            if strides and reg_max is not None:
+                self.strides, self.cls_blobs, self.reg_blobs, self.reg_max = strides, cls_b, reg_b, reg_max
+                print(f"  auto: strides={strides} reg_max={reg_max} nc={nc_hint}")
+                print(f"  auto: cls={cls_b}  reg={reg_b}")
+            else:
+                print("  auto: couldn't classify outputs (custom layout?) — set "
+                      "PICODET_CLS_BLOBS/PICODET_REG_BLOBS from --inspect")
+        except Exception as e:
+            print(f"  auto: probe failed ({type(e).__name__}: {e}); set blobs manually if no detections")
+
     def detect(self, bgr):
         h, w = bgr.shape[:2]
         ex = self.net.create_extractor()
@@ -871,6 +929,7 @@ def main():
 
     print("YOLO PicoDet sidecar (NCNN / CPU)")
     detector = PicoDetNCNN()
+    detector.autoconfig(len(labels) if labels else 80)   # auto-detect blobs/strides/reg_max
     print(f"  model loaded: input={detector.input} strides={detector.strides} "
           f"reg_max={detector.reg_max} conf={detector.conf} nms={detector.nms}")
     print(f"  input blob: {detector.in_name}")

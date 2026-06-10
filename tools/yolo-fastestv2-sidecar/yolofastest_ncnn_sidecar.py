@@ -174,6 +174,44 @@ class YoloFastestV2NCNN:
         print("\nSet YF_OUTPUTS to the head outputs ordered by stride", self.strides,
               "\nIf boxes are wrong try YF_BOX_DECODE=plain and/or YF_SCORE=mul, and check YF_ANCHORS_*")
 
+    def autoconfig(self):
+        """Auto-detect strides + output blobs from output grid sizes (one head per
+        stride). Skipped if YF_OUTPUTS was set explicitly."""
+        if env("YF_OUTPUTS"):
+            return
+        names = self._names("output")
+        if not names:
+            print("  auto: ncnn gave no output names — using defaults; run --inspect if no detections")
+            return
+        try:
+            ex = self.net.create_extractor()
+            dummy = self.ncnn.Mat(self.input, self.input, 3); dummy.fill(0.0)
+            ex.input(self.in_name, dummy)
+            grid = {}
+            for nm in names:
+                try:
+                    _, m = ex.extract(nm)
+                except Exception:
+                    continue
+                a = np.array(m)
+                if a.ndim == 3:
+                    g = a.shape[1]
+                elif a.ndim == 2:
+                    g = int(round(math.sqrt(max(a.shape))))   # grid = larger dim
+                else:
+                    continue
+                grid[max(1, int(round(self.input / g)))] = nm   # stride → blob
+            if grid:
+                self.strides = sorted(grid)
+                self.out_blobs = [grid[s] for s in self.strides]
+                for s in self.strides:
+                    self.anchors.setdefault(s, self.DEFAULT_ANCHORS.get(s, self.DEFAULT_ANCHORS[32]))
+                print(f"  auto: strides={self.strides}  outputs={self.out_blobs}")
+            else:
+                print("  auto: couldn't read outputs — set YF_OUTPUTS from --inspect")
+        except Exception as e:
+            print(f"  auto: probe failed ({type(e).__name__}: {e}); set YF_OUTPUTS manually if no detections")
+
     def detect(self, bgr):
         h, w = bgr.shape[:2]
         ex = self.net.create_extractor()
@@ -874,6 +912,7 @@ def main():
 
     print("YOLO-FastestV2 sidecar (NCNN / CPU)")
     detector = YoloFastestV2NCNN()
+    detector.autoconfig()                                # auto-detect strides + output blobs
     print(f"  model loaded: input={detector.input} strides={detector.strides} "
           f"anchors/cell={detector.na} box={detector.box_mode} score={detector.score_mode} "
           f"conf={detector.conf} nms={detector.nms}")

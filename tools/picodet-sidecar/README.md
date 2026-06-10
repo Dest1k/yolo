@@ -41,29 +41,23 @@ Easiest is the **ncnn model zoo / PaddleDetection deploy** PicoDet, already in
 > run it through `python -m onnxsim` first). PicoDet must be exported **without**
 > NMS (`export_model … -o exclude_nms=True`) so NCNN gets the raw head outputs.
 
-## 3. First run / tuning (important)
+## 3. First run / tuning
 
-The output **blob names** and a couple of decode constants depend on how the model
-was exported, so the very first time you must point the decoder at the right
-outputs:
-
-```bash
-# 1) list the model's input/output blob names
-PICODET_PARAM=picodet.param PICODET_BIN=picodet.bin \
-  python3 picodet_ncnn_sidecar.py --inspect
-```
-You'll get something like the class-score outputs and the box-distribution outputs
-for each stride. Set them (ordered by stride 8,16,32,64) and run:
+**It auto-configures.** On startup the sidecar probes the model (one dummy
+forward), reads the output shapes, and auto-detects the **strides, class/box output
+blobs, number of classes and reg_max** — so the usual case is just:
 
 ```bash
 PICODET_PARAM=picodet.param PICODET_BIN=picodet.bin \
-  PICODET_INPUT=416 \
-  PICODET_CLS_BLOBS=cls_8,cls_16,cls_32,cls_64 \
-  PICODET_REG_BLOBS=dis_8,dis_16,dis_32,dis_64 \
-  YOLO_SOURCE=rpicam YOLO_CONF=0.4 \
+  PICODET_INPUT=416 YOLO_SOURCE=rpicam YOLO_CONF=0.4 YOLO_LABELS=labels.txt \
   python3 picodet_ncnn_sidecar.py
 ```
-Then open `http://<board-ip>:8080`.
+It prints `auto: strides=… reg_max=… cls=… reg=…`. (Pass `YOLO_LABELS` for a custom
+model so it knows the class count.) Open `http://<board-ip>:8080`.
+
+Only if auto-detect can't classify a non-standard export do you set blobs by hand —
+run `--inspect` to list names and set `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS`
+(those env vars override the auto-detect).
 
 **If boxes are wrong / missing**, in order:
 - No detections at all → wrong `PICODET_CLS_BLOBS`/`PICODET_REG_BLOBS` (re-check `--inspect`).

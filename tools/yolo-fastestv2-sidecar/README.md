@@ -39,20 +39,21 @@ Use those `.param`/`.bin` to test the pipeline before training your own.
 
 ## 3. First run / tuning
 
-```bash
-# list the model's input/output blob names
-YF_PARAM=model/yolo-fastestv2.param YF_BIN=model/yolo-fastestv2.bin \
-  python3 yolofastest_ncnn_sidecar.py --inspect
-```
-Set the two head outputs (ordered by stride 16,32) and run:
+**It auto-configures.** On startup the sidecar probes the model and auto-detects the
+**strides and head output blobs** from the output grid sizes, so the usual case is
+just:
 
 ```bash
 YF_PARAM=model/yolo-fastestv2.param YF_BIN=model/yolo-fastestv2.bin \
-  YF_OUTPUTS=<out_stride16>,<out_stride32> \
   YF_INPUT=352 YOLO_SOURCE=rpicam YOLO_CONF=0.3 \
   python3 yolofastest_ncnn_sidecar.py
 ```
-Open `http://<board-ip>:8080`.
+It prints `auto: strides=… outputs=…`. Open `http://<board-ip>:8080`. (For a model
+you trained, `source sidecar_env.sh` first — the trainer writes your anchors/input
+there, since anchors can't be read from the model.)
+
+Only if auto-detect fails on a non-standard export do you set `YF_OUTPUTS` by hand
+(`--inspect` lists names; the env var overrides auto-detect).
 
 **If boxes are wrong / missing**, in order:
 - Nothing detected → wrong `YF_OUTPUTS` (re-check `--inspect`).

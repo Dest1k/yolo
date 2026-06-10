@@ -62,6 +62,7 @@ def main():
             if os.path.isfile(anc):
                 line = open(anc).readline().strip()
                 _patch_kv(data_abs, "anchors", line.replace(" ", ", ") if line else None)
+                _write_sidecar_env(data_abs, line)
                 print(f"  patched anchors → {data_abs}")
     else:
         print("[2/4] Skipping genanchors (using anchors already in .data)")
@@ -90,6 +91,26 @@ def _read_kv(data_path, key):
         if m:
             return m.group(1).strip()
     sys.exit(f"ERROR: '{key}=' not found in {data_path}")
+
+
+def _write_sidecar_env(data_path, anchor_line):
+    """Emit a sidecar_env.sh so the trained model is zero-config on the Pi:
+    the anchors aren't recoverable from the model, so we hand them over here."""
+    try:
+        nums = [x for x in re.split(r"[,\s]+", anchor_line.strip()) if x]
+        if len(nums) != 12:
+            return
+        inp = _read_kv(data_path, "width")
+        a16 = ",".join(nums[:6]); a32 = ",".join(nums[6:])
+        out = os.path.join(os.path.dirname(os.path.abspath(data_path)) or ".", "sidecar_env.sh")
+        with open(out, "w") as f:
+            f.write(f"# source this before running the sidecar with your trained model\n"
+                    f"export YF_INPUT={inp}\n"
+                    f"export YF_ANCHORS_16={a16}\n"
+                    f"export YF_ANCHORS_32={a32}\n")
+        print(f"  wrote sidecar env (anchors/input) → {out}")
+    except Exception:
+        pass
 
 
 def _patch_kv(data_path, key, value):
