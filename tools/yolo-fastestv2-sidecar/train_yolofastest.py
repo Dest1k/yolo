@@ -60,24 +60,61 @@ def sh(cmd, cwd=None, extra_env=None):
     return subprocess.call(cmd, cwd=cwd, env=e)
 
 
+IMG_EXT = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+
+
+def _has_imgs(d):
+    if not os.path.isdir(d):
+        return False
+    for e in IMG_EXT:
+        if glob.glob(os.path.join(d, e)) or glob.glob(os.path.join(d, "**", e), recursive=True):
+            return True
+    return False
+
+
+def _split_dir(split):
+    """Find the images dir for a split across common YOLO layouts."""
+    for c in (os.path.join(DATASET, "images", split),   # images/train
+              os.path.join(DATASET, split, "images"),   # train/images   <-- your layout
+              os.path.join(DATASET, split)):            # train/
+        if _has_imgs(c):
+            return c
+    return None
+
+
 def list_images(split):
+    d = _split_dir(split)
+    if not d:
+        return []
     files = []
-    for ext in ("*.jpg", "*.jpeg", "*.png"):
-        files += glob.glob(os.path.join(DATASET, "images", split, ext))
-    return sorted(os.path.abspath(f) for f in files)
+    for e in IMG_EXT:
+        files += glob.glob(os.path.join(d, e))
+        files += glob.glob(os.path.join(d, "**", e), recursive=True)
+    return sorted(set(os.path.abspath(f) for f in files))
 
 
 def build_data():
     if not os.path.isdir(DATASET):
         sys.exit(f"ERROR: DATASET not found: {DATASET}")
     os.makedirs(OUT, exist_ok=True)
+    counts = {}
     for split in ("train", "val"):
         imgs = list_images(split)
-        if not imgs:
-            print(f"  WARNING: no images in {DATASET}/images/{split}")
+        counts[split] = len(imgs)
+        d = _split_dir(split)
+        print(f"  {split}: {len(imgs)} images" + (f"  (from {d})" if d else ""))
         with open(os.path.join(OUT, f"{split}.txt"), "w") as f:
             f.write("\n".join(imgs) + ("\n" if imgs else ""))
-        print(f"  {split}: {len(imgs)} images")
+        if imgs and "images" not in imgs[0].replace("\\", "/"):
+            print("  WARNING: image paths have no 'images' folder — the repo derives label\n"
+                  "           paths by replacing 'images'->'labels'; labels may not resolve.")
+    if counts["train"] == 0:
+        top = ", ".join(sorted(os.listdir(DATASET))[:20])
+        sys.exit(
+            f"ERROR: no training images found under {DATASET}\n"
+            f"  looked in: images/train, train/images, train\n"
+            f"  {DATASET} contains: {top}\n"
+            f"  Expected a YOLO layout with labels parallel to images (images->labels).")
     names_path = os.path.abspath(os.path.join(OUT, "custom.names"))
     with open(names_path, "w") as f:
         f.write("\n".join(CLASSES) + "\n")

@@ -33,12 +33,36 @@ ANCHORS   = "12.64,19.39, 37.88,51.48, 55.71,138.31, 126.91,78.23, 131.57,214.55
 # =============================================================================
 
 
+IMG_EXT = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+
+
+def _has_imgs(d):
+    if not os.path.isdir(d):
+        return False
+    for e in IMG_EXT:
+        if glob.glob(os.path.join(d, e)) or glob.glob(os.path.join(d, "**", e), recursive=True):
+            return True
+    return False
+
+
+def _split_dir(split):
+    for c in (os.path.join(DATASET, "images", split),   # images/train
+              os.path.join(DATASET, split, "images"),   # train/images
+              os.path.join(DATASET, split)):            # train/
+        if _has_imgs(c):
+            return c
+    return None
+
+
 def list_images(split):
-    d = os.path.join(DATASET, "images", split)
+    d = _split_dir(split)
+    if not d:
+        return []
     files = []
-    for ext in ("*.jpg", "*.jpeg", "*.png"):
-        files += glob.glob(os.path.join(d, ext))
-    return sorted(os.path.abspath(f) for f in files)
+    for e in IMG_EXT:
+        files += glob.glob(os.path.join(d, e))
+        files += glob.glob(os.path.join(d, "**", e), recursive=True)
+    return sorted(set(os.path.abspath(f) for f in files))
 
 
 def build(out=OUT):
@@ -47,11 +71,10 @@ def build(out=OUT):
     os.makedirs(out, exist_ok=True)
     for split in ("train", "val"):
         imgs = list_images(split)
-        if not imgs:
-            print(f"  WARNING: no images in {DATASET}/images/{split}")
+        d = _split_dir(split)
+        print(f"  {split}: {len(imgs)} images" + (f"  (from {d})" if d else "  (no images dir found)"))
         with open(os.path.join(out, f"{split}.txt"), "w") as f:
             f.write("\n".join(imgs) + ("\n" if imgs else ""))
-        print(f"  {split}: {len(imgs)} images")
 
     names_path = os.path.join(out, "custom.names")
     with open(names_path, "w") as f:
