@@ -1022,7 +1022,8 @@ def main():
         if frames:
             detector.autotune(frames)
         else:
-            print("  autotune: no frames captured — keeping defaults")
+            print(f"  autotune: no frames from source '{source}' — keeping defaults. "
+                  "(Pi CSI camera? use YOLO_SOURCE=rpicam)")
 
     state = State(); state.labels = labels; state.jpeg_q = jpeg_q
     if filter_set is not None:
