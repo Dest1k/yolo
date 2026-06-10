@@ -400,8 +400,87 @@ class YoloFastestV2NCNN:
         return out
 
 
-# ── Manual single-object tracker (OpenCV NCC) ─────────────────────────────────
+# ── Manual single-object tracker ──────────────────────────────────────────────
 class ObjectTracker:
+    """Robust manual lock. Prefers OpenCV's **CSRT** tracker (handles camera pan /
+    rotation / scale / partial occlusion far better than template matching), then
+    KCF, then a built-in NCC fallback if neither is in this OpenCV build. Pick with
+    MANUAL_TRACKER=csrt|kcf|ncc (default csrt)."""
+
+    def __init__(self):
+        self.locked = False
+        self.box = None              # (x1,y1,x2,y2)
+        self.miss = 0
+        self.max_miss = int(env("MANUAL_MAX_MISS", "30"))
+        self._t = None
+        self._ncc = None
+        self.kind = self._pick(env("MANUAL_TRACKER", "csrt").lower())
+        print(f"  manual tracker: {self.kind.upper()}")
+
+    @staticmethod
+    def _ctor(kind):
+        names = {"csrt": "TrackerCSRT_create", "kcf": "TrackerKCF_create"}.get(kind)
+        if not names:
+            return None
+        if hasattr(cv2, names):
+            return getattr(cv2, names)
+        leg = getattr(cv2, "legacy", None)
+        if leg is not None and hasattr(leg, names):
+            return getattr(leg, names)
+        return None
+
+    def _pick(self, want):
+        for k in (want, "csrt", "kcf"):
+            if self._ctor(k) is not None:
+                return k
+        return "ncc"
+
+    def lock(self, frame, x1, y1, x2, y2):
+        H, W = frame.shape[:2]
+        x1 = max(0, min(int(x1), W - 2)); y1 = max(0, min(int(y1), H - 2))
+        x2 = max(x1 + 2, min(int(x2), W)); y2 = max(y1 + 2, min(int(y2), H))
+        self.box = (float(x1), float(y1), float(x2), float(y2)); self.miss = 0
+        try:
+            if self.kind in ("csrt", "kcf"):
+                self._t = self._ctor(self.kind)()
+                self._t.init(frame, (x1, y1, x2 - x1, y2 - y1))
+            else:
+                self._ncc = _NCCTracker(); self._ncc.lock(frame, x1, y1, x2, y2)
+            self.locked = True
+        except Exception as e:
+            sys.stderr.write(f"manual lock failed: {e}\n"); self.locked = False
+
+    def reset(self):
+        self.locked = False; self.box = None; self._t = None; self._ncc = None; self.miss = 0
+
+    def update(self, frame):
+        if not self.locked:
+            return None
+        if self.kind == "ncc":
+            r = self._ncc.update(frame)
+            if r is None:
+                self.locked = False
+            else:
+                self.box = r
+            return r
+        try:
+            ok, b = self._t.update(frame)
+        except Exception:
+            ok, b = False, None
+        if ok and b is not None:
+            x, y, w, h = b
+            self.box = (float(x), float(y), float(x + w), float(y + h)); self.miss = 0
+            return self.box
+        # Brief loss (e.g. fast pan): hold the last box for a bit, then give up.
+        self.miss += 1
+        if self.miss > self.max_miss:
+            self.locked = False
+            return None
+        return self.box
+
+
+# ── NCC template-match fallback (used only when OpenCV has no CSRT/KCF) ────────
+class _NCCTracker:
     def __init__(self, track_ncc=0.42, adapt_ncc=0.72, reacq_ncc=0.55, max_miss=90):
         self.track_ncc, self.adapt_ncc, self.reacq_ncc, self.max_miss = track_ncc, adapt_ncc, reacq_ncc, max_miss
         self.locked = False; self.tmpl = self.anchor = None
@@ -491,6 +570,7 @@ class Tracker:
         return inter / ua if ua > 0 else 0.0
 
     def update(self, dets, now):
+        dets = [d for d in dets if len(d) >= 6]      # ignore malformed detections
         matched = [False] * len(self.tracks)
         for d in dets:
             best, bi = -1, self.iou_th
@@ -798,10 +878,10 @@ def inference_loop(state, detector, track_on, filter_set=None):
             dets = detector.detect(frame)
             if filter_set is not None:
                 dets = [d for d in dets if d[5] in filter_set]
+            if tracker is not None:
+                dets = tracker.update(dets, time.time())
         except Exception as e:
             sys.stderr.write(f"inference error: {e}\n"); dets = []
-        if tracker is not None:
-            dets = tracker.update(dets, time.time())
         with state.lock:
             state.dets = dets
         count += 1; dt = time.time() - t0

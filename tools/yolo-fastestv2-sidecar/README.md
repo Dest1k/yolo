@@ -107,7 +107,10 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 | `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | as other sidecars | |
 
 Manual capture (drag a box), gimbal control and the panel work exactly like the
-other sidecars.
+other sidecars. The manual lock uses OpenCV's **CSRT** tracker (robust to camera
+pan/rotation/scale) when your OpenCV has it, else KCF, else a template fallback —
+override with `MANUAL_TRACKER=csrt|kcf|ncc` (CSRT = most stable, KCF = faster). The
+startup log prints which one is active.
 
 ## 4. Train on your own data
 
