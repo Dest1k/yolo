@@ -184,14 +184,21 @@ MM_QUIET=0 python train_object_detector.py
 
 #### int8 (the FPS lever on the Pi)
 
-`MM_QUANT=int8` makes the exported `.tflite` **int8** instead of float32 —
-typically **~2–4× smaller and noticeably faster** on the Pi 5 CPU (often the
-difference between ~13 and ~20–30 FPS). For the MediaPipe object detector int8 is
-done via **Quantization-Aware Training (QAT)**: the script first trains the float
-model, then runs a short QAT fine-tune (`MM_QAT_EPOCHS`, default 10), and
-`export_model()` then emits the int8 model. If your Model Maker version doesn't
-support QAT it falls back to float32 automatically (you'll see a WARNING). The Pi
-sidecar runs int8 and float models the same way — no config change.
+`MM_QUANT` makes the exported `.tflite` **int8** instead of float32 — typically
+**~2–4× smaller and noticeably faster** on the Pi 5 CPU. Two paths:
+
+- `MM_QUANT=int8` — **QAT** (quantization-aware training): most accurate, but adds a
+  short fine-tune (`MM_QAT_EPOCHS`) on top of training.
+- `MM_QUANT=ptq` — **post-training quantization**: no extra training, just calibrates
+  on your images and exports. Much faster than QAT, slightly lower accuracy. This is
+  the "quantize the model I just trained" option.
+
+> **Can I re-quantize a finished `.tflite`?** No — an already-exported float `.tflite`
+> can't be converted to int8 (there's no tooling for flatbuffer→int8). int8 has to
+> come from the model graph, so it's produced **in the same run as training** (QAT or
+> PTQ above), while the model is still in memory. Plan to set `MM_QUANT` up front
+> rather than converting afterwards. The Pi sidecar runs int8 and float models the
+> same way — no config change.
 
 ### Alternative — Google Colab (zero setup, free + supported GPU)
 

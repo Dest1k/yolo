@@ -26,7 +26,8 @@ Performance tuning (all via env vars, with sensible defaults):
   MM_MAX_VAL      cap the validation set (COCO eval each epoch is slow on CPU!)
                   (default 500; 0 = use all of it)
   MM_QUIET        1 = silence TF/Keras/TFA chatter   (default 1; set 0 to debug)
-  MM_QUANT        float | int8 — int8 = QAT, smaller/faster on the Pi  (default float)
+  MM_QUANT        float | int8 | ptq — int8 = QAT (accurate, adds training),
+                  ptq = post-training int8 (fast, just calibration)  (default float)
   MM_QAT_EPOCHS   int8 QAT fine-tune epochs          (default 10)
   MM_QAT_BATCH    int8 QAT batch size                (default 4)
 
@@ -206,6 +207,25 @@ def _quantize_int8(model, train_data, val_data):
         return False
 
 
+def _export_int8_ptq(model, rep_data):
+    """
+    Post-training int8 export: no extra training, just calibrate on [rep_data] and
+    export an int8 .tflite. Much faster than QAT (slightly lower accuracy). Whether
+    the object detector's export accepts a quantization config depends on the Model
+    Maker version, so this is best-effort with a float fallback.
+    """
+    try:
+        from mediapipe_model_maker import quantization
+        qc = quantization.QuantizationConfig.for_int8(representative_data=rep_data)
+        print("Post-training quantization (int8 PTQ): calibrating + exporting…")
+        model.export_model("model.tflite", quantization_config=qc)
+        return True
+    except Exception as e:
+        print(f"  WARNING: int8 PTQ not supported here → exporting float32 instead "
+              f"({type(e).__name__}: {e})")
+        return False
+
+
 def main():
     import math
     spec = _resolve_model(MODEL_NAME)
@@ -259,14 +279,26 @@ def main():
     loss, coco_metrics = model.evaluate(val_data, batch_size=BATCH_SIZE)
     print(f"  loss={loss}  metrics={coco_metrics}")
 
-    # Optional int8 quantization (faster on the Pi). MM_QUANT=int8 runs QAT first.
+    # Quantization. MM_QUANT: float (default) | int8 (QAT — accurate, adds training)
+    # | ptq (post-training — fast, just calibration on your images, slight accuracy
+    # drop). Both int8 paths happen here, in-process, on the just-trained model — a
+    # already-exported float .tflite can't be re-quantized after the fact.
     quant = _env("MM_QUANT", "float").lower()
-    is_int8 = quant in ("int8", "qat") and _quantize_int8(model, train_data, val_data)
+    mode = "float32"
+    if quant in ("int8", "qat"):
+        if _quantize_int8(model, train_data, val_data):
+            mode = "int8 (QAT)"
+        model.export_model("model.tflite")          # int8 after QAT, else float
+    elif quant in ("ptq", "int8_ptq"):
+        if _export_int8_ptq(model, train_data):
+            mode = "int8 (PTQ)"
+        else:
+            model.export_model("model.tflite")      # fallback: float
+    else:
+        model.export_model("model.tflite")
 
-    # export_model() emits int8 after QAT, else float32. Writes into EXPORT_DIR.
-    model.export_model("model.tflite")
     out = os.path.join(EXPORT_DIR, "model.tflite")
-    print(f"Done ({'int8' if is_int8 else 'float32'}) → {out}")
+    print(f"Done ({mode}) → {out}")
     print("Copy it to the Pi and run the sidecar with YOLO_MODEL=path/to/model.tflite")
 
 
