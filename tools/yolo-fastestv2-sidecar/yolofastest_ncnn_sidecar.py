@@ -187,14 +187,15 @@ class YoloFastestV2NCNN:
             return names
         return default
 
-    def _probe_outputs(self, names):
-        """Run one forward at the configured input and return {name: grid} for the
-        outputs that actually EXTRACT (ncnn ret==0). An output that fails extraction
-        (ncnn code -100) usually means YF_INPUT doesn't match the export size."""
+    def _probe_outputs(self, names, input_size=None):
+        """Run one forward at [input_size] (default self.input) and return
+        {name: grid} for outputs that EXTRACT (ncnn ret==0). A failure (ncnn code
+        -100) means a layer produced an empty blob — usually a wrong input size."""
+        isz = int(input_size or self.input)
         out, fails = {}, {}
         try:
             ex = self.net.create_extractor()
-            dummy = self.ncnn.Mat(self.input, self.input, 3); dummy.fill(0.0)
+            dummy = self.ncnn.Mat(isz, isz, 3); dummy.fill(0.0)
             ex.input(self.in_name, dummy)
             for nm in names:
                 try:
@@ -216,6 +217,10 @@ class YoloFastestV2NCNN:
         return out, fails
 
     def inspect(self):
+        try:
+            print("ncnn version:", self.ncnn.__version__)
+        except Exception:
+            pass
         ins = self._names("input"); outs = self._names("output")
         print("Model input blobs :", ins)
         print("Model output blobs:", outs)
@@ -228,11 +233,24 @@ class YoloFastestV2NCNN:
             else:
                 print(f"  {nm}: FAILED ({fails.get(nm, '?')})")
         if outs and not ok:
-            print("\n  ALL outputs failed → almost always YF_INPUT is wrong. Set it to the size\n"
-                  "  your model was exported at (try 256/320/352/416) and re-run --inspect.")
-        else:
-            print("\n  Use the OK outputs as YF_OUTPUTS (small→large stride). If boxes look wrong\n"
-                  "  later, try YF_BOX_DECODE=plain / YF_SCORE=mul, or run with --autotune.")
+            # Sweep input sizes — if NONE work it's a conversion/ncnn problem, not size.
+            print("\n  Sweeping input sizes to find one the model accepts…")
+            found = []
+            for s in (224, 256, 288, 320, 352, 384, 416, 448, 512, 576, 640):
+                got, _ = self._probe_outputs(outs, s)
+                if got:
+                    found.append(s)
+                    print(f"  YF_INPUT={s}: OK  " + ", ".join(f"{n}→stride{max(1, int(round(s / g)))}" for n, g in got.items()))
+            if found:
+                print(f"\n  → use YF_INPUT={found[0]}.")
+            else:
+                print("  No input size works → this is a CONVERSION/ncnn problem, not the size.\n"
+                      "  Try: (1) the repo's bundled model Yolo-FastestV2/model/*.param to test the\n"
+                      "  sidecar itself; (2) pip install -U ncnn; (3) re-run onnx2ncnn WITHOUT\n"
+                      "  ncnnoptimize (or run onnxsim on the ONNX first).")
+        if ok:
+            print("\n  Outputs extract — just run without YF_OUTPUTS (autoconfig handles them). If\n"
+                  "  boxes look wrong later, try YF_BOX_DECODE=plain / YF_SCORE=mul, or --autotune.")
 
     def autoconfig(self):
         """Detect strides + working output blobs by actually extracting them. Auto-
