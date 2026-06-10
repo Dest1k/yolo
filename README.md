@@ -571,6 +571,27 @@ PICODET_PARAM=picodet.param PICODET_BIN=picodet.bin python3 \
 > поддерживаемого NVIDIA GPU — Blackwell (RTX 50xx) не подойдёт и тут, нужен
 > Colab/облако. Инференс на Pi от этого не зависит.
 
+### Raspberry Pi 5 — YOLO-FastestV2 (NCNN, максимальный FPS)
+
+**YOLO-FastestV2** (dog-qiuqiu) — один из самых маленьких детекторов (~0.25M
+параметров), на голом CPU Pi 5 обычно даёт **наибольший FPS** из всех вариантов.
+Сайдкар — `tools/yolo-fastestv2-sidecar/` (NCNN, та же панель с ручным захватом и
+подвесом). Плюсы для обучения: датасет — **прямо YOLO-формат** (конвертить боксы не
+надо), а тренировка — **обычный PyTorch**, который на свежей сборке (cu128)
+**работает и на Blackwell** — то есть твою RTX 5080 наконец можно задействовать. В
+комплекте: подготовка данных (`make_yolofastest_data.py`) и обёртка обучения
+(`train_yolofastest.py`). Имена выходных блобов/формула бокса зависят от экспорта —
+при первом запуске `--inspect`; подробно в
+[`tools/yolo-fastestv2-sidecar/README.md`](tools/yolo-fastestv2-sidecar/README.md).
+
+```bash
+pip3 install ncnn numpy python3-opencv
+git clone --depth 1 https://github.com/dog-qiuqiu/Yolo-FastestV2.git   # готовая модель в model/
+YF_PARAM=Yolo-FastestV2/model/yolo-fastestv2.param \
+  YF_BIN=Yolo-FastestV2/model/yolo-fastestv2.bin python3 \
+  tools/yolo-fastestv2-sidecar/yolofastest_ncnn_sidecar.py --inspect
+```
+
 ---
 
 ## GitHub Actions (CI)
