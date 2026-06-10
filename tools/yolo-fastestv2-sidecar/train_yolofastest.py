@@ -164,6 +164,29 @@ def patch_train(repo):
         print(f"  patched train.py: num_workers={WORKERS} (x{n}), cudnn.benchmark={CUDNN_BENCHMARK}")
 
 
+def patch_datasets(repo):
+    """Fix the repo's label-path derivation in utils/datasets.py. Different
+    forks/versions are broken in different ways (an unbound `line`, a hardcoded
+    `.jpg`, or labels looked up next to the image instead of in a parallel labels/
+    folder). Replace it with one robust line that works for any extension and the
+    standard images/ + labels/ layout, derived from self.data_list[index]."""
+    p = os.path.join(repo, "utils", "datasets.py")
+    if not os.path.isfile(p):
+        print("  (utils/datasets.py not found to patch)")
+        return
+    s = open(p, encoding="utf-8").read(); orig = s
+    robust = ('label_path = os.path.splitext(self.data_list[index])[0]'
+              '.replace("images", "labels") + ".txt"')
+    s, n = re.subn(r"label_path\s*=\s*.*", robust, s, count=1)
+    if "import os" not in s:
+        s = "import os\n" + s
+    if s != orig and n:
+        open(p, "w", encoding="utf-8").write(s)
+        print(f"  patched utils/datasets.py: robust label path (images->labels, any ext)")
+    elif not n:
+        print("  WARNING: couldn't find label_path line in utils/datasets.py to patch")
+
+
 def patch_anchors(data_path, repo):
     if not (GENANCHORS and os.path.isfile(os.path.join(repo, "genanchors.py"))):
         return
@@ -195,6 +218,7 @@ def main():
             sys.exit("ERROR: git clone failed")
     patch_anchors(data_path, REPO_DIR)
     patch_train(REPO_DIR)
+    patch_datasets(REPO_DIR)
 
     print(f"[3/4] Training on {DEVICE.upper()} (batch={BATCH}, workers={WORKERS})…")
     extra_env = {"CUDA_VISIBLE_DEVICES": ""} if DEVICE == "cpu" else None
