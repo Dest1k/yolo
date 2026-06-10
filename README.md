@@ -617,6 +617,9 @@ pip install onnxsim && python -m onnxsim model.onnx model-sim.onnx
 
 # ONNX → NCNN (.param/.bin) — бинарь onnx2ncnn из сборки инструментов ncnn
 onnx2ncnn model-sim.onnx model.param model.bin
+# ВАЖНО: onnx2ncnn ждёт opset 11. На opset 13/17/18 он криво конвертит shape-операции —
+# модель грузится, но падает на forward (ncnn -100). Экспортируй ONNX с opset 11
+# (и прогоняй onnxsim), либо для новых opset используй pnnx вместо onnx2ncnn.
 
 # ONNX → RKNN — на x86 Linux, см. rknn-sidecar/README.md
 # (PT/ONNX → TFLite для MediaPipe обычно не нужен — там свой Model Maker)

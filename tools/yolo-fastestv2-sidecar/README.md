@@ -67,11 +67,14 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 **If boxes are wrong / missing**, in order:
 - **`NCNN extract failed … code -100` + "det" racing to ~300 fps** → extraction
   itself fails (so `detect()` returns nothing instantly). ncnn `-100` is an
-  alloc/forward failure — almost always **`YF_INPUT` doesn't match the size the
-  model was exported at** (especially after `ncnnoptimize`, which can bake fixed
-  shapes). Run `--inspect` (it now does a probe forward and prints OK/FAIL + grid
-  per output) and set `YF_INPUT` to the export size (try 256/320/352/416). The
-  sidecar also auto-ignores a bad `YF_OUTPUTS` and re-detects working outputs.
+  alloc/forward failure (a layer produced an empty blob). Top causes:
+  - **ONNX opset too new.** `onnx2ncnn` expects **opset 11** (what the repo's
+    `pytorch2onnx.py` uses). Exporting with opset 13/17/18 mis-converts shape ops
+    (Reshape/Slice/…) → the model loads but `-100`s on forward. Re-export with
+    **opset 11**, and run **`onnxsim`** before `onnx2ncnn`. (For new opsets use
+    `pnnx` instead of `onnx2ncnn`.)
+  - **`YF_INPUT` ≠ export size** (esp. after `ncnnoptimize`, which bakes fixed
+    shapes). `--inspect` now sweeps input sizes and reports which one works.
 - Nothing detected (but extraction OK) → wrong `YF_OUTPUTS` (re-check `--inspect`).
 - Boxes the wrong size/position → switch the box formula: `YF_BOX_DECODE=plain`
   (default `v5`). Also make sure `YF_INPUT` matches the model (default 352) and the
