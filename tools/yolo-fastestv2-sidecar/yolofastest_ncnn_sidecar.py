@@ -343,16 +343,27 @@ class YoloFastestV2NCNN:
         return self._nms(dets)
 
     def _decode(self, out, stride, ow, oh):
-        C, H, W = out.shape
+        s = out.shape
+        if len(s) != 3:
+            return []
+        # ncnn may hand outputs back as (C,H,W) or (H,W,C). The spatial grid is
+        # square (two equal dims), so the channel axis is the odd one out. Flatten
+        # to flat=[C, H*W] either way.
+        if s[1] == s[2] and s[0] != s[1]:        # (C, H, W)
+            C = s[0]; HW = s[1] * s[2]; flat = out.reshape(C, HW)
+        elif s[0] == s[1] and s[2] != s[0]:      # (H, W, C)
+            C = s[2]; HW = s[0] * s[1]; flat = np.ascontiguousarray(out.reshape(HW, C).T)
+        else:
+            C = s[0]; HW = s[1] * s[2]; flat = out.reshape(C, -1)
+        W = int(round(math.sqrt(HW)))
         nc = C - 5 * self.na
         if nc <= 0:
             return []
-        flat = out.reshape(C, H * W)
-        reg = flat[0:4 * self.na].reshape(self.na, 4, H * W)
+        reg = flat[0:4 * self.na].reshape(self.na, 4, HW)
         obj = _sigmoid(flat[4 * self.na:5 * self.na])               # [na, HW]
         cls = _softmax(flat[5 * self.na:5 * self.na + nc], axis=0)   # [nc, HW] shared
         cls_p = cls.max(0); cls_id = cls.argmax(0)                   # [HW]
-        gy, gx = np.divmod(np.arange(H * W), W)
+        gy, gx = np.divmod(np.arange(HW), W)
         anc = self.anchors[stride]
         sx, sy = ow / self.input, oh / self.input
         res = []
