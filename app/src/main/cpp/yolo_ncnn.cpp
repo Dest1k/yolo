@@ -378,23 +378,42 @@ static void detect_modern(const ncnn::Mat& in, std::vector<Object>& objects, flo
 // uses the YOLOv5 formula, score = sqrt(obj · cls). Mirrors the working python
 // sidecar (tools/yolo-fastestv2-sidecar). Activations are auto-detected so it
 // decodes whether or not the export already baked sigmoid/softmax in.
-static const int   YF_NA          = 3;
+static const int   YF_NA          = 3;   // default anchors-per-cell (overridden per model)
 static const int   YF_STRIDES[2]  = {16, 32};
-// Repo COCO anchors, pixels at the 352 training input, per stride.
+// Repo COCO anchors, pixels at the training input, per stride. Used as a fallback
+// when no per-model anchors were supplied. NOT scaled by input size — YOLO-FastestV2
+// uses absolute pixel anchors tied to the training config (see train_yolofastest.py).
 static const float YF_ANCHORS[2][6] = {
     {12.64f, 19.39f, 37.88f,  51.48f,  55.71f, 138.31f},   // stride 16
     {126.91f,78.23f, 131.57f, 214.55f, 279.92f,258.87f}    // stride 32
 };
+// Per-model anchors parsed from nativeInit, flattened in stride order
+// [stride16 na pairs][stride32 na pairs] — same format as the trainer's `anchors=`.
+static std::vector<float> g_yf_anchors;
+
+// Parse a "w,h, w,h, …" anchor string (commas and/or spaces) into floats.
+static std::vector<float> parse_anchors(const std::string& s){
+    std::vector<float> v;
+    const char* p = s.c_str();
+    while(*p){
+        char* end = nullptr;
+        float f = strtof(p, &end);
+        if(end == p) { p++; continue; }   // skip a separator/garbage char
+        v.push_back(f); p = end;
+    }
+    return v;
+}
 
 // Decode one detection scale of a YOLO-FastestV2 head into `objects`.
-// `raw` is the untouched ncnn output (C,H,W); C = 5·na + nc, H=W=grid.
-static void decode_yolofastest(const ncnn::Mat& raw, int stride, const float* anc,
+// `raw` is the untouched ncnn output (C,H,W); C = 5·na + nc, H=W=grid. `na` (anchors
+// per cell) and `anc` (na w,h pairs for this stride) come from the caller.
+static void decode_yolofastest(const ncnn::Mat& raw, int stride, const float* anc, int na,
                                std::vector<Object>& objects, float ct, float& max_conf){
     const int C  = (raw.dims >= 3) ? raw.c : raw.h;
     const int W  = (raw.dims >= 3) ? raw.w : (int)lroundf(sqrtf((float)raw.w));
     const int HW = (raw.dims >= 3) ? raw.h * raw.w : raw.w;
-    const int nc = C - 5 * YF_NA;
-    if(nc <= 0 || HW <= 0 || W <= 0) return;
+    const int nc = C - 5 * na;
+    if(na < 1 || nc <= 0 || HW <= 0 || W <= 0) return;
     // Cache the base pointer of every channel once (avoids a temp Mat + refcount per
     // pixel access in the hot loop). Works for (C,H,W) and a flat (C, H·W) layout.
     std::vector<const float*> base(C);
@@ -410,9 +429,9 @@ static void decode_yolofastest(const ncnn::Mat& raw, int stride, const float* an
                 for(int cell = 0; cell < HW; cell++){ float v = CH(ch, cell); if(v < -0.01f || v > 1.01f) return true; }
             return false;
         };
-        g_yf_act_reg = out_of_unit(0, 4 * YF_NA);
-        g_yf_act_obj = out_of_unit(4 * YF_NA, 5 * YF_NA);
-        g_yf_act_cls = out_of_unit(5 * YF_NA, 5 * YF_NA + nc);
+        g_yf_act_reg = out_of_unit(0, 4 * na);
+        g_yf_act_obj = out_of_unit(4 * na, 5 * na);
+        g_yf_act_cls = out_of_unit(5 * na, 5 * na + nc);
         g_yf_act_done = true;
     }
 
@@ -420,16 +439,16 @@ static void decode_yolofastest(const ncnn::Mat& raw, int stride, const float* an
         const int gx = cell % W, gy = cell / W;
         // Shared class score for this cell: argmax + (softmax prob of winner | prob).
         int   bc = 0; float bl = -1e30f;
-        for(int c = 0; c < nc; c++){ float s = CH(5 * YF_NA + c, cell); if(s > bl){ bl = s; bc = c; } }
+        for(int c = 0; c < nc; c++){ float s = CH(5 * na + c, cell); if(s > bl){ bl = s; bc = c; } }
         float cls_p;
         if(g_yf_act_cls){                       // logits → softmax prob of the winner
             float sum = 0.f;
-            for(int c = 0; c < nc; c++) sum += expf(CH(5 * YF_NA + c, cell) - bl);
+            for(int c = 0; c < nc; c++) sum += expf(CH(5 * na + c, cell) - bl);
             cls_p = sum > 0.f ? 1.f / sum : 0.f;
         } else cls_p = bl;                      // already a probability
 
-        for(int a = 0; a < YF_NA; a++){
-            float obj_raw = CH(4 * YF_NA + a, cell);
+        for(int a = 0; a < na; a++){
+            float obj_raw = CH(4 * na + a, cell);
             float obj   = g_yf_act_obj ? sigmoid_f(obj_raw) : obj_raw;
             float score = sqrtf(obj * cls_p);
             if(is_bad(score)) continue;
@@ -470,13 +489,24 @@ static void detect_yolofastest(const ncnn::Mat& in, std::vector<Object>& objects
         if(blobs[bi] == nullptr || blobs[bi][0] == '\0') continue;
         ncnn::Mat raw;
         if(ex.extract(blobs[bi], raw) != 0) continue;
+        int C  = (raw.dims >= 3) ? raw.c : raw.h;
         int W  = (raw.dims >= 3) ? raw.w : (int)lroundf(sqrtf((float)raw.w));
-        if(W <= 0) continue;
-        // Derive the stride from the grid (order-independent + self-correcting), then
-        // pick the matching anchor set.
+        if(W <= 0 || C <= 0) continue;
+        // anchors-per-cell from the channel count: C = 5·na + nc. Fall back to the
+        // default na=3 (and infer nc) if the configured class count doesn't fit.
+        int na = (C - g_num_classes) / 5;
+        if(na < 1 || 5 * na + g_num_classes != C) na = YF_NA;
+        // Derive the stride from the grid (order-independent + self-correcting). The
+        // two scales are 16/32; the smaller one takes the first na anchor pairs.
         int stride = (int)lroundf((float)g_input_size / (float)W);
-        const float* anc = (stride <= (YF_STRIDES[0] + YF_STRIDES[1]) / 2) ? YF_ANCHORS[0] : YF_ANCHORS[1];
-        decode_yolofastest(raw, stride, anc, objects, ct, max_conf);
+        bool small = stride <= (YF_STRIDES[0] + YF_STRIDES[1]) / 2;
+        // Prefer per-model anchors (g_yf_anchors, [stride16 na pairs][stride32 na pairs]);
+        // fall back to the built-in defaults when none/too few were supplied.
+        const float* anc;
+        int off = small ? 0 : na * 2;
+        if((int)g_yf_anchors.size() >= off + na * 2) anc = &g_yf_anchors[off];
+        else                                          anc = small ? YF_ANCHORS[0] : YF_ANCHORS[1];
+        decode_yolofastest(raw, stride, anc, na, objects, ct, max_conf);
         scales++;
     }
     nms(objects, nt);
@@ -536,15 +566,17 @@ JNIEXPORT jboolean JNICALL
 Java_com_destik_yolodetector_YoloDetector_nativeInit(
         JNIEnv* env, jobject,
         jstring pp, jstring bp, jint ver, jint isz, jint nc, jboolean gpu,
-        jstring o0, jstring o1, jstring o2){
+        jstring o0, jstring o1, jstring o2, jstring yfAnchors){
     if(g_initialized){ g_net->clear(); g_initialized=false; }
     g_yf_act_done=false;   // re-detect YOLO-FastestV2 activations for the new model
     g_yolo_version=(int)ver; g_input_size=(int)isz; g_num_classes=(int)nc;
     auto gc=[&](jstring s)->std::string{
-        const char* c=env->GetStringUTFChars(s,0); std::string r(c);
-        env->ReleaseStringUTFChars(s,c); return r;
+        if(!s) return std::string();
+        const char* c=env->GetStringUTFChars(s,0); std::string r(c?c:"");
+        if(c) env->ReleaseStringUTFChars(s,c); return r;
     };
     g_out0=gc(o0); g_out1=gc(o1); g_out2=gc(o2);
+    g_yf_anchors = parse_anchors(gc(yfAnchors));   // per-model YOLO-FastestV2 anchors
     std::string param=gc(pp), bin=gc(bp);
     g_param_path=param;
 

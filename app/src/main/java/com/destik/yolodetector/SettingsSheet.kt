@@ -49,6 +49,7 @@ class SettingsSheet(
         b.etOut0.setText(config.outputName0)
         b.etOut1.setText(config.outputName1)
         b.etOut2.setText(config.outputName2)
+        b.etAnchors.setText(config.yfAnchors)
 
         when {
             config.yoloVersion == 2  -> b.chipFastest.isChecked = true
@@ -77,6 +78,7 @@ class SettingsSheet(
             outputName0   = b.etOut0.text.toString().trim(),
             outputName1   = b.etOut1.text.toString().trim(),
             outputName2   = b.etOut2.text.toString().trim(),
+            yfAnchors     = b.etAnchors.text.toString().trim().ifEmpty { config.yfAnchors },
             yoloVersion   = version
         )
     }

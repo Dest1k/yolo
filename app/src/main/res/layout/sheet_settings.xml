@@ -132,6 +132,12 @@
             android:padding="8dp"/>
     </LinearLayout>
 
+    <!-- YOLO-FastestV2 anchors (only used when version = FastestV2) -->
+    <com.google.android.material.textfield.TextInputEditText android:id="@+id/etAnchors"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="FastestV2 anchors (из вашего .data)" android:textColor="@color/text_primary"
+        android:background="@drawable/bg_field" android:padding="8dp" android:layout_marginBottom="16dp"/>
+
     <Button android:id="@+id/btnApply"
         android:layout_width="match_parent" android:layout_height="48dp"
         android:text="Применить" android:backgroundTint="@color/accent"

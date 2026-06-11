@@ -148,6 +148,16 @@
             android:textColor="@color/text_primary" android:background="@drawable/bg_field"
             android:padding="10dp" android:layout_marginBottom="16dp"/>
 
+        <!-- YOLO-FastestV2 anchors -->
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Якоря YOLO-FastestV2 (из вашего .data; не масштабируются под вход)"
+            android:textColor="@color/text_secondary" android:textSize="13sp"/>
+        <com.google.android.material.textfield.TextInputEditText android:id="@+id/etAnchors"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="12.64,19.39, 37.88,51.48, …"
+            android:textColor="@color/text_primary" android:background="@drawable/bg_field"
+            android:padding="10dp" android:layout_marginBottom="16dp"/>
+
         <!-- Class names -->
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Имена классов (.txt, один per строке)" android:textColor="@color/text_secondary"

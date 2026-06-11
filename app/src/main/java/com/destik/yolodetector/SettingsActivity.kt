@@ -52,6 +52,7 @@ class SettingsActivity : AppCompatActivity() {
         binding.etOut0.setText(config.outputName0)
         binding.etOut1.setText(config.outputName1)
         binding.etOut2.setText(config.outputName2)
+        binding.etAnchors.setText(config.yfAnchors)
 
         if (config.engine == "onnx") binding.rbOnnx.isChecked = true
         else binding.rbNcnn.isChecked = true
@@ -98,6 +99,7 @@ class SettingsActivity : AppCompatActivity() {
             outputName0   = binding.etOut0.text.toString().trim(),
             outputName1   = binding.etOut1.text.toString().trim(),
             outputName2   = binding.etOut2.text.toString().trim(),
+            yfAnchors     = binding.etAnchors.text.toString().trim().ifEmpty { config.yfAnchors },
             yoloVersion   = version
         )
         setResult(RESULT_OK, Intent().putExtra("config", Gson().toJson(config)))

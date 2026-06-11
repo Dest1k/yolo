@@ -16,6 +16,10 @@ data class ModelConfig(
     var outputName0: String = "output0",
     var outputName1: String = "output1",
     var outputName2: String = "output2",
+    // YOLO-FastestV2 anchors, pixels at the training input, in the trainer's
+    // `anchors=` order: [stride16 na pairs][stride32 na pairs]. na is derived from
+    // the model; paste your training config's value here if you regenerated anchors.
+    var yfAnchors: String = "12.64,19.39, 37.88,51.48, 55.71,138.31, 126.91,78.23, 131.57,214.55, 279.92,258.87",
     var classNames: List<String> = emptyList(),
     var onnxPath: String = "",
     var engine: String = "ncnn",   // "ncnn" or "onnx"
