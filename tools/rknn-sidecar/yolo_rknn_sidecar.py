@@ -45,6 +45,7 @@ import time
 import socket
 import struct
 import math
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -528,14 +529,30 @@ def inference_loop(state, rknn, in_sz, conf, nms, num_classes, track_on, filter_
             count, t0 = 0, time.time()
 
 
+def _fin(v):
+    """Coerce to a JSON-safe finite float (NaN/Inf -> 0.0)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
 def _status_json(state):
     g = state.gimbal
     mode = {0: "lock", 1: "follow", 2: "fpv"}.get(g.motion_mode if g else -1, "?")
-    return ('{"yaw":%s,"pitch":%s,"roll":%s,"recording":%s,"mode":"%s","tracking":%s,'
-            '"firmware":"%s","hardwareId":"%s"}' % (
-                g.yaw if g else 0, g.pitch if g else 0, g.roll if g else 0,
-                str(g.recording if g else False).lower(), mode, str(state.tracking).lower(),
-                g.firmware if g else "", g.hardware_id if g else ""))
+    # Escape gimbal-reported text + guard floats so a stray byte can't yield invalid
+    # JSON and hang the panel on "loading…".
+    return json.dumps({
+        "yaw": _fin(g.yaw) if g else 0.0,
+        "pitch": _fin(g.pitch) if g else 0.0,
+        "roll": _fin(g.roll) if g else 0.0,
+        "recording": bool(g.recording) if g else False,
+        "mode": mode,
+        "tracking": bool(state.tracking),
+        "firmware": (g.firmware if g else "") or "",
+        "hardwareId": (g.hardware_id if g else "") or "",
+    }, allow_nan=False)
 
 
 def make_handler(state):
@@ -656,9 +673,10 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 <div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus+</button><button id="fn">focus-</button></div>
 <div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div></div>
 <script>
-var vid=document.getElementById('vid');vid.src='/stream';
-function g(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){})}
-function show(s){document.getElementById('st').textContent=
+var vid=document.getElementById('vid');vid.src='/stream';var gotStatus=false;
+function g(u){return fetch(u).then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
+function fail(){if(!gotStatus)document.getElementById('st').textContent='disconnected — retrying…'}
+function show(s){gotStatus=true;document.getElementById('st').textContent=
  'yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\\nmode '+s.mode+'  rec '+s.recording+'\\nfw '+s.firmware+' hw '+s.hardwareId;
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'* TRACK ON ':'TRACK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
@@ -675,7 +693,8 @@ vid.addEventListener('click',function(e){var nw=vid.naturalWidth,nh=vid.naturalH
  var r=vid.getBoundingClientRect();var sc=Math.min(r.width/nw,r.height/nh);var dw=nw*sc,dh=nh*sc;
  var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;var x=(e.clientX-ox)/dw,y=(e.clientY-oy)/dh;
  if(x<0||x>1||y<0||y>1)return;g('/pick?nx='+x.toFixed(4)+'&ny='+y.toFixed(4))});
-setInterval(function(){fetch('/status').then(function(r){return r.json()}).then(show).catch(function(){})},1000);
+function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
+poll();setInterval(poll,1000);
 </script></body></html>"""
 
 
