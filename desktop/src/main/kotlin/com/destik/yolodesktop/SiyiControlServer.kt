@@ -118,9 +118,25 @@ class SiyiControlServer(
     private fun status(): String {
         val g = gimbal
         val modeName = when (g?.motionMode) { 0 -> "lock"; 1 -> "follow"; 2 -> "fpv"; else -> "?" }
-        return """{"hasGimbal":${g != null},"yaw":${g?.yaw ?: 0f},"pitch":${g?.pitch ?: 0f},"roll":${g?.roll ?: 0f},""" +
+        // Guard against NaN/Infinity (invalid JSON) and JSON-escape the gimbal-reported
+        // text — otherwise a stray byte from the camera breaks JSON.parse in the panel
+        // and the page hangs on "loading…".
+        fun n(v: Float) = if (v.isFinite()) v else 0f
+        return """{"hasGimbal":${g != null},"yaw":${n(g?.yaw ?: 0f)},"pitch":${n(g?.pitch ?: 0f)},"roll":${n(g?.roll ?: 0f)},""" +
                """"recording":${g?.recording ?: false},"mode":"$modeName","tracking":${tracking?.get() ?: false},""" +
-               """"firmware":"${g?.firmware ?: ""}","hardwareId":"${g?.hardwareId ?: ""}"}"""
+               """"firmware":${jsonStr(g?.firmware ?: "")},"hardwareId":${jsonStr(g?.hardwareId ?: "")}}"""
+    }
+
+    /** Minimal JSON string encoder (quotes + escapes) so gimbal-reported text can't break the JSON. */
+    private fun jsonStr(s: String): String {
+        val sb = StringBuilder("\"")
+        for (c in s) when {
+            c == '"'  -> sb.append("\\\"")
+            c == '\\' -> sb.append("\\\\")
+            c < ' '   -> sb.append("\\u%04x".format(c.code))
+            else      -> sb.append(c)
+        }
+        return sb.append('"').toString()
     }
 
     private fun parseQuery(uri: URI): Map<String, String> =
@@ -192,15 +208,17 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 var STREAM=$streamPort, HASGIMBAL=${gimbal != null}, showG=HASGIMBAL;
 var vv=document.getElementById('vid'), sel=document.getElementById('sel');
 vv.src=location.protocol+'//'+location.hostname+':'+STREAM;
-function g(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){})}
+function g(u){return fetch(u).then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
+function fail(){document.getElementById('st').textContent='disconnected — retrying…'}
 function show(s){var st=document.getElementById('st');
  if(s.hasGimbal){st.textContent='yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\nmode '+s.mode+'  rec '+s.recording+'\nfw '+s.firmware+' hw '+s.hardwareId}
- else{st.textContent='CSI / camera — no gimbal'}
+ else{st.textContent='no gimbal — video + manual capture only'}
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'● TRACK ON ':'TRACK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
-// gimbal overlays: shown only when a gimbal exists AND not hidden (H toggles).
-function applyG(){['pad','side','top','trk'].forEach(function(id){var el=document.getElementById(id);
- if(el)el.style.display=(HASGIMBAL&&showG)?'':'none'})}
+// 'pad/side/top' are the gimbal controls: hidden by default when there's no gimbal,
+// but H always toggles them so they can be summoned regardless. 'trk' stays visible.
+function applyG(){['pad','side','top'].forEach(function(id){var el=document.getElementById(id);
+ if(el)el.style.display=showG?'':'none'})}
 applyG();
 document.addEventListener('keydown',function(e){
  if(e.key==='h'||e.key==='H'){showG=!showG;applyG()}
@@ -231,6 +249,7 @@ hold(document.getElementById('zin'),function(){g('/zoom?dir=in')},function(){g('
 hold(document.getElementById('zout'),function(){g('/zoom?dir=out')},function(){g('/zoom?dir=stop')});
 hold(document.getElementById('ff'),function(){g('/focus?dir=far')},function(){g('/focus?dir=stop')});
 hold(document.getElementById('fn'),function(){g('/focus?dir=near')},function(){g('/focus?dir=stop')});
-setInterval(function(){fetch('/status').then(function(r){return r.json()}).then(show).catch(function(){})},1000);
+function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
+poll();setInterval(poll,1000);
 </script></body></html>""".trimIndent()
 }
