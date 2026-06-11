@@ -45,6 +45,10 @@
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:text="v10 / v11  (NMS-free, 1 выход [N, 6])"
                 android:textColor="@color/text_primary" android:buttonTint="@color/accent"/>
+            <RadioButton android:id="@+id/rbFastest"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="YOLO-FastestV2  (2 выхода, decoupled · вход 352)"
+                android:textColor="@color/text_primary" android:buttonTint="@color/accent"/>
         </RadioGroup>
 
         <!-- Input size -->

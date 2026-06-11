@@ -51,6 +51,7 @@ class SettingsSheet(
         b.etOut2.setText(config.outputName2)
 
         when {
+            config.yoloVersion == 2  -> b.chipFastest.isChecked = true
             config.yoloVersion >= 10 -> b.chipV10.isChecked = true
             config.yoloVersion >= 8  -> b.chipV8.isChecked  = true
             else                     -> b.chipV5.isChecked  = true
@@ -59,6 +60,7 @@ class SettingsSheet(
 
     private fun collect() {
         val version = when {
+            b.chipFastest.isChecked -> 2
             b.chipV10.isChecked -> 10
             b.chipV8.isChecked  -> 8
             else                -> 5

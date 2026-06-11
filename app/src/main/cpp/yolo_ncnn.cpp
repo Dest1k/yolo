@@ -63,6 +63,13 @@ static std::string g_out2 = "output2";
 // Updated every nativeDetect call; read by nativeGetDiagnostics
 static std::string g_diag;
 
+// YOLO-FastestV2 activation auto-detect, cached after the first decode and reset
+// on each nativeInit (a re-exported model may bake activations in or not).
+static bool g_yf_act_done = false;
+static bool g_yf_act_obj  = true;   // obj logits → sigmoid
+static bool g_yf_act_cls  = true;   // cls logits → softmax
+static bool g_yf_act_reg  = true;   // box offsets → sigmoid
+
 static inline float sigmoid_f(float x){ return 1.f/(1.f+expf(-x)); }
 static inline bool  is_bad(float v)   { return std::isnan(v)||std::isinf(v); }
 
@@ -363,6 +370,123 @@ static void detect_modern(const ncnn::Mat& in, std::vector<Object>& objects, flo
     parse_anchor(out,objects,ct,nt,na-4,false);
 }
 
+// ── YOLO-FastestV2 (anchor-based, decoupled head) ────────────────────────────
+// dog-qiuqiu/Yolo-FastestV2: ShuffleNetV2 backbone, 2 detection scales (strides
+// 16/32). Per-cell channels are DECOUPLED and the class scores are SHARED across
+// the na anchors:  [ reg(4*na) | obj(na) | cls(nc) ]. This matches neither the v5
+// (na·(5+nc)) nor the v8 single-tensor layout, so it needs its own decoder. Box
+// uses the YOLOv5 formula, score = sqrt(obj · cls). Mirrors the working python
+// sidecar (tools/yolo-fastestv2-sidecar). Activations are auto-detected so it
+// decodes whether or not the export already baked sigmoid/softmax in.
+static const int   YF_NA          = 3;
+static const int   YF_STRIDES[2]  = {16, 32};
+// Repo COCO anchors, pixels at the 352 training input, per stride.
+static const float YF_ANCHORS[2][6] = {
+    {12.64f, 19.39f, 37.88f,  51.48f,  55.71f, 138.31f},   // stride 16
+    {126.91f,78.23f, 131.57f, 214.55f, 279.92f,258.87f}    // stride 32
+};
+
+// Decode one detection scale of a YOLO-FastestV2 head into `objects`.
+// `raw` is the untouched ncnn output (C,H,W); C = 5·na + nc, H=W=grid.
+static void decode_yolofastest(const ncnn::Mat& raw, int stride, const float* anc,
+                               std::vector<Object>& objects, float ct, float& max_conf){
+    const int C  = (raw.dims >= 3) ? raw.c : raw.h;
+    const int W  = (raw.dims >= 3) ? raw.w : (int)lroundf(sqrtf((float)raw.w));
+    const int HW = (raw.dims >= 3) ? raw.h * raw.w : raw.w;
+    const int nc = C - 5 * YF_NA;
+    if(nc <= 0 || HW <= 0 || W <= 0) return;
+    // Cache the base pointer of every channel once (avoids a temp Mat + refcount per
+    // pixel access in the hot loop). Works for (C,H,W) and a flat (C, H·W) layout.
+    std::vector<const float*> base(C);
+    for(int ch = 0; ch < C; ch++)
+        base[ch] = (raw.dims >= 3) ? (const float*)raw.channel(ch) : raw.row(ch);
+    auto CH = [&](int ch, int cell) -> float { return base[ch][cell]; };
+
+    // Auto-detect (once) whether obj/cls/reg are raw logits or already activated:
+    // any value outside [−0.01, 1.01] means the activation wasn't baked in.
+    if(!g_yf_act_done){
+        auto out_of_unit = [&](int c0, int c1) -> bool {
+            for(int ch = c0; ch < c1; ch++)
+                for(int cell = 0; cell < HW; cell++){ float v = CH(ch, cell); if(v < -0.01f || v > 1.01f) return true; }
+            return false;
+        };
+        g_yf_act_reg = out_of_unit(0, 4 * YF_NA);
+        g_yf_act_obj = out_of_unit(4 * YF_NA, 5 * YF_NA);
+        g_yf_act_cls = out_of_unit(5 * YF_NA, 5 * YF_NA + nc);
+        g_yf_act_done = true;
+    }
+
+    for(int cell = 0; cell < HW; cell++){
+        const int gx = cell % W, gy = cell / W;
+        // Shared class score for this cell: argmax + (softmax prob of winner | prob).
+        int   bc = 0; float bl = -1e30f;
+        for(int c = 0; c < nc; c++){ float s = CH(5 * YF_NA + c, cell); if(s > bl){ bl = s; bc = c; } }
+        float cls_p;
+        if(g_yf_act_cls){                       // logits → softmax prob of the winner
+            float sum = 0.f;
+            for(int c = 0; c < nc; c++) sum += expf(CH(5 * YF_NA + c, cell) - bl);
+            cls_p = sum > 0.f ? 1.f / sum : 0.f;
+        } else cls_p = bl;                      // already a probability
+
+        for(int a = 0; a < YF_NA; a++){
+            float obj_raw = CH(4 * YF_NA + a, cell);
+            float obj   = g_yf_act_obj ? sigmoid_f(obj_raw) : obj_raw;
+            float score = sqrtf(obj * cls_p);
+            if(is_bad(score)) continue;
+            if(score > max_conf) max_conf = score;
+            if(score < ct) continue;
+
+            float tx = CH(a * 4 + 0, cell), ty = CH(a * 4 + 1, cell);
+            float tw = CH(a * 4 + 2, cell), th = CH(a * 4 + 3, cell);
+            if(is_bad(tx)||is_bad(ty)||is_bad(tw)||is_bad(th)) continue;
+            // YOLOv5 box formula; skip the inner sigmoid if reg is already activated.
+            float sx = g_yf_act_reg ? sigmoid_f(tx) : tx;
+            float sy = g_yf_act_reg ? sigmoid_f(ty) : ty;
+            float sw = g_yf_act_reg ? sigmoid_f(tw) : tw;
+            float sh = g_yf_act_reg ? sigmoid_f(th) : th;
+            float bcx = (sx * 2.f - 0.5f + gx) * stride;
+            float bcy = (sy * 2.f - 0.5f + gy) * stride;
+            float bw  = (sw * 2.f) * (sw * 2.f) * anc[a * 2];
+            float bh  = (sh * 2.f) * (sh * 2.f) * anc[a * 2 + 1];
+            float x1 = bcx - bw * 0.5f, y1 = bcy - bh * 0.5f;
+            float x2 = bcx + bw * 0.5f, y2 = bcy + bh * 0.5f;
+            if(is_bad(x1)||is_bad(y1)||is_bad(x2)||is_bad(y2)||x2<=x1||y2<=y1) continue;
+            Object o;
+            o.x = x1 / g_input_size; o.y = y1 / g_input_size;
+            o.w = (x2 - x1) / g_input_size; o.h = (y2 - y1) / g_input_size;
+            o.label = bc; o.prob = score;
+            objects.push_back(o);
+        }
+    }
+}
+
+static void detect_yolofastest(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
+    ncnn::Extractor ex = g_net->create_extractor();
+    ex.input(g_input_name.c_str(), in);
+    const char* blobs[3] = { g_out0.c_str(), g_out1.c_str(), g_out2.c_str() };
+    float max_conf = 0.f;
+    int scales = 0;
+    for(int bi = 0; bi < 3; bi++){
+        if(blobs[bi] == nullptr || blobs[bi][0] == '\0') continue;
+        ncnn::Mat raw;
+        if(ex.extract(blobs[bi], raw) != 0) continue;
+        int W  = (raw.dims >= 3) ? raw.w : (int)lroundf(sqrtf((float)raw.w));
+        if(W <= 0) continue;
+        // Derive the stride from the grid (order-independent + self-correcting), then
+        // pick the matching anchor set.
+        int stride = (int)lroundf((float)g_input_size / (float)W);
+        const float* anc = (stride <= (YF_STRIDES[0] + YF_STRIDES[1]) / 2) ? YF_ANCHORS[0] : YF_ANCHORS[1];
+        decode_yolofastest(raw, stride, anc, objects, ct, max_conf);
+        scales++;
+    }
+    nms(objects, nt);
+    char buf[160];
+    snprintf(buf, sizeof(buf), "yolo-fastestv2|scales=%d|isz=%d|act(o=%d,c=%d,r=%d)|maxC:%.2f|dets:%d",
+             scales, g_input_size, (int)g_yf_act_obj, (int)g_yf_act_cls, (int)g_yf_act_reg,
+             max_conf, (int)objects.size());
+    g_diag = buf;
+}
+
 // ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
 static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,90,156,198,373,326}};
 static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<Object>& o, float& max_conf){
@@ -414,6 +538,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         jstring pp, jstring bp, jint ver, jint isz, jint nc, jboolean gpu,
         jstring o0, jstring o1, jstring o2){
     if(g_initialized){ g_net->clear(); g_initialized=false; }
+    g_yf_act_done=false;   // re-detect YOLO-FastestV2 activations for the new model
     g_yolo_version=(int)ver; g_input_size=(int)isz; g_num_classes=(int)nc;
     auto gc=[&](jstring s)->std::string{
         const char* c=env->GetStringUTFChars(s,0); std::string r(c);
@@ -539,27 +664,38 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
     int w=(int)info.width, h=(int)info.height;
 
-    // Letterbox: scale to fit g_input_size × g_input_size, pad remainder with black.
-    // Matches the preprocessing YOLO training uses (preserves aspect ratio).
-    float scale = std::min((float)g_input_size / w, (float)g_input_size / h);
-    int   nw    = (int)(w * scale + .5f);
-    int   nh    = (int)(h * scale + .5f);
-    int   pad_x = (g_input_size - nw) / 2;
-    int   pad_y = (g_input_size - nh) / 2;
-
-    ncnn::Mat resized = ncnn::Mat::from_pixels_resize(
-        (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
-        w, h, (int)info.stride,
-        nw, nh);
-
-    AndroidBitmap_unlockPixels(env,bitmap);
-    if(resized.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
-
+    // Preprocessing must match how the model was trained. YOLO-FastestV2 trains on a
+    // plain (aspect-squishing) resize to input×input, so we stretch for it; every
+    // other family trains with aspect-preserving letterbox (pad with gray 114).
+    const bool stretch = (g_yolo_version == 2);
+    float scale_x, scale_y;     // model-px per original-px, per axis
+    int   pad_x, pad_y;         // letterbox padding (0 for stretch)
     ncnn::Mat in;
-    ncnn::copy_make_border(resized, in,
-        pad_y, g_input_size - nh - pad_y,
-        pad_x, g_input_size - nw - pad_x,
-        ncnn::BORDER_CONSTANT, 114.f);
+    if(stretch){
+        in = ncnn::Mat::from_pixels_resize(
+            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+            w, h, (int)info.stride, g_input_size, g_input_size);
+        AndroidBitmap_unlockPixels(env,bitmap);
+        if(in.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
+        scale_x = (float)g_input_size / w; scale_y = (float)g_input_size / h;
+        pad_x = 0; pad_y = 0;
+    } else {
+        float scale = std::min((float)g_input_size / w, (float)g_input_size / h);
+        int   nw    = (int)(w * scale + .5f);
+        int   nh    = (int)(h * scale + .5f);
+        pad_x = (g_input_size - nw) / 2;
+        pad_y = (g_input_size - nh) / 2;
+        ncnn::Mat resized = ncnn::Mat::from_pixels_resize(
+            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+            w, h, (int)info.stride, nw, nh);
+        AndroidBitmap_unlockPixels(env,bitmap);
+        if(resized.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
+        ncnn::copy_make_border(resized, in,
+            pad_y, g_input_size - nh - pad_y,
+            pad_x, g_input_size - nw - pad_x,
+            ncnn::BORDER_CONSTANT, 114.f);
+        scale_x = scale; scale_y = scale;
+    }
 
     const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
     in.substract_mean_normalize(mv,nv);
@@ -567,11 +703,15 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
     std::vector<Object> objs;
     g_stage="detect:extract";
-    if(g_yolo_version>=8) detect_modern(in,objs,ct,nt);  // v8/v9/v10/v11 (auto layout)
-    else                  detect_v5    (in,objs,ct,nt);  // v5/v6/v7 anchor-based
+    if(g_yolo_version==2)      detect_yolofastest(in,objs,ct,nt);  // YOLO-FastestV2 (decoupled head)
+    else if(g_yolo_version>=8) detect_modern    (in,objs,ct,nt);  // v8/v9/v10/v11 (auto layout)
+    else                       detect_v5        (in,objs,ct,nt);  // v5/v6/v7 anchor-based
     g_stage="idle";
 
-    // Reverse letterbox: norm model coords → original frame norm coords
+    // Reverse the preprocessing: model-norm coords → original-frame norm coords.
+    // Works for both paths via per-axis scale (letterbox: scale_x==scale_y, pad>0;
+    // stretch: pad==0, scale_x/scale_y differ). scale_*·{w,h} is the content size in
+    // model px (== g_input_size for stretch, == nw/nh for letterbox).
     const float fw=(float)w, fh=(float)h;
     const float fpx=(float)pad_x, fpy=(float)pad_y;
     const float fis=(float)g_input_size;
@@ -580,10 +720,10 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         float y1 = o.y       * fis;
         float x2 = (o.x+o.w) * fis;
         float y2 = (o.y+o.h) * fis;
-        o.x = (x1 - fpx) / (scale * fw);
-        o.y = (y1 - fpy) / (scale * fh);
-        o.w = (x2 - x1)  / (scale * fw);
-        o.h = (y2 - y1)  / (scale * fh);
+        o.x = (x1 - fpx) / (scale_x * fw);
+        o.y = (y1 - fpy) / (scale_y * fh);
+        o.w = (x2 - x1)  / (scale_x * fw);
+        o.h = (y2 - y1)  / (scale_y * fh);
     }
 
     jobjectArray res=env->NewObjectArray((jsize)objs.size(),dc,nullptr);

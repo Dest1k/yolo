@@ -31,6 +31,11 @@
             android:text="v10/v11 NMS-free" app:chipBackgroundColor="@color/bg_dark"
             android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
             style="@style/Widget.MaterialComponents.Chip.Filter"/>
+        <com.google.android.material.chip.Chip android:id="@+id/chipFastest"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="FastestV2" app:chipBackgroundColor="@color/bg_dark"
+            android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
+            style="@style/Widget.MaterialComponents.Chip.Filter"/>
     </com.google.android.material.chip.ChipGroup>
 
     <!-- Conf -->

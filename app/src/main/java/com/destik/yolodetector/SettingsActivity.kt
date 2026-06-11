@@ -58,6 +58,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // YOLO version radio
         when {
+            config.yoloVersion == 2  -> binding.rbFastest.isChecked = true
             config.yoloVersion >= 10 -> binding.rbV10.isChecked = true
             config.yoloVersion >= 8  -> binding.rbV8.isChecked  = true
             else                     -> binding.rbV5.isChecked  = true
@@ -81,9 +82,10 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun saveAndFinish() {
         val version = when {
-            binding.rbV10.isChecked -> 10
-            binding.rbV8.isChecked  -> 8
-            else                    -> 5
+            binding.rbFastest.isChecked -> 2
+            binding.rbV10.isChecked     -> 10
+            binding.rbV8.isChecked      -> 8
+            else                        -> 5
         }
         config = config.copy(
             engine        = if (binding.rbOnnx.isChecked) "onnx" else "ncnn",
