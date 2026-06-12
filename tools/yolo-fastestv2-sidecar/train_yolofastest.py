@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 r"""
-Train YOLO-FastestV2 on your dataset and export it for the NCNN sidecar.
+Train YOLO-FastestV2 on your dataset AND auto-export an optimised NCNN model — one
+command, no manual onnx2ncnn dance.
 
 >>> Everything is configured in the CONFIG block below — edit it and run:
         python train_yolofastest.py
@@ -8,20 +9,21 @@ Train YOLO-FastestV2 on your dataset and export it for the NCNN sidecar.
 
 What it does: builds the .data/.names/file-lists from your YOLO dataset, clones the
 upstream repo (dog-qiuqiu/Yolo-FastestV2), computes anchors for your data, patches
-the repo's trainer for high hardware utilisation, trains, and prints the
-ONNX->NCNN export steps.
+the repo's trainer for high hardware utilisation, trains, then runs export_ncnn.py
+to produce a verified, fp16-optimised .param/.bin ready for the Pi sidecar and the
+phone app. (Set EXPORT=False to stop after training.)
 
 It's plain PyTorch and light. A recent CUDA-12.8 PyTorch trains it on an RTX 50xx
 (Blackwell) GPU; CPU works too. Install (Windows, in your venv):
     # GPU (RTX 50xx/Blackwell):
     pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
-    # or CPU only:
-    pip install torch torchvision
-    pip install opencv-python numpy tqdm onnx onnxsim
+    # or CPU only:  pip install torch torchvision
+    pip install opencv-python numpy tqdm onnx onnxsim ncnn pnnx
 
-⚠️ Export ONNX with opset 11 (the repo's pytorch2onnx.py) — onnx2ncnn needs it.
-   A new torch may force opset 18; pass dynamo=False, or export in a stable CPU
-   torch venv. (See the README.)
+The export forces opset 11 + dynamo=False regardless of your torch version (so the
+cu128 nightly's opset-18 default can't break onnx2ncnn), prefers onnx2ncnn+
+ncnnoptimize if on PATH else pnnx, and loads the result back to verify the head
+blobs actually extract. See export_ncnn.py / the README for details.
 """
 
 import os
@@ -38,15 +40,17 @@ INPUT      = 352            # train/infer square size (YOLO-FastestV2 default 35
 EPOCHS     = 300            # training epochs (repo default 300)
 LR         = 0.001          # learning rate
 
-# ── Hardware utilisation (tuned for Ultra 9 275HX + RTX 5080 16GB + 64GB) ──────
-DEVICE     = "gpu"          # "gpu" (RTX 5080, needs cu128 torch) or "cpu"
-BATCH      = 96             # tiny model → big batch is fine on 16GB. Underused GPU? raise to 128/192. OOM? lower to 64/48.
-WORKERS    = 16             # dataloader workers — THE main lever for a tiny model (24-thread CPU; 16 leaves headroom)
+# ── Hardware utilisation (tuned for Ultra 9 285K + RTX 5090 32GB + 128GB) ──────
+DEVICE     = "gpu"          # "gpu" (RTX 5090, needs cu128 nightly torch) or "cpu"
+BATCH      = 192            # tiny model → big batch is fine on 32GB. Underused GPU? raise to 256/384. OOM? lower.
+WORKERS    = 20             # dataloader workers — THE main lever for a tiny model (285K = 24 cores; 20 leaves headroom)
 CUDNN_BENCHMARK = True      # fixed input size → let cuDNN pick the fastest kernels
 
 # ── Plumbing ──────────────────────────────────────────────────────────────────
 OUT        = "yf_data"                 # where the .data/lists are written
 REPO_DIR   = "Yolo-FastestV2"          # where the upstream repo is cloned
+EXPORT     = True                      # after training, auto-export an optimised, verified ncnn model
+OUT_STEM   = "yolofastestv2"           # output stem for the exported .param/.bin
 GENANCHORS = False                     # recompute anchors for your data. Off first (default
                                        # anchors work fine); turn True once training runs to optimise.
 ANCHORS    = "12.64,19.39, 37.88,51.48, 55.71,138.31, 126.91,78.23, 131.57,214.55, 279.92,258.87"
@@ -226,13 +230,30 @@ def main():
     if sh([sys.executable, "train.py", "--data", data_path], cwd=REPO_DIR, extra_env=extra_env):
         sys.exit("ERROR: training failed (see output above)")
 
-    print("[4/4] Export to NCNN (run these after training):")
-    print(f"  python pytorch2onnx.py --data {data_path} --weights <best>.pth   # opset 11! (dynamo=False)")
-    print("  python -m onnxsim model.onnx model-sim.onnx")
-    print("  onnx2ncnn model-sim.onnx yolofastestv2.param yolofastestv2.bin")
-    print("\nThen on the Pi:")
-    print("  YF_PARAM=yolofastestv2.param YF_BIN=yolofastestv2.bin YOLO_LABELS=yf_data/custom.names \\")
-    print("    python3 yolofastest_ncnn_sidecar.py --inspect")
+    if EXPORT:
+        print("[4/4] Exporting an optimised, verified NCNN model…")
+        # Same-folder import so it works wherever the script is run from.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        try:
+            import export_ncnn
+            res = export_ncnn.run_export(REPO_DIR, data_path, OUT_STEM, INPUT)
+        except Exception as e:
+            res = None
+            print(f"  export step errored: {e}")
+        if res:
+            param, binf = res
+            names = os.path.abspath(os.path.join(OUT, "custom.names"))
+            print("\n✅ Done — model trained AND exported. Run it:")
+            print(f"  Pi sidecar:  YF_PARAM={param} YF_BIN={binf} YF_INPUT={INPUT} \\")
+            print(f"               YOLO_LABELS={names} python3 yolofastest_ncnn_sidecar.py --inspect")
+            print(f"  Phone:       load the .param/.bin, version=FastestV2, input={INPUT}, "
+                  f"classes from custom.names")
+            return
+        print("  Auto-export didn't complete — fall back to the manual steps:")
+    else:
+        print("[4/4] Export to NCNN (EXPORT=False — run these manually):")
+    print(f"  python export_ncnn.py --repo {REPO_DIR} --data {data_path} --out {OUT_STEM} --input {INPUT}")
+    print("  (or the long way: pytorch2onnx.py [opset 11] → onnxsim → onnx2ncnn → ncnnoptimize)")
 
 
 if __name__ == "__main__":

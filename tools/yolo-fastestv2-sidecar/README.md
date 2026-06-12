@@ -18,7 +18,8 @@ gimbal. Open `http://<board-ip>:8080`. On a bare Pi 5 CPU this is typically the
 |---|---|
 | `yolofastest_ncnn_sidecar.py` | inference + stream + panel (run this on the Pi) |
 | `make_yolofastest_data.py` | build train/val lists + `.data`/`.names` from a YOLO dataset |
-| `train_yolofastest.py` | clone the repo, compute anchors, train, point to ONNX/NCNN export |
+| `train_yolofastest.py` | one command: build `.data`, clone repo, compute anchors, train, **and auto-export an optimised ncnn model** |
+| `export_ncnn.py` | `.pth` → ONNX(opset 11) → onnxsim → ncnn → ncnnoptimize(fp16) → **verify**; run by the trainer or standalone |
 
 ## 1. Install on the Pi
 
@@ -68,17 +69,12 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 - **`NCNN extract failed … code -100` + "det" racing to ~300 fps** → extraction
   itself fails (so `detect()` returns nothing instantly). ncnn `-100` is an
   alloc/forward failure (a layer produced an empty blob). Top causes:
-  - **ONNX opset too new.** `onnx2ncnn` expects **opset 11** (what the repo's
-    `pytorch2onnx.py` uses). Exporting with opset 13/17/18 mis-converts shape ops
-    (Reshape/Slice/Resize/…) → the model loads but `-100`s on forward. Re-export with
-    **opset 11**, and run **`onnxsim`** before `onnx2ncnn`. (For new opsets use
-    `pnnx` instead of `onnx2ncnn`.)
-    - ⚠️ A **new PyTorch** (e.g. the cu128 nightly you'd use to train on a Blackwell
-      GPU) forces its new TorchDynamo ONNX exporter to **opset 18** and ignores
-      `opset_version=11` (it errors converting `Resize` down to 11). Fix: pass
-      `dynamo=False` to `torch.onnx.export(...)`, **or** export in a separate venv
-      with a stable CPU torch (`pip install torch==2.4.1 onnx onnxsim`) — export is
-      CPU-only, so train on the GPU env and convert in the stable one.
+  - **ONNX opset too new.** `onnx2ncnn` expects **opset 11**. Exporting with opset
+    13/17/18 mis-converts shape ops (Reshape/Slice/Resize/…) → the model loads but
+    `-100`s on forward. **`export_ncnn.py` handles this for you** (forces opset 11 +
+    `dynamo=False` + `onnxsim`, then verifies), so a normal `python train_yolofastest.py`
+    is safe even on the cu128 nightly torch. Only relevant if you export by hand:
+    re-export with **opset 11**, run **`onnxsim`**, or use **`pnnx`** for new opsets.
   - **`YF_INPUT` ≠ export size** (esp. after `ncnnoptimize`, which bakes fixed
     shapes). `--inspect` now sweeps input sizes and reports which one works.
 - Nothing detected (but extraction OK) → wrong `YF_OUTPUTS` (re-check `--inspect`).
@@ -126,25 +122,59 @@ Both training scripts are configured by a **`CONFIG` block at the top of the fil
 ```
 
 ```bash
-# install PyTorch (GPU build for Blackwell, or CPU) + tools
+# install PyTorch (GPU build for Blackwell, or CPU) + tools, all in your venv
 pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
-pip install opencv-python numpy tqdm onnx onnxsim
+pip install opencv-python numpy tqdm onnx onnxsim ncnn pnnx
 
 # edit the CONFIG block in train_yolofastest.py (DATASET, CLASSES, DEVICE, BATCH,
-# WORKERS, EPOCHS…), then just run it — it builds the .data, clones the repo,
-# computes anchors, patches the trainer for max utilisation, and trains:
+# WORKERS, EPOCHS…) once, then run it — ONE command does the whole pipeline:
+#   build .data → clone repo → compute anchors → patch+train → export+verify ncnn
 python train_yolofastest.py
 ```
-`make_yolofastest_data.py` does only the data-prep step (same CONFIG block) if you
-want it separately. The trainer prints the ONNX→`onnx2ncnn` export commands at the
-end; copy the resulting `.param`/`.bin` + `custom.names` to the Pi and run as in step 3.
+That's it. The final line prints the exact commands to run the model on the Pi and
+the phone. `make_yolofastest_data.py` does only the data-prep step (same CONFIG
+block) if you want it separately.
+
+### What "auto-export" does (the part that used to be manual)
+
+After training, the trainer calls `export_ncnn.py`, which is deliberately
+**stable** — it neutralises the two things that usually break a YOLO-FastestV2
+export:
+
+1. **opset.** A new PyTorch (the cu128 nightly for Blackwell) defaults to the
+   TorchDynamo exporter and emits **opset 18**, which `onnx2ncnn` mis-converts
+   (→ ncnn `-100` on forward). `export_ncnn.py` monkeypatches `torch.onnx.export`
+   to force **opset 11 + `dynamo=False`** and then runs the repo's own
+   `pytorch2onnx.py` — so it's correct on *any* torch version, no second venv.
+2. **the converter.** Prefers `onnx2ncnn` + `ncnnoptimize` (fp16) if they're on
+   PATH; otherwise uses **`pnnx`** (`pip install pnnx` — one wheel that converts
+   *and* optimises). `ncnnoptimize` is only kept if the optimised model still
+   passes verification (it can fuse away the head's output blobs on some exports).
+
+Then it **loads the model back in ncnn-python and confirms the head blobs extract**
+(and that the channel count matches your class count) — so a green "VERIFY OK" means
+the file genuinely works before you ever copy it to the Pi. fp16 storage + the
+runtime's automatic fp16/int8 inference = "all optimisations" for a no-calibration
+export (int8 with a calibration set is a separate, optional step).
+
+Run it standalone on an existing checkpoint:
+```bash
+python export_ncnn.py --repo Yolo-FastestV2 --data yf_data/custom.data --out yolofastestv2 --input 352
+```
 
 **Max-utilisation knobs** (in `train_yolofastest.py`'s CONFIG), tuned for an
-Ultra 9 275HX + RTX 5080 16GB + 64GB: `BATCH=96` (the model is tiny — raise to
-128/192 if the GPU is underused, lower on OOM), `WORKERS=16` (dataloader workers —
+**Ultra 9 285K + RTX 5090 32GB + 128GB**: `BATCH=192` (the model is tiny — raise to
+256/384 if the GPU is underused, lower on OOM), `WORKERS=20` (dataloader workers —
 the main lever for such a small net; the trainer patches them into the repo's
-loader), `CUDNN_BENCHMARK=True`, `DEVICE=gpu`. GPU on a Blackwell card needs the
-cu128 torch above; otherwise set `DEVICE=cpu`.
+loader; 285K = 24 cores), `CUDNN_BENCHMARK=True`, `DEVICE=gpu`. A Blackwell card
+needs the cu128 nightly torch above; otherwise set `DEVICE=cpu`.
+
+> **Input size & anchors across resolutions:** YOLO-FastestV2 anchors are absolute
+> pixels tied to the training input — they do **not** auto-scale. Train and infer at
+> the **same** `INPUT` (e.g. 480), and set `YF_INPUT`/the phone's input to match.
+> With `GENANCHORS=False` (default) the repo anchors are used as-is, so nothing to
+> change; if you regenerate them, paste the new `anchors=` into `YF_ANCHORS_16/32`
+> (sidecar) and the phone's "FastestV2 anchors" field.
 
 ## 5. Autostart (systemd)
 

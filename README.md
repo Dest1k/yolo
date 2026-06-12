@@ -578,10 +578,13 @@ PICODET_PARAM=picodet.param PICODET_BIN=picodet.bin python3 \
 Сайдкар — `tools/yolo-fastestv2-sidecar/` (NCNN, та же панель с ручным захватом и
 подвесом). Плюсы для обучения: датасет — **прямо YOLO-формат** (конвертить боксы не
 надо), а тренировка — **обычный PyTorch**, который на свежей сборке (cu128)
-**работает и на Blackwell** — то есть твою RTX 5080 наконец можно задействовать. В
-комплекте: подготовка данных (`make_yolofastest_data.py`) и обёртка обучения
-(`train_yolofastest.py`). Имена выходных блобов/формула бокса зависят от экспорта —
-при первом запуске `--inspect`; подробно в
+**работает и на Blackwell** — то есть твою RTX 5090 наконец можно задействовать. В
+комплекте: подготовка данных (`make_yolofastest_data.py`) и **обучение одной
+командой** `train_yolofastest.py` — оно само строит `.data`, клонирует репозиторий,
+считает якоря, тренирует и **автоматически экспортирует оптимизированную ncnn-модель
+с проверкой** (`export_ncnn.py`: opset 11 + `dynamo=False` + onnxsim → ncnn →
+ncnnoptimize fp16 → загрузка-проверка). Готовый `.param`/`.bin` работает и в сайдкаре,
+и в Android-приложении (версия = FastestV2). Подробно в
 [`tools/yolo-fastestv2-sidecar/README.md`](tools/yolo-fastestv2-sidecar/README.md).
 
 ```bash
