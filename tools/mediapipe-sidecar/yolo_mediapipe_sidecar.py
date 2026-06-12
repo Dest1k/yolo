@@ -668,9 +668,9 @@ class RpicamCapture:
             return False, None
         # Read until a full JPEG (SOI ffd8 … EOI ffd9) is buffered, decode it.
         while True:
-            start = self.buf.find(b"\xff\xd8")
-            end = self.buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
-            if start >= 0 and end >= 0:
+            end = self.buf.rfind(b"\xff\xd9")
+            start = self.buf.rfind(b"\xff\xd8", 0, end) if end > 0 else -1
+            if start >= 0 and end > start:
                 jpg = bytes(self.buf[start:end + 2])
                 del self.buf[:end + 2]
                 img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
@@ -699,9 +699,11 @@ def open_source(src, w, h, fps):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         cap.set(cv2.CAP_PROP_FPS, fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
     if src.startswith(("http", "rtsp")):
-        return cv2.VideoCapture(src)
+        cap = cv2.VideoCapture(src); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
     return cv2.VideoCapture(src, cv2.CAP_GSTREAMER)   # otherwise a GStreamer pipeline
 
 
@@ -851,15 +853,18 @@ def make_handler(state):
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=--mjpeg")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
+            last_seq = -1
             try:
                 while state.running:
                     with state.lock:
-                        frame = None if state.frame is None else state.frame.copy()
+                        seq = state.frame_seq
+                        frame = state.frame.copy() if (seq != last_seq and state.frame is not None) else None
                         dets = list(state.dets)
                         hud = f"FPS {state.stream_fps}  |  det {state.det_fps}"
                         tracking, target, q = state.tracking, state.target, state.jpeg_q
                     if frame is None:
-                        time.sleep(0.02); continue
+                        time.sleep(0.003); continue   # only NEW frames -> low latency
+                    last_seq = seq
                     draw(frame, dets, hud, state.labels_for_draw(), tracking, target, state.manual_box)
                     ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
                     if not ok:
@@ -867,7 +872,6 @@ def make_handler(state):
                     self.wfile.write(b"--mjpeg\r\nContent-Type: image/jpeg\r\nContent-Length: "
                                      + str(len(jpg)).encode() + b"\r\n\r\n")
                     self.wfile.write(jpg.tobytes()); self.wfile.write(b"\r\n")
-                    time.sleep(0.005)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
