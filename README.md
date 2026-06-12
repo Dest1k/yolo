@@ -588,11 +588,11 @@ ncnnoptimize fp16 → загрузка-проверка). Готовый `.param
 [`tools/yolo-fastestv2-sidecar/README.md`](tools/yolo-fastestv2-sidecar/README.md).
 
 ```bash
-pip3 install ncnn numpy python3-opencv
-git clone --depth 1 https://github.com/dog-qiuqiu/Yolo-FastestV2.git   # готовая модель в model/
-YF_PARAM=Yolo-FastestV2/model/yolo-fastestv2.param \
-  YF_BIN=Yolo-FastestV2/model/yolo-fastestv2.bin python3 \
-  tools/yolo-fastestv2-sidecar/yolofastest_ncnn_sidecar.py --inspect
+# готовую COCO-модель для первого теста (до обучения) скачает скрипт:
+python3 tools/yolo-fastestv2-sidecar/get_model.py
+# он печатает готовую команду запуска. То же есть в каждой папке сайдкара
+# (mediapipe — официальный tflite; picodet — конвертит из Paddle; nanodet —
+#  конвертит чекпойнт; rknn — это для Rockchip, не для Pi 5).
 ```
 
 Нужна **точность по мелким объектам** (а не только максимальный FPS) — есть
