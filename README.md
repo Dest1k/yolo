@@ -595,6 +595,15 @@ YF_PARAM=Yolo-FastestV2/model/yolo-fastestv2.param \
   tools/yolo-fastestv2-sidecar/yolofastest_ncnn_sidecar.py --inspect
 ```
 
+Нужна **точность по мелким объектам** (а не только максимальный FPS) — есть
+**NanoDet-Plus** (anchor-free, FPN 8/16/32/64): тоже обучается на Blackwell одной
+командой и экспортируется в ncnn. Сайдкар — `tools/nanodet-sidecar/`, подробно в
+[`tools/nanodet-sidecar/README.md`](tools/nanodet-sidecar/README.md). Обе модели
+работают на Pi 5, в desktop-headless (`YOLO_DECODE=nanodet` для NanoDet) и на телефоне.
+
+> 📘 **Пошаговый мануал от датасета до рабочей модели** (обучение на RTX 5090 →
+> деплой на Pi 5 / headless / телефон): [`TRAINING.md`](TRAINING.md).
+
 ---
 
 ## Форматы моделей и конвертеры
