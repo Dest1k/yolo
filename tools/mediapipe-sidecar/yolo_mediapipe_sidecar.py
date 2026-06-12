@@ -623,7 +623,7 @@ def draw(frame, dets, hud, labels=None, tracking=False, target=None, manual=None
 class State:
     def __init__(self):
         self.lock = threading.Lock()
-        self.frame = None        # latest raw BGR frame
+        self.frame = None; self.frame_seq = 0        # latest raw BGR frame
         self.dets = []           # latest detections
         self.names = {}          # learned {cls: category_name}
         self.stream_fps = 0
@@ -723,7 +723,7 @@ def capture_loop(state, cap):
         state.manual_box = state.obj.update(frame) if state.obj.locked else None
 
         with state.lock:
-            state.frame = frame
+            state.frame = frame; state.frame_seq += 1
         count += 1
         dt = time.time() - t0
         if dt >= 1.0:
@@ -755,11 +755,13 @@ def follow_loop(state):
 
 
 def inference_loop(state, detector, mp, conf, track_on, filter_set=None, max_area=0.9):
-    tracker = Tracker() if track_on else None
-    count, t0 = 0, time.time()
+    tracker = Tracker(hold_s=float(env("YOLO_TRACK_HOLD", "0.3"))) if track_on else None
+    count, t0 = 0, time.time(); last_seq = -1
     while state.running:
         with state.lock:
-            frame = None if state.frame is None else state.frame.copy()
+            seq = state.frame_seq
+            frame = None if (state.frame is None or seq == last_seq) else state.frame.copy()
+        last_seq = seq
         if frame is None:
             time.sleep(0.01)
             continue
@@ -1074,6 +1076,7 @@ def main():
         sys.stderr.write(f"ERROR: cannot open video source '{source}'\n")
         sys.exit(1)
 
+    cv2.setNumThreads(int(env("YOLO_CV_THREADS", "1")))  # don't let OpenCV oversubscribe the inference cores
     state = State()
     state.labels = labels
     state.jpeg_q = jpeg_q

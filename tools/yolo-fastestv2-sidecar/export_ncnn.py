@@ -68,9 +68,17 @@ def export_onnx(repo, data_path, weights, onnx_out, input_size):
     Monkeypatching torch.onnx.export means we don't care what opset/dynamo the
     repo's script (or your torch version) would otherwise pick."""
     import torch  # imported here so a CPU-only export venv works without CUDA
+    # Resolve every path to absolute BEFORE chdir'ing into the repo — otherwise a
+    # relative --data / --weights / out would resolve against the repo dir and vanish.
+    repo = os.path.abspath(repo)
+    data_path = os.path.abspath(data_path)
+    weights = os.path.abspath(weights)
+    onnx_out = os.path.abspath(onnx_out)
     script = os.path.join(repo, "pytorch2onnx.py")
     if not os.path.isfile(script):
         raise FileNotFoundError("pytorch2onnx.py not found in the repo")
+    if not os.path.isfile(weights):
+        raise FileNotFoundError(f"weights not found: {weights}")
 
     _orig = torch.onnx.export
     supports_dynamo = "dynamo" in inspect.signature(_orig).parameters
@@ -87,8 +95,7 @@ def export_onnx(repo, data_path, weights, onnx_out, input_size):
     os.chdir(repo)
     torch.onnx.export = _forced
     try:
-        sys.argv = ["pytorch2onnx.py", "--data", os.path.abspath(data_path),
-                    "--weights", os.path.abspath(weights)]
+        sys.argv = ["pytorch2onnx.py", "--data", data_path, "--weights", weights]
         runpy.run_path("pytorch2onnx.py", run_name="__main__")
     finally:
         torch.onnx.export = _orig

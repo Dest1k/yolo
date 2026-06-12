@@ -47,9 +47,18 @@ def export_onnx(repo, cfg, ckpt, onnx_out, input_size):
     """Run nanodet's tools/export_onnx.py in-process, forcing a legacy opset-11
     export (monkeypatch torch.onnx.export) so it's correct on any torch version."""
     import torch
+    # Resolve every path to absolute BEFORE chdir'ing into the repo — otherwise a
+    # relative --model_path / --cfg_path / out would resolve against the repo dir and
+    # vanish (the "No such file …/nanodet/<ckpt>" trap).
+    repo = os.path.abspath(repo)
+    cfg = os.path.abspath(cfg)
+    ckpt = os.path.abspath(ckpt)
+    onnx_out = os.path.abspath(onnx_out)
     script = os.path.join(repo, "tools", "export_onnx.py")
     if not os.path.isfile(script):
         raise FileNotFoundError("tools/export_onnx.py not found in the nanodet repo")
+    if not os.path.isfile(ckpt):
+        raise FileNotFoundError(f"checkpoint not found: {ckpt}")
     _orig = torch.onnx.export
     supports_dynamo = "dynamo" in inspect.signature(_orig).parameters
 
@@ -64,9 +73,9 @@ def export_onnx(repo, cfg, ckpt, onnx_out, input_size):
     sys.path.insert(0, repo); os.chdir(repo)
     torch.onnx.export = _forced
     try:
-        # nanodet's exporter writes nanodet.onnx (or --out_path); pass an absolute out.
-        sys.argv = ["export_onnx.py", "--cfg_path", os.path.abspath(cfg),
-                    "--model_path", os.path.abspath(ckpt), "--out_path", os.path.abspath(onnx_out)]
+        # nanodet's exporter writes nanodet.onnx (or --out_path); all paths absolute.
+        sys.argv = ["export_onnx.py", "--cfg_path", cfg,
+                    "--model_path", ckpt, "--out_path", onnx_out]
         runpy.run_path("tools/export_onnx.py", run_name="__main__")
     finally:
         torch.onnx.export = _orig

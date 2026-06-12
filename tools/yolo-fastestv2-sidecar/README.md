@@ -96,7 +96,9 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 | `YF_SCORE` | `sqrt` or `mul` (final score) | `sqrt` |
 | `YF_OUTPUTS` | head output blob names per stride (from `--inspect`) | common names |
 | `YF_INPUT_BLOB` | input blob name | first input |
-| `YF_THREADS` | inference threads | `4` |
+| `YF_THREADS` | inference threads | all cores |
+| `YOLO_CV_THREADS` | OpenCV threads (1 = don't fight inference for cores) | `1` |
+| `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
 | `YOLO_SOURCE` | `0`/`1` USB, `rpicam` (CSI), rtsp/http URL, GStreamer | `0` |
 | `YOLO_LABELS` | labels.txt (one per line) | COCO 80 |
 | `YOLO_CONF` / `YOLO_NMS` | score / NMS-IoU thresholds | `0.3` / `0.45` |

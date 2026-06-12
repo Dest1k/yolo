@@ -165,7 +165,7 @@ class NanoDetNCNN:
         self._last_fail_log = 0.0
 
         self.net = ncnn.Net()
-        self.net.opt.num_threads = int(env("ND_THREADS", "4"))
+        self.net.opt.num_threads = int(env("ND_THREADS", str(os.cpu_count() or 4)))
         self.net.opt.use_vulkan_compute = False
         param = env("ND_PARAM"); bin_ = env("ND_BIN")
         if not param or not bin_:
@@ -817,7 +817,7 @@ def draw(frame, dets, hud, labels=None, tracking=False, target=None, manual=None
 
 class State:
     def __init__(self):
-        self.lock = threading.Lock(); self.frame = None; self.dets = []
+        self.lock = threading.Lock(); self.frame = None; self.frame_seq = 0; self.dets = []
         self.stream_fps = 0; self.det_fps = 0; self.labels = None; self.jpeg_q = 75
         self.gimbal = None; self.follower = None; self.tracking = False; self.target = None
         self.obj = ObjectTracker(); self.manual_req = None; self.manual_clear = False; self.manual_box = None
@@ -887,7 +887,7 @@ def capture_loop(state, cap):
             state.obj.lock(frame, req[0]*w, req[1]*h, req[2]*w, req[3]*h)
         state.manual_box = state.obj.update(frame) if state.obj.locked else None
         with state.lock:
-            state.frame = frame
+            state.frame = frame; state.frame_seq += 1
         count += 1; dt = time.time() - t0
         if dt >= 1.0:
             state.stream_fps = int(count / dt); count, t0 = 0, time.time()
@@ -914,11 +914,13 @@ def follow_loop(state):
 
 
 def inference_loop(state, detector, track_on, filter_set=None):
-    tracker = Tracker() if track_on else None
-    count, t0 = 0, time.time()
+    tracker = Tracker(hold_s=float(env("YOLO_TRACK_HOLD", "0.3"))) if track_on else None
+    count, t0 = 0, time.time(); last_seq = -1
     while state.running:
         with state.lock:
-            frame = None if state.frame is None else state.frame.copy()
+            seq = state.frame_seq
+            frame = None if (state.frame is None or seq == last_seq) else state.frame.copy()
+        last_seq = seq
         if frame is None:
             time.sleep(0.01); continue
         try:
@@ -1188,6 +1190,7 @@ def main():
             print(f"  autotune: no frames from source '{source}' — keeping defaults. "
                   "(Pi CSI camera? use YOLO_SOURCE=rpicam)")
 
+    cv2.setNumThreads(int(env("YOLO_CV_THREADS", "1")))  # don't let OpenCV oversubscribe the inference cores
     state = State(); state.labels = labels; state.jpeg_q = jpeg_q
     if filter_set is not None:
         print(f"  filter: only classes {sorted(filter_set)}")

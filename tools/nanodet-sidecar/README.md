@@ -56,7 +56,9 @@ ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py --inspect
 | `ND_OUTPUT` | head output blob name (from `--inspect`) | last output |
 | `ND_INPUT_BLOB` | model input blob name | first input |
 | `ND_MEAN` / `ND_STD` | BGR normalisation | nanodet ImageNet |
-| `ND_THREADS` | inference threads | `4` |
+| `ND_THREADS` | inference threads | all cores |
+| `YOLO_CV_THREADS` | OpenCV threads (1 = don't fight inference for cores) | `1` |
+| `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
 | `YOLO_SOURCE` / `YOLO_LABELS` / `YOLO_CONF` / `YOLO_NMS` / `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | as the other sidecars | |
 
 The decode mirrors RangiLyu/nanodet's `demo_ncnn`: per grid point, argmax class

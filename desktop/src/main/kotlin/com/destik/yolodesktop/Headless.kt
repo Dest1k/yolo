@@ -119,8 +119,11 @@ fun main() {
     if (filterSet != null) println("  filter: only classes $filterSet")
 
     val trackOn = env("YOLO_TRACK")?.lowercase() != "off"
+    // Box stickiness: how long a box lingers after it stops being detected. Lower =
+    // tighter / less ghosting on fast motion (matches the python sidecars' default).
+    val trackHoldMs = ((env("YOLO_TRACK_HOLD")?.toFloatOrNull() ?: 0.3f) * 1000).toLong()
     val jpegQ   = env("YOLO_JPEG_Q")?.toIntOrNull()?.coerceIn(1, 100) ?: 80
-    val tracker = DetectionTracker()
+    val tracker = DetectionTracker(holdMs = trackHoldMs)
     val mjpeg = MjpegServer(port)
     mjpeg.start()
     for (ip in lanAddresses()) println("  stream: http://$ip:$port")

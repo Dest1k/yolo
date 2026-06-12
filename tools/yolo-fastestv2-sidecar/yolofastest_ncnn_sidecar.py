@@ -159,7 +159,7 @@ class YoloFastestV2NCNN:
             self.anchors[s] = [float(x) for x in ev.split(",")] if ev else self.DEFAULT_ANCHORS.get(s)
 
         self.net = ncnn.Net()
-        self.net.opt.num_threads = int(env("YF_THREADS", "4"))
+        self.net.opt.num_threads = int(env("YF_THREADS", str(os.cpu_count() or 4)))
         self.net.opt.use_vulkan_compute = False
         param = env("YF_PARAM"); bin_ = env("YF_BIN")
         if not param or not bin_:
@@ -866,7 +866,7 @@ def draw(frame, dets, hud, labels=None, tracking=False, target=None, manual=None
 
 class State:
     def __init__(self):
-        self.lock = threading.Lock(); self.frame = None; self.dets = []
+        self.lock = threading.Lock(); self.frame = None; self.frame_seq = 0; self.dets = []
         self.stream_fps = 0; self.det_fps = 0; self.labels = None; self.jpeg_q = 75
         self.gimbal = None; self.follower = None; self.tracking = False; self.target = None
         self.obj = ObjectTracker(); self.manual_req = None; self.manual_clear = False; self.manual_box = None
@@ -936,7 +936,7 @@ def capture_loop(state, cap):
             state.obj.lock(frame, req[0]*w, req[1]*h, req[2]*w, req[3]*h)
         state.manual_box = state.obj.update(frame) if state.obj.locked else None
         with state.lock:
-            state.frame = frame
+            state.frame = frame; state.frame_seq += 1
         count += 1; dt = time.time() - t0
         if dt >= 1.0:
             state.stream_fps = int(count / dt); count, t0 = 0, time.time()
@@ -963,13 +963,18 @@ def follow_loop(state):
 
 
 def inference_loop(state, detector, track_on, filter_set=None):
-    tracker = Tracker() if track_on else None
+    tracker = Tracker(hold_s=float(env("YOLO_TRACK_HOLD", "0.3"))) if track_on else None
     count, t0 = 0, time.time()
+    last_seq = -1
     while state.running:
+        # Only run on a NEW frame — re-inferring the same one burns cores for no gain
+        # (and lets capture/encode run), so boxes refresh once per real frame.
         with state.lock:
-            frame = None if state.frame is None else state.frame.copy()
+            seq = state.frame_seq
+            frame = None if (state.frame is None or seq == last_seq) else state.frame.copy()
         if frame is None:
-            time.sleep(0.01); continue
+            time.sleep(0.002); continue
+        last_seq = seq
         try:
             dets = detector.detect(frame)
             if filter_set is not None:
@@ -1212,9 +1217,17 @@ def main():
     except ImportError:
         sys.stderr.write("ERROR: ncnn not installed.  pip install ncnn   (see the README)\n"); sys.exit(1)
 
+    # CPU split: stop OpenCV (decode/encode/CSRT) from spawning a thread per core and
+    # fighting ncnn's inference threads — that oversubscription is what makes core use
+    # feel erratic. OpenCV → 1 thread by default (its codecs aren't multi-threaded per
+    # image anyway); inference scales to the box via YF_THREADS. Both tunable.
+    ncpu = os.cpu_count() or 4
+    cv2.setNumThreads(int(env("YOLO_CV_THREADS", "1")))
     print("YOLO-FastestV2 sidecar (NCNN / CPU)")
     detector = YoloFastestV2NCNN()
     detector.autoconfig()                                # auto-detect strides + output blobs
+    print(f"  cpu: {ncpu} cores · inference threads={detector.net.opt.num_threads} · "
+          f"opencv threads={int(env('YOLO_CV_THREADS', '1'))}")
     print(f"  model loaded: input={detector.input} strides={detector.strides} "
           f"anchors/cell={detector.na} box={detector.box_mode} score={detector.score_mode} "
           f"conf={detector.conf} nms={detector.nms}")
