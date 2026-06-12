@@ -193,7 +193,9 @@ class MainActivity : AppCompatActivity() {
     private fun refreshSummary() {
         val streamUrl = config.streamUrl
         binding.tvSummary.text = buildString {
-            val verLabel = if (config.yoloVersion == 2) "YOLO-FastestV2" else "YOLO v${config.yoloVersion}"
+            val verLabel = when (config.yoloVersion) {
+                1 -> "NanoDet-Plus"; 2 -> "YOLO-FastestV2"; else -> "YOLO v${config.yoloVersion}"
+            }
             append("$verLabel  |  ${config.inputSize}×${config.inputSize}  |  ${config.numClasses} классов\n")
             append("Conf: ${"%,.2f".format(config.confThreshold)}  NMS: ${"%,.2f".format(config.nmsThreshold)}  Thr: ${config.numThreads}  ${if (config.useGPU) "GPU" else "CPU"}\n")
             append("out0: ${config.outputName0}")

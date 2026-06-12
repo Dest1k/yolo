@@ -52,6 +52,7 @@ class SettingsSheet(
         b.etAnchors.setText(config.yfAnchors)
 
         when {
+            config.yoloVersion == 1  -> b.chipNanoDet.isChecked = true
             config.yoloVersion == 2  -> b.chipFastest.isChecked = true
             config.yoloVersion >= 10 -> b.chipV10.isChecked = true
             config.yoloVersion >= 8  -> b.chipV8.isChecked  = true
@@ -61,6 +62,7 @@ class SettingsSheet(
 
     private fun collect() {
         val version = when {
+            b.chipNanoDet.isChecked -> 1
             b.chipFastest.isChecked -> 2
             b.chipV10.isChecked -> 10
             b.chipV8.isChecked  -> 8

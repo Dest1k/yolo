@@ -36,6 +36,11 @@
             android:text="FastestV2" app:chipBackgroundColor="@color/bg_dark"
             android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
             style="@style/Widget.MaterialComponents.Chip.Filter"/>
+        <com.google.android.material.chip.Chip android:id="@+id/chipNanoDet"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="NanoDet" app:chipBackgroundColor="@color/bg_dark"
+            android:textColor="@color/text_primary" app:checkedIconTint="@color/accent"
+            style="@style/Widget.MaterialComponents.Chip.Filter"/>
     </com.google.android.material.chip.ChipGroup>
 
     <!-- Conf -->

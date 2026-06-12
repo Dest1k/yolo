@@ -19,6 +19,9 @@ import java.util.concurrent.atomic.AtomicReference
  * model), so it slots cleanly into a systemd unit:
  *   YOLO_MODEL       path to model file (.onnx or .pt)        [required]
  *   YOLO_MODEL_TYPE  onnx | pt              (default: inferred from extension)
+ *   YOLO_DECODE      set to "nanodet" for a NanoDet-Plus ONNX (GFL/DFL head). Then
+ *                    ND_REG_MAX (def 7) and ND_STRIDES (def 8,16,32,64) tune the
+ *                    decode; YOLO_INPUT must match the export. (default: auto YOLO)
  *   YOLO_SOURCE      "0"/"1"… USB webcam, "rpicam" for a Pi CSI camera, an
  *                    rtsp:// URL (e.g. SIYI ZR10), or an http MJPEG URL  (def: "0")
  *   YOLO_HWDEC       on | off — decode rtsp/http via the system ffmpeg so it can use
@@ -95,6 +98,15 @@ fun main() {
         } else {
             onnx.load(modelPath, inputSize, numClasses, conf,
                 if (gpuAuto) OnnxDetector.GpuMode.AUTO else OnnxDetector.GpuMode.CPU)
+            if (env("YOLO_DECODE")?.lowercase() == "nanodet") {
+                val rm = env("ND_REG_MAX")?.toIntOrNull() ?: 7
+                val strides = env("ND_STRIDES")?.split(",")
+                    ?.mapNotNull { it.trim().toIntOrNull() }?.toIntArray()
+                    ?: intArrayOf(8, 16, 32, 64)
+                onnx.configureNanoDet(rm, strides,
+                    floatArrayOf(103.53f, 116.28f, 123.675f), floatArrayOf(57.375f, 57.12f, 58.395f))
+                println("  decode=nanodet reg_max=$rm strides=${strides.joinToString(",")}")
+            }
             onnx.activeProvider
         }
     } catch (e: Exception) {

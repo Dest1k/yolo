@@ -517,6 +517,84 @@ static void detect_yolofastest(const ncnn::Mat& in, std::vector<Object>& objects
     g_diag = buf;
 }
 
+// ── NanoDet-Plus (GFL head, integral/DFL box) ────────────────────────────────
+// Anchor-free FPN detector (RangiLyu/nanodet). ONE output [num_points, nc+4*(reg_max+1)]
+// concatenated over strides 8/16/32/64, row-major (y,x) per level. Per point: argmax
+// class (sigmoid auto-applied if logits), then each of the 4 box sides is a softmax-
+// integral over (reg_max+1) bins → distance from the cell centre (x·stride, y·stride).
+// Preprocessing (BGR + ImageNet mean/std + letterbox) is set up in nativeDetect.
+// Defaults match nanodet-plus-m; mirrors the verified python sidecar decode.
+static const int ND_REG_MAX     = 7;
+static const int ND_STRIDES[4]  = {8, 16, 32, 64};
+static bool g_nd_sigmoid_known = false, g_nd_sigmoid = false;
+
+static void detect_nanodet(const ncnn::Mat& in, std::vector<Object>& objects, float ct, float nt){
+    ncnn::Extractor ex = g_net->create_extractor();
+    ex.input(g_input_name.c_str(), in);
+    ncnn::Mat raw;
+    if(ex.extract(g_out0.c_str(), raw) != 0){ g_diag = "nanodet|extract FAILED"; return; }
+    ncnn::Mat out = squeeze2d(raw);
+    if(out.w == 0 || out.h == 0){ g_diag = "nanodet|empty output"; return; }
+    // 2-D (rows, cols). num_points ≫ channels, so the larger axis is the points.
+    const bool tr = (out.h < out.w);                 // tr: rows are channels
+    const int  P  = tr ? out.w : out.h;
+    const int  C  = tr ? out.h : out.w;
+    auto AT = [&](int pt, int ch) -> float { return tr ? out.row(ch)[pt] : out.row(pt)[ch]; };
+
+    const int rm1 = ND_REG_MAX + 1;
+    const int nc  = C - 4 * rm1;
+    if(nc < 1){ g_diag = "nanodet|bad channels"; return; }
+
+    // Grid centre priors (strides ascending, y outer, x inner) — must equal P.
+    std::vector<int> gx(P), gy(P), gs(P);
+    int idx = 0;
+    for(int si = 0; si < 4 && idx < P; si++){
+        const int s = ND_STRIDES[si];
+        const int fw = (g_input_size + s - 1) / s, fh = (g_input_size + s - 1) / s;
+        for(int yy = 0; yy < fh && idx < P; yy++)
+        for(int xx = 0; xx < fw && idx < P; xx++){ gx[idx] = xx; gy[idx] = yy; gs[idx] = s; idx++; }
+    }
+    if(idx != P){ g_diag = "nanodet|grid≠points (ND_INPUT/strides)"; return; }
+
+    if(!g_nd_sigmoid_known){
+        bool rawlogit = false; int lim = P < 200 ? P : 200;
+        for(int i = 0; i < lim && !rawlogit; i++)
+            for(int c = 0; c < nc; c++){ float v = AT(i, c); if(v < -0.01f || v > 1.01f){ rawlogit = true; break; } }
+        g_nd_sigmoid = rawlogit; g_nd_sigmoid_known = true;
+    }
+
+    float max_conf = 0.f;
+    for(int i = 0; i < P; i++){
+        float best = -1e30f; int cls = -1;
+        for(int c = 0; c < nc; c++){ float v = AT(i, c); if(v > best){ best = v; cls = c; } }
+        float score = g_nd_sigmoid ? sigmoid_f(best) : best;
+        if(score > max_conf) max_conf = score;
+        if(cls < 0 || score < ct) continue;
+        const int s = gs[i];
+        float d[4];
+        for(int side = 0; side < 4; side++){
+            float mx = -1e30f;
+            for(int j = 0; j < rm1; j++){ float v = AT(i, nc + side*rm1 + j); if(v > mx) mx = v; }
+            float sum = 0.f, acc = 0.f;
+            for(int j = 0; j < rm1; j++){ float e = expf(AT(i, nc + side*rm1 + j) - mx); sum += e; acc += e * j; }
+            d[side] = sum > 0.f ? (acc / sum) * s : 0.f;
+        }
+        float ctx = (float)gx[i] * s, cty = (float)gy[i] * s;
+        float x1 = ctx - d[0], y1 = cty - d[1], x2 = ctx + d[2], y2 = cty + d[3];
+        if(is_bad(x1)||is_bad(y1)||is_bad(x2)||is_bad(y2)||x2<=x1||y2<=y1) continue;
+        Object o;
+        o.x = x1 / g_input_size; o.y = y1 / g_input_size;
+        o.w = (x2 - x1) / g_input_size; o.h = (y2 - y1) / g_input_size;
+        o.label = cls; o.prob = score;
+        objects.push_back(o);
+    }
+    nms(objects, nt);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "nanodet|P=%d|nc=%d|isz=%d|sig=%d|maxC:%.2f|dets:%d",
+             P, nc, g_input_size, (int)g_nd_sigmoid, max_conf, (int)objects.size());
+    g_diag = buf;
+}
+
 // ── YOLOv5/v6/v7 anchor-based ────────────────────────────────────────────────
 static const float ANCHORS[3][6]={{10,13,16,30,33,23},{30,61,62,45,59,119},{116,90,156,198,373,326}};
 static void decode_v5(const ncnn::Mat& f, int st, int si, float ct, std::vector<Object>& o, float& max_conf){
@@ -569,6 +647,7 @@ Java_com_destik_yolodetector_YoloDetector_nativeInit(
         jstring o0, jstring o1, jstring o2, jstring yfAnchors){
     if(g_initialized){ g_net->clear(); g_initialized=false; }
     g_yf_act_done=false;   // re-detect YOLO-FastestV2 activations for the new model
+    g_nd_sigmoid_known=false;   // re-detect NanoDet class activation for the new model
     g_yolo_version=(int)ver; g_input_size=(int)isz; g_num_classes=(int)nc;
     auto gc=[&](jstring s)->std::string{
         if(!s) return std::string();
@@ -696,16 +775,20 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
 
     int w=(int)info.width, h=(int)info.height;
 
-    // Preprocessing must match how the model was trained. YOLO-FastestV2 trains on a
-    // plain (aspect-squishing) resize to input×input, so we stretch for it; every
-    // other family trains with aspect-preserving letterbox (pad with gray 114).
+    // Preprocessing must match how the model was trained:
+    //  - YOLO-FastestV2 (v2): plain stretch resize, RGB /255.
+    //  - NanoDet-Plus (v1):  letterbox (pad 0), BGR, ImageNet mean/std.
+    //  - everything else:     letterbox (pad gray 114), RGB /255.
     const bool stretch = (g_yolo_version == 2);
+    const bool nanodet = (g_yolo_version == 1);
+    const int   ptype  = nanodet ? ncnn::Mat::PIXEL_RGBA2BGR : ncnn::Mat::PIXEL_RGBA2RGB;
+    const float padval = nanodet ? 0.f : 114.f;
     float scale_x, scale_y;     // model-px per original-px, per axis
     int   pad_x, pad_y;         // letterbox padding (0 for stretch)
     ncnn::Mat in;
     if(stretch){
         in = ncnn::Mat::from_pixels_resize(
-            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+            (const unsigned char*)px, ptype,
             w, h, (int)info.stride, g_input_size, g_input_size);
         AndroidBitmap_unlockPixels(env,bitmap);
         if(in.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
@@ -718,24 +801,31 @@ Java_com_destik_yolodetector_YoloDetector_nativeDetect(
         pad_x = (g_input_size - nw) / 2;
         pad_y = (g_input_size - nh) / 2;
         ncnn::Mat resized = ncnn::Mat::from_pixels_resize(
-            (const unsigned char*)px, ncnn::Mat::PIXEL_RGBA2RGB,
+            (const unsigned char*)px, ptype,
             w, h, (int)info.stride, nw, nh);
         AndroidBitmap_unlockPixels(env,bitmap);
         if(resized.empty()){ LOGE("from_pixels_resize empty"); return env->NewObjectArray(0,dc,nullptr); }
         ncnn::copy_make_border(resized, in,
             pad_y, g_input_size - nh - pad_y,
             pad_x, g_input_size - nw - pad_x,
-            ncnn::BORDER_CONSTANT, 114.f);
+            ncnn::BORDER_CONSTANT, padval);
         scale_x = scale; scale_y = scale;
     }
 
-    const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
-    in.substract_mean_normalize(mv,nv);
+    if(nanodet){
+        const float mv[]={103.53f,116.28f,123.675f};        // BGR ImageNet mean
+        const float nv[]={1/57.375f,1/57.12f,1/58.395f};    // 1/std
+        in.substract_mean_normalize(mv,nv);
+    } else {
+        const float mv[]={0,0,0}, nv[]={1/255.f,1/255.f,1/255.f};
+        in.substract_mean_normalize(mv,nv);
+    }
     g_net->opt.num_threads=(int)nth;
 
     std::vector<Object> objs;
     g_stage="detect:extract";
-    if(g_yolo_version==2)      detect_yolofastest(in,objs,ct,nt);  // YOLO-FastestV2 (decoupled head)
+    if(g_yolo_version==1)      detect_nanodet   (in,objs,ct,nt);  // NanoDet-Plus (GFL/DFL head)
+    else if(g_yolo_version==2) detect_yolofastest(in,objs,ct,nt); // YOLO-FastestV2 (decoupled head)
     else if(g_yolo_version>=8) detect_modern    (in,objs,ct,nt);  // v8/v9/v10/v11 (auto layout)
     else                       detect_v5        (in,objs,ct,nt);  // v5/v6/v7 anchor-based
     g_stage="idle";

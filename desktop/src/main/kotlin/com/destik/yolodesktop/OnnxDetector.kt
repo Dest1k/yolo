@@ -38,6 +38,24 @@ class OnnxDetector {
     var numClasses = 80
     var nmsThreshold = 0.45f
 
+    // ── NanoDet-Plus (GFL/DFL head) mode ──────────────────────────────────────
+    // Off by default; enabled via configureNanoDet (Headless: YOLO_DECODE=nanodet).
+    // NanoDet needs BGR mean/std preprocessing (not /255 RGB) and a single-output
+    // GFL/DFL decode, so it gets its own preprocessing + parser branch.
+    private var nanodet = false
+    private var regMax = 7
+    private var ndStrides = intArrayOf(8, 16, 32, 64)
+    private var ndMean = floatArrayOf(103.53f, 116.28f, 123.675f)   // BGR
+    private var ndInvStd = floatArrayOf(1f / 57.375f, 1f / 57.12f, 1f / 58.395f)
+    private var ndClsSigmoid: Boolean? = null
+
+    /** Switch this detector to NanoDet-Plus decoding (call after load()). */
+    fun configureNanoDet(regMax: Int, strides: IntArray, mean: FloatArray, std: FloatArray) {
+        nanodet = true; this.regMax = regMax; this.ndStrides = strides
+        this.ndMean = mean; this.ndInvStd = FloatArray(3) { 1f / std[it] }
+        this.ndClsSigmoid = null
+    }
+
     /** Human-readable description of the execution provider actually used. */
     var activeProvider = "CPU"
         private set
@@ -113,11 +131,21 @@ class OnnxDetector {
         pad.getRGB(0, 0, iw, ih, px, 0, iw)
 
         val arr = floats?.takeIf { it.size == 3 * n } ?: FloatArray(3 * n).also { floats = it }
-        for (i in 0 until n) {
-            val p = px[i]
-            arr[i]         = ((p shr 16) and 0xFF) / 255f
-            arr[i + n]     = ((p shr 8)  and 0xFF) / 255f
-            arr[i + 2 * n] = ( p         and 0xFF) / 255f
+        if (nanodet) {
+            // NanoDet: BGR order, (pixel - mean) / std (plane0=B, plane1=G, plane2=R).
+            for (i in 0 until n) {
+                val p = px[i]
+                arr[i]         = ((p and 0xFF)          - ndMean[0]) * ndInvStd[0]
+                arr[i + n]     = (((p shr 8) and 0xFF)  - ndMean[1]) * ndInvStd[1]
+                arr[i + 2 * n] = (((p shr 16) and 0xFF) - ndMean[2]) * ndInvStd[2]
+            }
+        } else {
+            for (i in 0 until n) {
+                val p = px[i]
+                arr[i]         = ((p shr 16) and 0xFF) / 255f
+                arr[i + n]     = ((p shr 8)  and 0xFF) / 255f
+                arr[i + 2 * n] = ( p         and 0xFF) / 255f
+            }
         }
 
         val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(arr),
@@ -131,7 +159,9 @@ class OnnxDetector {
                 val a = shape[1].toInt()
                 val b = shape[2].toInt()
                 val buf = out.floatBuffer
-                if ((b == 6 && a in 7..4000) || (a == 6 && b in 7..4000))
+                if (nanodet)
+                    parseNanoDet(buf, a, b, iw, ih, padX, padY, scale, w, h)
+                else if ((b == 6 && a in 7..4000) || (a == 6 && b in 7..4000))
                     parseNmsFree(buf, a, b, iw, ih, padX, padY, scale, w, h)
                 else
                     parseAnchorFree(buf, a, b, iw, ih, padX, padY, scale, w, h)
@@ -141,6 +171,88 @@ class OnnxDetector {
         } finally {
             tensor.close()
         }
+    }
+
+    /**
+     * NanoDet-Plus decode: single output [1, numPoints, nc + 4*(reg_max+1)] (or its
+     * transpose), concatenated over the FPN strides (8/16/32/64), row-major (y,x) per
+     * level. Per point: argmax class (sigmoid auto-applied if the export left logits),
+     * then each of the 4 box sides is a softmax-integral over (reg_max+1) bins → a
+     * distance from the cell centre (x*stride, y*stride). Mirrors the python sidecar.
+     */
+    private fun parseNanoDet(
+        buf: FloatBuffer, a: Int, b: Int,
+        iw: Int, ih: Int, padX: Int, padY: Int, scale: Float, ow: Int, oh: Int
+    ): List<Detection> {
+        // numPoints (thousands) ≫ channels (nc+32), so the larger axis is the points.
+        val tr = (a < b)
+        val numPoints = if (tr) b else a
+        val cc = if (tr) a else b
+        fun g(pt: Int, ch: Int) = if (tr) buf[ch * numPoints + pt] else buf[pt * cc + ch]
+        val rm1 = regMax + 1
+        val nc = cc - 4 * rm1
+        if (nc < 1) return emptyList()
+
+        // Grid centre priors in nanodet order (strides ascending, y outer, x inner).
+        val gx = IntArray(numPoints); val gy = IntArray(numPoints); val gs = IntArray(numPoints)
+        var idx = 0
+        for (s in ndStrides) {
+            val fw = (iw + s - 1) / s; val fh = (ih + s - 1) / s
+            var yy = 0
+            while (yy < fh) {
+                var xx = 0
+                while (xx < fw) {
+                    if (idx < numPoints) { gx[idx] = xx; gy[idx] = yy; gs[idx] = s; idx++ }
+                    xx++
+                }
+                yy++
+            }
+        }
+        if (idx != numPoints) return emptyList()   // grid ≠ points → wrong input/strides
+
+        if (ndClsSigmoid == null) {
+            var raw = false
+            val lim = min(numPoints, 200)
+            var i = 0
+            loop@ while (i < lim) {
+                for (c in 0 until nc) { val v = g(i, c); if (v < -0.01f || v > 1.01f) { raw = true; break@loop } }
+                i++
+            }
+            ndClsSigmoid = raw
+        }
+        val sig = ndClsSigmoid == true
+
+        val out = ArrayList<Detection>()
+        val sm = FloatArray(rm1)
+        for (i in 0 until numPoints) {
+            var best = -1e30f; var cls = -1
+            for (c in 0 until nc) { val v = g(i, c); if (v > best) { best = v; cls = c } }
+            val score = if (sig) (1.0 / (1.0 + kotlin.math.exp(-best.toDouble()))).toFloat() else best
+            if (cls < 0 || score < confThreshold) continue
+            val s = gs[i]
+            val d = FloatArray(4)
+            for (side in 0 until 4) {
+                var mx = -1e30f
+                for (j in 0 until rm1) { val v = g(i, nc + side * rm1 + j); sm[j] = v; if (v > mx) mx = v }
+                var sum = 0f
+                for (j in 0 until rm1) { val e = kotlin.math.exp((sm[j] - mx).toDouble()).toFloat(); sm[j] = e; sum += e }
+                var acc = 0f
+                for (j in 0 until rm1) acc += j * sm[j]
+                d[side] = if (sum > 0f) (acc / sum) * s else 0f
+            }
+            val ctx = (gx[i] * s).toFloat(); val cty = (gy[i] * s).toFloat()
+            val x1 = (ctx - d[0] - padX) / scale
+            val y1 = (cty - d[1] - padY) / scale
+            val x2 = (ctx + d[2] - padX) / scale
+            val y2 = (cty + d[3] - padY) / scale
+            if (x2 <= x1 || y2 <= y1 || x1.isNaN()) continue
+            out += Detection(
+                x1 = x1.coerceIn(0f, ow.toFloat()), y1 = y1.coerceIn(0f, oh.toFloat()),
+                x2 = x2.coerceIn(0f, ow.toFloat()), y2 = y2.coerceIn(0f, oh.toFloat()),
+                conf = score, cls = cls
+            )
+        }
+        return nms(out)
     }
 
     private fun parseNmsFree(
