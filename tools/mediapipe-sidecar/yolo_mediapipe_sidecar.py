@@ -831,6 +831,7 @@ def _status_json(state):
         "recording": bool(g.recording) if g else False,
         "mode": mode,
         "tracking": bool(state.tracking),
+        "streamFps": int(state.stream_fps), "detFps": int(state.det_fps), "ndet": len(state.dets),
         "firmware": (g.firmware if g else "") or "",
         "hardwareId": (g.hardware_id if g else "") or "",
     }, allow_nan=False)

@@ -56,6 +56,22 @@ GENANCHORS = False                     # recompute anchors for your data. Off fi
 ANCHORS    = "12.64,19.39, 37.88,51.48, 55.71,138.31, 126.91,78.23, 131.57,214.55, 279.92,258.87"
 # =============================================================================
 
+# ── Env overrides — so the command center (or any launcher) can drive training
+#    without editing this file. Same TRAIN_* keys for every trainer. ───────────
+def _envc(name, cur, cast=str):
+    v = os.environ.get(name)
+    return cast(v) if v not in (None, "") else cur
+DATASET = _envc("TRAIN_DATASET", DATASET)
+if os.environ.get("TRAIN_CLASSES"):
+    CLASSES = [c.strip() for c in os.environ["TRAIN_CLASSES"].split(",") if c.strip()]
+INPUT   = _envc("TRAIN_INPUT", INPUT, int)
+EPOCHS  = _envc("TRAIN_EPOCHS", EPOCHS, int)
+BATCH   = _envc("TRAIN_BATCH", BATCH, int)
+WORKERS = _envc("TRAIN_WORKERS", WORKERS, int)
+DEVICE  = _envc("TRAIN_DEVICE", DEVICE)
+if os.environ.get("TRAIN_EXPORT"):
+    EXPORT = os.environ["TRAIN_EXPORT"].lower() not in ("0", "false", "no", "off")
+
 
 def sh(cmd, cwd=None, extra_env=None):
     print(f"  $ {' '.join(cmd)}")
