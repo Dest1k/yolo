@@ -19,6 +19,7 @@ import argparse
 import curses
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -64,12 +65,55 @@ BACKENDS = [
          fields=[("RKNN_MODEL", "yolov5s.rknn")], train_fields=[]),
 ]
 
+# Suggested values per field — ◄► cycle them; you can still type a custom value.
+# Path/text fields have none and just accumulate your recent entries (remembered).
+OPTIONS = {
+    "YOLO_SOURCE": ["rpicam", "0", "1", "rtsp://192.168.144.25:8554/main.264"],
+    "YOLO_PORT": ["8080", "8081", "8090"],
+    "YF_INPUT": ["256", "320", "352", "416"],
+    "ND_INPUT": ["320", "416", "512"],
+    "TRAIN_INPUT": ["256", "320", "352", "416", "512"],
+    "TRAIN_EPOCHS": ["50", "100", "200", "300"],
+    "TRAIN_BATCH": ["32", "64", "96", "128", "192", "256"],
+    "TRAIN_DEVICE": ["gpu", "cpu"],
+    "PD_DEVICE": ["gpu", "cpu"], "PD_EPOCHS": ["40", "80", "120"], "PD_BATCH": ["16", "24", "32", "48"],
+    "MM_MODEL": ["lite0", "lite2"], "MM_EPOCHS": ["30", "50", "100"], "MM_BATCH": ["8", "16", "32"],
+}
+
+STATE_PATH = os.path.expanduser("~/.yolo_cc.json")
+
+
+def load_state():
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    try:
+        with open(STATE_PATH, "w") as f:
+            json.dump(state, f, indent=1)
+    except Exception:
+        pass
+
 
 def parse_target(s):
     if ":" in s:
         h, p = s.rsplit(":", 1)
         return h, int(p)
     return s, DEF_PORT
+
+
+def local_subnet():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]; s.close()
+        return ip.rsplit(".", 1)[0] + "."
+    except Exception:
+        return None
 
 
 class Target:
@@ -162,19 +206,20 @@ class App:
         self.running = True
         self.log = deque(maxlen=300)
         self.lock = threading.Lock()
+        self.state = load_state()
         # control
         self.speed = 40
         self.preview = False
         self.pv_lines, self.pv_w, self.pv_h = [], 0, 0
         self.move_dir, self.moving, self.last_move = None, False, 0.0
         # launch
-        self.lb = 0
+        self.lb = int(self.state.get("lb", 0)) % len(BACKENDS)
         self.lsel = 0
-        self.lfields = self._mk_fields(0)
+        self.lfields = self._mk_fields(self.lb)
         # models / train
-        self.mb = 0
-        self.tb = 0
-        self.tfields = self._mk_train_fields(0)
+        self.mb = int(self.state.get("mb", 0)) % len(BACKENDS)
+        self.tb = int(self.state.get("tb", 0)) % len(BACKENDS)
+        self.tfields = self._mk_train_fields(self.tb)
         self.tsel = 0
         # processes
         self.procs = {}          # "key:port" -> Proc (sidecars)
@@ -186,12 +231,53 @@ class App:
             self.Image = None
 
     # ── helpers ───────────────────────────────────────────────────────────────
+    def _opts_for(self, name):
+        o = list(OPTIONS.get(name, []))
+        for r in self.state.get("recent", {}).get(name, []):
+            if r not in o:
+                o.append(r)
+        return o
+
+    def _val_for(self, name, default):
+        return self.state.get("values", {}).get(name, default)
+
+    def _field(self, name, default):
+        return [name, self._val_for(name, default), self._opts_for(name)]
+
     def _mk_fields(self, bi):
-        b = BACKENDS[bi]
-        return [["YOLO_SOURCE", "rpicam"], ["YOLO_PORT", str(DEF_PORT)]] + [[k, v] for k, v in b["fields"]]
+        raw = [("YOLO_SOURCE", "rpicam"), ("YOLO_PORT", str(DEF_PORT))] + list(BACKENDS[bi]["fields"])
+        return [self._field(k, v) for k, v in raw]
 
     def _mk_train_fields(self, bi):
-        return [[k, v] for k, v in BACKENDS[bi]["train_fields"]]
+        return [self._field(k, v) for k, v in BACKENDS[bi]["train_fields"]]
+
+    @staticmethod
+    def cycle(fv, direction):
+        """Move a combo field's value to the next/prev suggestion."""
+        opts = fv[2]
+        if not opts:
+            return
+        fv[1] = opts[(opts.index(fv[1]) + direction) % len(opts)] if fv[1] in opts \
+            else (opts[0] if direction > 0 else opts[-1])
+
+    def _remember(self):
+        """Fold current field values into the in-memory state (no disk write)."""
+        vals = self.state.setdefault("values", {})
+        rec = self.state.setdefault("recent", {})
+        for fv in self.lfields + self.tfields:
+            k, v = fv[0], fv[1]
+            vals[k] = v
+            if v and v not in OPTIONS.get(k, []):       # remember custom entries
+                lst = rec.setdefault(k, [])
+                if v in lst:
+                    lst.remove(v)
+                lst.insert(0, v)
+                del lst[8:]
+
+    def _persist(self):
+        self._remember()
+        self.state["lb"], self.state["tb"], self.state["mb"] = self.lb, self.tb, self.mb
+        save_state(self.state)
 
     def at(self):
         return self.targets[self.active] if 0 <= self.active < len(self.targets) else None
@@ -214,9 +300,54 @@ class App:
         threading.Thread(target=lambda: get_json(t, path, 1.0), daemon=True).start()
         self.logmsg(note or path)
 
+    def discover(self):
+        """Scan the local /24 for sidecars answering /status and add them."""
+        base = local_subnet()
+        if not base:
+            self.logmsg("discovery: no LAN ip"); return
+        self.logmsg(f"scanning {base}0/24 (ports 8080/8081) …")
+
+        def scan():
+            import concurrent.futures as cf
+            found = 0
+
+            def probe(ip, port):
+                return (ip, port) if get_json(Target(ip, port), "/status", 0.3) else None
+
+            with cf.ThreadPoolExecutor(max_workers=64) as ex:
+                futs = [ex.submit(probe, f"{base}{i}", p) for i in range(1, 255) for p in (8080, 8081)]
+                for fut in cf.as_completed(futs):
+                    r = fut.result()
+                    if r:
+                        self.add_target(*r); found += 1
+            self.logmsg(f"discovery done: {found} board(s) found")
+
+        threading.Thread(target=scan, daemon=True).start()
+
+    def snapshot(self):
+        t = self.at()
+        if not t:
+            self.logmsg("no board"); return
+
+        def w():
+            jpg = read_one_jpeg(t)
+            if not jpg:
+                self.logmsg("snapshot: no frame"); return
+            d = os.path.join(os.getcwd(), "cc_snapshots")
+            try:
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, f"{t.host.replace(':', '_')}_{time.strftime('%H%M%S')}.jpg")
+                with open(path, "wb") as f:
+                    f.write(jpg)
+                self.logmsg(f"saved {path}")
+            except Exception as e:
+                self.logmsg(f"snapshot failed: {e}")
+
+        threading.Thread(target=w, daemon=True).start()
+
     def poll_loop(self):
         while self.running:
-            for i, t in enumerate(self.targets):
+            for i, t in enumerate(list(self.targets)):
                 if i == self.active or (time.time() - t.last) > 1.5:
                     st = get_json(t, "/status", 1.0)
                     with self.lock:
@@ -264,7 +395,7 @@ class App:
     # ── process orchestration ─────────────────────────────────────────────────
     def launch_sidecar(self):
         b = BACKENDS[self.lb]
-        env = {k: v for k, v in self.lfields}
+        env = {fv[0]: fv[1] for fv in self.lfields}
         port = int(env.get("YOLO_PORT", str(DEF_PORT)) or DEF_PORT)
         key = f"{b['key']}:{port}"
         if key in self.procs and self.procs[key].alive():
@@ -274,13 +405,13 @@ class App:
             self.procs[key] = Proc(cmd, os.path.join(ROOT, b["dir"]), env, key)
         except Exception as e:
             self.logmsg(f"launch failed: {e}"); return
-        idx = self.add_target("127.0.0.1", port)
-        self.active = idx
+        self.active = self.add_target("127.0.0.1", port)
+        self._persist()
         self.logmsg(f"launched {key}")
 
     def stop_sidecar(self):
         b = BACKENDS[self.lb]
-        port = int(dict(self.lfields).get("YOLO_PORT", DEF_PORT) or DEF_PORT)
+        port = int({fv[0]: fv[1] for fv in self.lfields}.get("YOLO_PORT", DEF_PORT) or DEF_PORT)
         key = f"{b['key']}:{port}"
         p = self.procs.get(key)
         if p and p.alive():
@@ -310,6 +441,10 @@ class App:
             self.view = (self.view - 1) % len(VIEWS); return
         if k == 27:
             self.running = False; return
+        if k == curses.KEY_DC:                 # Delete = kill the running task
+            if self.task and self.task.alive():
+                self.task.stop(); self.logmsg("task killed")
+            return
         [self._k_control, self._k_launch, self._k_models, self._k_train][self.view](k)
 
     def _k_control(self, k):
@@ -332,6 +467,8 @@ class App:
         elif k in (ord("="), ord("+")): self.speed = min(100, self.speed + 10)
         elif k == ord("-"): self.speed = max(10, self.speed - 10)
         elif k == ord("v"): self.preview = not self.preview
+        elif k == ord("d"): self.discover()
+        elif k == ord("s"): self.snapshot()
         elif ord("1") <= k <= ord("9") and (k - ord("1")) < len(self.targets):
             self.active = k - ord("1")
         elif k == ord("q"): self.running = False
@@ -341,14 +478,15 @@ class App:
         if k == curses.KEY_UP: self.lsel = (self.lsel - 1) % nrows
         elif k == curses.KEY_DOWN: self.lsel = (self.lsel + 1) % nrows
         elif self.lsel == 0 and k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self._remember()
             self.lb = (self.lb + (1 if k == curses.KEY_RIGHT else -1)) % len(BACKENDS)
             self.lfields = self._mk_fields(self.lb); self.lsel = 0
         elif 1 <= self.lsel <= len(self.lfields):
             fv = self.lfields[self.lsel - 1]
-            if k in (curses.KEY_BACKSPACE, 127, 8):
-                fv[1] = fv[1][:-1]
-            elif 32 <= k < 127:
-                fv[1] += chr(k)
+            if k == curses.KEY_LEFT: self.cycle(fv, -1)
+            elif k == curses.KEY_RIGHT: self.cycle(fv, 1)
+            elif k in (curses.KEY_BACKSPACE, 127, 8): fv[1] = fv[1][:-1]
+            elif 32 <= k < 127: fv[1] += chr(k)
         elif k in (curses.KEY_ENTER, 10, 13):
             if self.lsel == 1 + len(self.lfields):
                 self.launch_sidecar()
@@ -359,6 +497,7 @@ class App:
         if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
             self.mb = (self.mb + (1 if k == curses.KEY_RIGHT else -1)) % len(BACKENDS)
         elif k in (curses.KEY_ENTER, 10, 13, ord("f")):
+            self._persist()
             self.run_task(self.mb, "get_model")
         elif k == ord("q"): self.running = False
 
@@ -375,12 +514,13 @@ class App:
         elif k == curses.KEY_DOWN: self.tsel = (self.tsel + 1) % nrows
         elif 1 <= self.tsel <= len(self.tfields):
             fv = self.tfields[self.tsel - 1]
-            if k in (curses.KEY_BACKSPACE, 127, 8):
-                fv[1] = fv[1][:-1]
-            elif 32 <= k < 127:
-                fv[1] += chr(k)
+            if k == curses.KEY_LEFT: self.cycle(fv, -1)
+            elif k == curses.KEY_RIGHT: self.cycle(fv, 1)
+            elif k in (curses.KEY_BACKSPACE, 127, 8): fv[1] = fv[1][:-1]
+            elif 32 <= k < 127: fv[1] += chr(k)
         elif k in (curses.KEY_ENTER, 10, 13) and self.tsel == 1 + len(self.tfields):
-            env = {kk: vv for kk, vv in self.tfields if vv != ""}
+            env = {fv[0]: fv[1] for fv in self.tfields if fv[1] != ""}
+            self._persist()
             self.run_task(self.tb, "train", env)
 
 
@@ -414,6 +554,15 @@ def bar(val, lo, hi, width):
     return "".join("●" if i == pos else "─" for i in range(width))
 
 
+def field_disp(v, opts, selected):
+    """Render a combo field: ◄ value ► when selected & it has presets; '↔' hints
+    presets when not selected; plain editable text otherwise."""
+    cur = "_" if selected else ""
+    if opts:
+        return f"◄ {v}{cur} ►" if selected else f"{v}  ↔"
+    return f"{v}{cur}"
+
+
 def proc_log_box(scr, app, C, y, x, h, w, proc, title):
     box(scr, y, x, h, w, title, C["dim"])
     rows = list(proc.log)[-(h - 2):] if proc else ["(nothing yet)"]
@@ -424,12 +573,19 @@ def proc_log_box(scr, app, C, y, x, h, w, proc, title):
 def draw_tabs(scr, app, C, W):
     addstr(scr, 0, 0, "═" * W, C["dim"])
     x = 2
-    for i, v in enumerate(VIEWS):
-        a = (C["title"] | curses.A_BOLD) if i == app.view else C["dim"]
-        lab = f" {i+1 if False else ''}{v} "
+    for v in VIEWS:
+        a = (C["title"] | curses.A_BOLD) if VIEWS[app.view] == v else C["dim"]
         addstr(scr, 0, x, f"[{v}]", a)
         x += len(v) + 3
-    hint = "Tab=view  Esc=quit"
+    nrun = sum(1 for p in app.procs.values() if p.alive())
+    act = []
+    if nrun:
+        act.append(f"▶{nrun} sidecar")
+    if app.task and app.task.alive():
+        act.append("⟳ task")
+    if act:
+        addstr(scr, 0, x + 1, "  ".join(act), C["ok"])
+    hint = "Tab=view  Del=kill task  Esc=quit"
     addstr(scr, 0, max(0, W - len(hint) - 1), hint, C["dim"])
 
 
@@ -478,7 +634,7 @@ def draw_control(scr, app, C, H, W):
         for i, ln in enumerate([
                 "↑↓←→ gimbal", "] [  zoom in/out", ". ,  focus far/near",
                 "o autofocus   c center", "m mode  t track", "r record  p photo  H hdr",
-                "v preview", "1-9 switch board  q quit"][:th - 2]):
+                "v preview  s snapshot", "d discover boards", "1-9 board   q quit"][:th - 2]):
             addstr(scr, 4 + i, rx + 2, ln, C["fg"])
 
     ly = 3 + th + 1
@@ -496,11 +652,10 @@ def draw_launch(scr, app, C, H, W):
     sel = app.lsel
     rowsel = lambda i: (C["title"] | curses.A_BOLD) if i == sel else C["fg"]
     addstr(scr, 3, 3, f"Backend ◄ {b['label']:<16} ►", rowsel(0))
-    for i, (k, v) in enumerate(app.lfields):
-        cur = "_" if sel == i + 1 else ""
-        addstr(scr, 4 + i, 3, f"{k:<13} {v}{cur}", rowsel(i + 1))
+    for i, (k, v, opts) in enumerate(app.lfields):
+        addstr(scr, 4 + i, 3, f"{k:<13} {field_disp(v, opts, sel == i + 1)}", rowsel(i + 1))
     si = 1 + len(app.lfields)
-    key = f"{b['key']}:{dict(app.lfields).get('YOLO_PORT', '?')}"
+    key = f"{b['key']}:{({f[0]: f[1] for f in app.lfields}).get('YOLO_PORT', '?')}"
     running = key in app.procs and app.procs[key].alive()
     addstr(scr, 4 + len(app.lfields), 3, "[ Start ]", rowsel(si) | (C["ok"] if not running else 0))
     addstr(scr, 5 + len(app.lfields), 3, "[ Stop ]", rowsel(si + 1) | (C["bad"] if running else 0))
@@ -538,9 +693,8 @@ def draw_train(scr, app, C, H, W):
     if not b.get("train"):
         addstr(scr, 5, 3, "no trainer for this backend", C["warn"])
     else:
-        for i, (k, v) in enumerate(app.tfields):
-            cur = "_" if app.tsel == i + 1 else ""
-            addstr(scr, 4 + i, 3, f"{k:<15} {v}{cur}", rowsel(i + 1))
+        for i, (k, v, opts) in enumerate(app.tfields):
+            addstr(scr, 4 + i, 3, f"{k:<15} {field_disp(v, opts, app.tsel == i + 1)}", rowsel(i + 1))
         addstr(scr, 4 + nf, 3, "[ Start training ]", rowsel(1 + nf) | C["ok"])
     addstr(scr, 2, bw - 28, "↑↓ field ◄► backend ⏎ act", C["dim"])
     addstr(scr, bh + 1, 3, "set fields here — no need to touch the CONFIG block", C["dim"])
@@ -602,6 +756,10 @@ def cli():
         curses.wrapper(run, app)
     finally:
         app.running = False
+        try:
+            app._persist()        # remember field choices for next run
+        except Exception:
+            pass
         for p in app.procs.values():
             p.stop()
         if app.task:

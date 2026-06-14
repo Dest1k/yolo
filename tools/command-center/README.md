@@ -20,6 +20,8 @@ Pi sidecars *and* the desktop headless runner):
 - `↑↓←→` gimbal (auto-stop on release) · `] [` zoom · `. ,` focus · `o` autofocus ·
   `c` center · `m` cycle mode · `t` track · `r` record · `p` photo · `H` hdr ·
   `=/-` speed · `v` ASCII video preview · `1`-`9` switch board.
+- `d` **discover** boards on your LAN (scans the local /24 for sidecars answering
+  `/status` and adds them) · `s` **snapshot** the current frame to `cc_snapshots/`.
 
 **Launch** — start/stop any backend sidecar (fastestv2 / nanodet / picodet /
 mediapipe / rknn). Edit `YOLO_SOURCE`, `YOLO_PORT` and the model fields right in the
@@ -36,6 +38,15 @@ instant downloads; picodet/nanodet download + convert.
 `[ Start training ]`. The fields are passed as env to the trainer (the trainers read
 `TRAIN_*` / `PD_*` / `MM_*` overriding their in-file CONFIG), and the run (incl. the
 auto-export) streams in the OUTPUT pane.
+
+## Editable fields, the easy way
+
+Every form field (source, port, input size, epochs, device, model paths…) is a
+**combo box**: press `◄►` to cycle through sensible presets, or just type a custom
+value. Whatever you set is **remembered between runs** (saved to `~/.yolo_cc.json`),
+and any custom value you type becomes a preset you can cycle back to next time. The
+last-used backend per view is restored on launch too. A running task can be killed
+with `Del` from any view; the top bar shows how many sidecars/tasks are live.
 
 ## How it fits together
 
