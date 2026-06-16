@@ -44,7 +44,21 @@ except Exception as e:
         "  Or run the engine directly:  python generate_dataset.py [config.json]\n")
     sys.exit(1)
 
-import generate_dataset as engine             # sibling; only stdlib at import time
+try:
+    import generate_dataset as engine         # sibling; only stdlib at import time
+except ModuleNotFoundError:
+    msg = ("generate_dataset.py не найден рядом с этим окном.\n\n"
+           "Положи ОБА файла в одну папку и запусти оттуда:\n"
+           "    generate_dataset.py\n"
+           "    generate_dataset_gui.py\n\n"
+           "Они всегда должны лежать вместе — окно само запускает движок.\n\n"
+           f"Сейчас окно запущено из:\n    {HERE}")
+    try:
+        messagebox.showerror("Нет generate_dataset.py", msg)
+    except Exception:
+        pass
+    sys.stderr.write("ERROR: " + msg.replace("\n", "\n  ") + "\n")
+    sys.exit(1)
 
 ENGINE = os.path.join(HERE, "generate_dataset.py")
 STATE_PATH = os.path.expanduser("~/.dataset_generator_gui.json")
