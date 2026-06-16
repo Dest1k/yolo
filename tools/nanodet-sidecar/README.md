@@ -21,6 +21,7 @@ cu128 nightly PyTorch and export to NCNN with **one command**.
 |---|---|
 | `nanodet_ncnn_sidecar.py` | inference + stream + panel (run this on the Pi) |
 | `train_nanodet.py` | one command: YOLO→COCO, clone repo, train, **and auto-export an optimised ncnn model** |
+| `train_nanodet_gui.py` | **graphical** front-end for the above — every field (incl. fine-tuning) in a window, live training log underneath (Windows-friendly, tkinter, zero extra deps) |
 | `export_ncnn.py` | `.ckpt` → ONNX(opset 11) → onnxsim → ncnn → ncnnoptimize(fp16) → **verify** |
 
 ## 1. Install on the Pi
@@ -57,6 +58,7 @@ ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py --inspect
 | `ND_INPUT_BLOB` | model input blob name | first input |
 | `ND_MEAN` / `ND_STD` | BGR normalisation | nanodet ImageNet |
 | `ND_THREADS` | inference threads | all cores |
+| `YOLO_FP16` | fp16 arithmetic + winograd/sgemm ncnn kernels (Pi 5 A76 = ARMv8.2 FP16; real FPS win). `0` = fp32 fallback | `1` |
 | `YOLO_CV_THREADS` | OpenCV threads (1 = don't fight inference for cores) | `1` |
 | `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
 | `YOLO_SOURCE` / `YOLO_LABELS` / `YOLO_CONF` / `YOLO_NMS` / `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | as the other sidecars | |
@@ -79,6 +81,15 @@ pip install opencv-python numpy onnx onnxsim ncnn pnnx pytorch-lightning pycocot
 # edit the CONFIG block in train_nanodet.py (DATASET, CLASSES, INPUT, BATCH…), then:
 python train_nanodet.py
 ```
+
+Prefer a window? `python train_nanodet_gui.py` exposes every field — including
+**fine-tuning / resume (дообучение)** — and streams the live training log underneath.
+It just drives `train_nanodet.py` via `TRAIN_*` env vars, so both paths stay identical.
+
+**Fine-tuning (дообучение):** point `WEIGHTS` (env `TRAIN_WEIGHTS`) at a finished
+`.ckpt` to start from those weights and continue on new/expanded data, or `RESUME`
+(env `TRAIN_RESUME`) to pick an interrupted run back up. In the GUI it's the
+"Fine-tuning / resume" selector.
 It converts your YOLO labels to COCO JSON (no image copying), clones
 `RangiLyu/nanodet`, writes a custom config off the stock `nanodet-plus-m_416.yml`
 (patching classes, data paths, input size, batch/workers/epochs — it reports every

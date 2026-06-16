@@ -4,7 +4,12 @@ Train NanoDet-Plus on your dataset AND auto-export an optimised NCNN model — o
 command, same paradigm as train_yolofastest.py.
 
 >>> Edit the CONFIG block below and run:   python train_nanodet.py
-    (No environment variables. Windows-friendly.)
+    (No environment variables needed. Windows-friendly.)
+    Prefer clicking? Run the GUI:           python train_nanodet_gui.py
+    (every field below — including fine-tuning — set in a window, live log under it.)
+
+Fine-tuning (дообучение): point WEIGHTS at a finished .ckpt to continue a model on
+new/expanded data, or RESUME at an interrupted run. Both also drivable from the GUI.
 
 What it does: converts your YOLO dataset to COCO JSON (no image copying), clones
 RangiLyu/nanodet, writes a custom config off the stock nanodet-plus-m, trains, then
@@ -39,6 +44,16 @@ CLASSES    = ["Birds", "Drones", "Dron2"]                   # in YOLO id order
 INPUT      = 416            # square input (NanoDet-Plus-m default 416; 320 = faster, less small-object reach)
 EPOCHS     = 200            # NanoDet converges faster than from-scratch YOLO; 100-300 typical
 REG_MAX    = 7             # DFL bins per side − 1 (nanodet-plus default 7) — keep unless you change the head
+LR         = None           # learning rate; None = keep the stock config's. Fine-tuning wants a lower one (e.g. 0.0005)
+
+# ── Fine-tuning / resuming (дообучение) ───────────────────────────────────────
+#   WEIGHTS — load these weights as a STARTING point and train fresh on your data
+#             (transfer-learning / continue a finished model on new/expanded data).
+#   RESUME  — continue an INTERRUPTED run, keeping optimizer state + epoch counter.
+#   Give a .ckpt path to either (leave "" to train from scratch). WEIGHTS is the
+#   usual "дообучение" lever; RESUME is for picking a crashed run back up.
+WEIGHTS    = ""             # e.g. r"C:\...\nanodet\workspace\custom\model_best\model_best.ckpt"
+RESUME     = ""             # e.g. r"C:\...\nanodet\workspace\custom\model_last.ckpt"
 
 # ── Hardware (Ultra 9 285K + RTX 5090 32GB + 128GB) ───────────────────────────
 DEVICE     = "gpu"          # "gpu" (RTX 5090, cu128 nightly torch) or "cpu"
@@ -64,9 +79,16 @@ if os.environ.get("TRAIN_CLASSES"):
     CLASSES = [c.strip() for c in os.environ["TRAIN_CLASSES"].split(",") if c.strip()]
 INPUT   = _envc("TRAIN_INPUT", INPUT, int)
 EPOCHS  = _envc("TRAIN_EPOCHS", EPOCHS, int)
+REG_MAX = _envc("TRAIN_REG_MAX", REG_MAX, int)
 BATCH   = _envc("TRAIN_BATCH", BATCH, int)
 WORKERS = _envc("TRAIN_WORKERS", WORKERS, int)
 DEVICE  = _envc("TRAIN_DEVICE", DEVICE)
+WEIGHTS = _envc("TRAIN_WEIGHTS", WEIGHTS)
+RESUME  = _envc("TRAIN_RESUME", RESUME)
+if os.environ.get("TRAIN_LR"):
+    LR = float(os.environ["TRAIN_LR"])
+if os.environ.get("TRAIN_GPU_IDS"):
+    GPU_IDS = [int(x) for x in re.split(r"[,\s]+", os.environ["TRAIN_GPU_IDS"].strip()) if x]
 if os.environ.get("TRAIN_EXPORT"):
     EXPORT = os.environ["TRAIN_EXPORT"].lower() not in ("0", "false", "no", "off")
 
@@ -181,6 +203,22 @@ def write_config(train_img, train_json, val_img, val_json):
     sub(r"workers_per_gpu:\s*\d+", f"workers_per_gpu: {WORKERS}", 0, "workers_per_gpu")
     sub(r"batchsize_per_gpu:\s*\d+", f"batchsize_per_gpu: {BATCH}", 0, "batchsize_per_gpu")
     sub(r"total_epochs:\s*\d+", f"total_epochs: {EPOCHS}", 0, "total_epochs")
+    if LR is not None:                       # first lr: under schedule.optimizer
+        sub(r"(?m)^(\s*lr:\s*).*$", lambda m: m.group(1) + repr(float(LR)), 1, "optimizer lr")
+
+    # Fine-tuning / resume: nanodet reads schedule.load_model (transfer weights, fresh
+    # schedule) and schedule.resume (continue a run). The stock config ships them as
+    # commented placeholders; drop any existing copy and re-insert under `schedule:`.
+    def set_schedule_key(key, value):
+        nonlocal s
+        s = re.sub(rf"(?m)^[ \t]*#?[ \t]*{key}:.*$\n?", "", s)          # strip old/commented
+        ins = f'\\g<1>\n  {key}: "{value}"'                             # quote: YAML-safe paths
+        s, c = re.subn(r"(?m)^(schedule:)[ \t]*$", ins, s, count=1)     # insert right under schedule:
+        print(f"  patch schedule.{key}: {value}" + ("  ⚠️ 'schedule:' not found" if c == 0 else ""))
+    if WEIGHTS:
+        set_schedule_key("load_model", os.path.abspath(WEIGHTS).replace("\\", "/"))
+    if RESUME:
+        set_schedule_key("resume", os.path.abspath(RESUME).replace("\\", "/"))
 
     os.makedirs(OUT, exist_ok=True)
     out_cfg = os.path.abspath(os.path.join(OUT, "custom.yml"))
@@ -207,7 +245,9 @@ def main():
             sys.exit("ERROR: git clone failed")
     cfg = write_config(tr_img, tr_json, va_img, va_json)
 
-    print(f"[3/4] Training on {DEVICE.upper()} (batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})…")
+    mode = (f"fine-tune from {os.path.basename(WEIGHTS)}" if WEIGHTS
+            else f"resume {os.path.basename(RESUME)}" if RESUME else "from scratch")
+    print(f"[3/4] Training on {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})…")
     if sh([sys.executable, "tools/train.py", cfg], cwd=REPO_DIR):
         sys.exit("ERROR: training failed (see output above). Common fixes: pip install "
                  "pytorch-lightning pycocotools omegaconf tensorboard; check the config warnings.")

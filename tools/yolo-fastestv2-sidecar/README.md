@@ -97,6 +97,7 @@ It prints `autotune: box=… score=…`; bake the winner into `YF_BOX_DECODE`/`Y
 | `YF_OUTPUTS` | head output blob names per stride (from `--inspect`) | common names |
 | `YF_INPUT_BLOB` | input blob name | first input |
 | `YF_THREADS` | inference threads | all cores |
+| `YOLO_FP16` | fp16 arithmetic + winograd/sgemm ncnn kernels (Pi 5 A76 = ARMv8.2 FP16; real FPS win). `0` = fp32 fallback | `1` |
 | `YOLO_CV_THREADS` | OpenCV threads (1 = don't fight inference for cores) | `1` |
 | `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
 | `YOLO_SOURCE` | `0`/`1` USB, `rpicam` (CSI), rtsp/http URL, GStreamer | `0` |

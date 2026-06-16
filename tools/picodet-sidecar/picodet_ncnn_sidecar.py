@@ -75,6 +75,22 @@ def env(key, default=None):
     return v if v not in (None, "") else default
 
 
+def _tune_ncnn_opt(opt):
+    """Squeeze more CPU FPS out of ncnn on a Pi 5. Its Cortex-A76 is ARMv8.2-A with
+    native FP16, so fp16 *arithmetic* (off by default in ncnn) plus packed layout and
+    winograd/sgemm convolution kernels are a real speedup with no accuracy hit worth
+    worrying about for detection. On by default; set YOLO_FP16=0 to fall back to fp32
+    if a particular board/model mis-computes."""
+    if env("YOLO_FP16", "1") == "0":
+        return
+    for flag in ("use_fp16_packed", "use_fp16_storage", "use_fp16_arithmetic",
+                 "use_packing_layout", "use_winograd_convolution", "use_sgemm_convolution"):
+        try:
+            setattr(opt, flag, True)
+        except Exception:
+            pass
+
+
 def label_for(cls, labels=None):
     if labels is not None and 0 <= cls < len(labels):
         return labels[cls]
@@ -154,6 +170,7 @@ class PicoDetNCNN:
         self.net = ncnn.Net()
         self.net.opt.num_threads = int(env("PICODET_THREADS", str(os.cpu_count() or 4)))
         self.net.opt.use_vulkan_compute = False
+        _tune_ncnn_opt(self.net.opt)
         param = env("PICODET_PARAM"); bin_ = env("PICODET_BIN")
         if not param or not bin_:
             sys.stderr.write("ERROR: set PICODET_PARAM and PICODET_BIN to your .param/.bin\n")

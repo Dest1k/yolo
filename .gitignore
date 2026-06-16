@@ -7,3 +7,6 @@ local.properties
 captures/
 __pycache__/
 *.pyc
+
+# dataset-generator GUI transient run config
+tools/dataset-generator/.gen_run_config.json

@@ -5,6 +5,28 @@
 
 ---
 
+## Документация — одна точка входа
+
+Этот README — единый хаб по всему проекту: приложения, сайдкары для одноплатников,
+**обучение своих моделей** и **генерация синтетического датасета**. Подробные
+справочники по каждому инструменту лежат рядом с ним (ссылки в таблице).
+
+| Тема | Раздел / папка |
+|---|---|
+| Android- и Desktop-приложения | [Android](#android) · [Desktop](#desktop) |
+| Одноплатник (Raspberry Pi 5, headless) | [Одноплатник (Raspberry Pi)](#одноплатник-raspberry-pi--headless-режим) |
+| **Обучение своих моделей** (датасет → модель → Pi/телефон) | [Обучение своих моделей](#обучение-своих-моделей--от-датасета-до-pi-5) |
+| **Графическая обучалка NanoDet** (Windows, окно + лог, дообучение) | [Графическая обучалка](#графическая-обучалка-nanodet-windows) |
+| **Генератор синтетического датасета** (FLUX + LLM + авторазметка, с GUI) | [`tools/dataset-generator/`](tools/dataset-generator/README.md) |
+| Сайдкар YOLO-FastestV2 (макс. FPS на Pi 5) | [`tools/yolo-fastestv2-sidecar/`](tools/yolo-fastestv2-sidecar/README.md) |
+| Сайдкар NanoDet-Plus (точность по мелочи) | [`tools/nanodet-sidecar/`](tools/nanodet-sidecar/README.md) |
+| Сайдкар PicoDet | [`tools/picodet-sidecar/`](tools/picodet-sidecar/README.md) |
+| Сайдкар MediaPipe (EfficientDet-Lite) | [`tools/mediapipe-sidecar/`](tools/mediapipe-sidecar/README.md) |
+| Сайдкар RKNN (Orange Pi 5 / NPU) | [`tools/rknn-sidecar/`](tools/rknn-sidecar/README.md) |
+| Command center — единый TUI для всего стека | [`tools/command-center/`](tools/command-center/README.md) |
+
+---
+
 ## Ключевые фишки
 
 ### MJPEG-сервер (трансляция с боксами)
@@ -602,7 +624,9 @@ python3 tools/yolo-fastestv2-sidecar/get_model.py
 работают на Pi 5, в desktop-headless (`YOLO_DECODE=nanodet` для NanoDet) и на телефоне.
 
 > 📘 **Пошаговый мануал от датасета до рабочей модели** (обучение на RTX 5090 →
-> деплой на Pi 5 / headless / телефон): [`TRAINING.md`](TRAINING.md).
+> деплой на Pi 5 / headless / телефон), включая **графическую обучалку** и
+> **генератор синтетического датасета** — ниже:
+> [Обучение своих моделей](#обучение-своих-моделей--от-датасета-до-pi-5).
 
 ---
 
@@ -641,6 +665,143 @@ onnx2ncnn model-sim.onnx model.param model.bin
 для NCNN) — в README соответствующего сайдкара. NCNN-сайдкары при первом запуске
 сами определяют структуру модели (`auto: …`), а формулу декода можно подобрать
 флагом `--autotune` — конвертация остаётся единственным ручным шагом.
+
+---
+
+## Обучение своих моделей — от датасета до Pi 5
+
+Парадигма одна для всех детекторов: **правишь `CONFIG`-блок (или жмёшь кнопки в
+графической обучалке) и запускаешь один скрипт** — он сам соберёт данные, склонирует
+upstream-репозиторий, обучит и **экспортирует проверенную ncnn-модель**. Обучение —
+на Windows + NVIDIA GPU (включая Blackwell / RTX 50xx на сборке cu128 nightly),
+инференс — на Raspberry Pi 5 (CPU). Та же `.param`/`.bin` работает и в desktop-headless,
+и в Android-приложении.
+
+### 0. Окружение на машине обучения (Windows, в venv)
+```bash
+python -m venv yolo-venv
+yolo-venv\Scripts\activate
+# PyTorch для Blackwell (RTX 50xx) — обязательно сборка cu128:
+pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+# общие инструменты экспорта/проверки:
+pip install opencv-python numpy onnx onnxsim ncnn pnnx
+# NanoDet дополнительно:
+pip install pytorch-lightning pycocotools omegaconf tensorboard
+```
+Проверь GPU: `python -c "import torch; print(torch.cuda.is_available())"` → `True`.
+Если `False` — стоит не та сборка torch (нужна **cu128 nightly**).
+
+### 1. Датасет (YOLO-формат)
+```
+<dataset>/
+  images/train/*.jpg   images/val/*.jpg
+  labels/train/*.txt   labels/val/*.txt
+```
+Каждый `.txt` — по строке на объект: `class_id  xc yc w h` (нормировано 0..1).
+Имена классов задаются списком в порядке id. Нужен и `val` (10–20% данных). Нет
+своего датасета? Сгенерируй синтетику — см. [генератор](#генератор-синтетического-датасета-flux--llm--авторазметка).
+
+### 2. Выбор модели
+| | Когда брать | FPS @Pi5 | Мелкие объекты | Где работает |
+|---|---|---|---|---|
+| **YOLO-FastestV2** | нужен максимальный FPS | ★★★ (~78 @320) | ★ | Pi + headless + телефон |
+| **NanoDet-Plus** | нужна точность по мелочи | ★★ (≥30) | ★★★ | Pi + headless + телефон |
+
+Рекомендация: начни с **FastestV2**; теряет мелкие объекты — переходи на **NanoDet-Plus**
+(FPN, страйд-8). Обе обучаются на Blackwell и экспортируются в ncnn одной командой.
+Проверить сайдкар ещё до обучения можно готовой COCO-моделью: `python tools/<sidecar>/get_model.py`.
+
+### 3. Запуск обучения
+
+#### Графическая обучалка (NanoDet, Windows)
+Не хочешь править файлы — открой окно:
+```bash
+cd tools/nanodet-sidecar
+python train_nanodet_gui.py
+```
+В окне задаются **все** параметры (датасет с кнопкой «Browse», классы, размер входа,
+эпохи, батч, воркеры, устройство, GPU ids, learning rate, reg_max, авто-экспорт), есть
+отдельный блок **дообучения**, а **снизу — живой лог** всего процесса (конвертация
+данных → обучение → экспорт → `VERIFY OK`). Под капотом запускается тот же
+`train_nanodet.py`, поля просто прокидываются как переменные `TRAIN_*` — поэтому
+консольный и оконный пути идентичны, а значения полей запоминаются между запусками.
+
+Нужен только Python с **tkinter** (на Windows идёт из коробки; Linux —
+`sudo apt install python3-tk`). torch/nanodet нужны самой обучалке, а не окну.
+
+#### Из консоли
+Открой `train_yolofastest.py` или `train_nanodet.py`, в `CONFIG`-блоке задай
+`DATASET`, `CLASSES`, `INPUT`, `EPOCHS` (железо уже выставлено под 285K/5090), и:
+```bash
+cd tools/yolo-fastestv2-sidecar && python train_yolofastest.py   # FastestV2
+cd tools/nanodet-sidecar        && python train_nanodet.py       # NanoDet-Plus
+```
+Скрипт: `[1/4]` готовит данные · `[2/4]` клонирует репозиторий · `[3/4]` обучает ·
+`[4/4]` **экспортирует и проверяет** ncnn-модель.
+
+#### Дообучение (continue-training / дообучение)
+Чтобы продолжить уже обученную модель на новых/расширенных данных — укажи путь к
+готовому `.ckpt`:
+- **`WEIGHTS`** (env `TRAIN_WEIGHTS`) — стартовать с этих весов и доучиться на твоих
+  данных (transfer learning). Это и есть обычное «дообучение».
+- **`RESUME`** (env `TRAIN_RESUME`) — продолжить **прерванный** запуск с сохранением
+  оптимизатора и счётчика эпох.
+
+В графической обучалке это переключатель **Fine-tuning / resume** с выбором чекпойнта.
+
+### 4. Результат экспорта
+В конце увидишь **`VERIFY OK`** и пути к файлам: `*.param` + `*.bin` (оптимизированная
+fp16 ncnn-модель) и `classes.txt`/`custom.names`. `VERIFY OK` = модель реально
+грузится и блобы извлекаются — можно нести на Pi. **Инференс должен идти на том же
+`INPUT`, что и обучение** (иначе боксы поедут).
+
+### 5. Запуск на Raspberry Pi 5
+Скопируй `*.param`, `*.bin` и файл имён классов на Pi, поставь рантайм
+`pip3 install ncnn numpy opencv-python` и запусти сайдкар:
+```bash
+# NanoDet-Plus:
+ND_PARAM=nanodet.param ND_BIN=nanodet.bin ND_INPUT=416 \
+  YOLO_LABELS=classes.txt YOLO_SOURCE=rpicam \
+  python3 tools/nanodet-sidecar/nanodet_ncnn_sidecar.py
+# YOLO-FastestV2:
+YF_PARAM=yolofastestv2.param YF_BIN=yolofastestv2.bin YF_INPUT=416 \
+  YOLO_LABELS=custom.names YOLO_SOURCE=rpicam \
+  python3 tools/yolo-fastestv2-sidecar/yolofastest_ncnn_sidecar.py
+```
+Открой `http://<ip-пи>:8080`. Боксов нет / кривые — сначала `--inspect` (перебирает
+размеры входа и печатает форму выхода; чаще всего `*_INPUT` ≠ размеру экспорта).
+
+### 6. Desktop-headless и телефон
+**Headless** (JVM, ONNX/PT) — берёт промежуточный `*-sim.onnx` из экспорта; для NanoDet
+укажи `YOLO_DECODE=nanodet ND_REG_MAX=7`. **Телефон**: перекинь `*.param`+`*.bin`,
+«Определить выходы», выбери версию (FastestV2/NanoDet), размер входа = `INPUT`, число
+классов под модель.
+
+### Быстродействие на Pi 5
+- модель **nano**, вход **320/256** — главный рычаг;
+- ncnn-сайдкары теперь **по умолчанию включают fp16-арифметику + winograd/sgemm**
+  ядра (Cortex-A76 = ARMv8.2 FP16) — заметный прирост FPS без потери качества;
+  откатиться на fp32 — `YOLO_FP16=0`;
+- `*_THREADS=4` (по числу ядер A76), `YOLO_CV_THREADS=1` — чтобы OpenCV не отбирал
+  ядра у инференса;
+- захват и детекция расцеплены — видео идёт на полном FPS камеры даже когда детектор
+  считает медленнее; запись — на **аппаратный H.264-энкодер** платы (`YOLO_RECORD`).
+
+### Генератор синтетического датасета (FLUX + LLM + авторазметка)
+Нет своих данных — собери их сам: **`tools/dataset-generator/`** генерирует картинки
+через **FLUX.1-schnell**, промпты к ним пишет локальная **LLM** (LM Studio / любой
+OpenAI-совместимый эндпоинт), а боксы расставляет **YOLO-World** (zero-shot) — на
+выходе готовый YOLO-датасет с `dataset.yaml`. Три фазы (промпты → картинки →
+разметка) включаются по отдельности, длинный прогон стримится на диск и
+возобновляется.
+
+**Всё управляется из окна** — `python tools/dataset-generator/generate_dataset_gui.py`:
+вкладки Run / LLM / Image / **Prompts** / Labeling и живой лог снизу. На вкладке
+**Prompts** — полный редактор словаря промптов: типы дронов, материалы, фоны, погода,
+состояния, ракурсы, **микс масштабов** (вес + фраза, дефицит-планировщик держит
+пропорции точно) и сырой шаблон system-prompt. Окно пишет JSON-конфиг и запускает
+движок `generate_dataset.py` (его же можно гонять headless: `python generate_dataset.py config.json`).
+Подробности и требования — в [`tools/dataset-generator/README.md`](tools/dataset-generator/README.md).
 
 ---
 
