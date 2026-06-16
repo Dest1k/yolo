@@ -48,6 +48,14 @@ from urllib.parse import urlparse, parse_qs
 import numpy as np
 import cv2
 
+# Optional Betaflight flight-controller backend (follow-me flight). Importing the
+# module is cheap — pyserial is only pulled in when an FC is actually opened.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import flight_controller
+except Exception:
+    flight_controller = None
+
 COCO = [
     "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
     "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
@@ -837,7 +845,9 @@ class State:
         self.lock = threading.Lock(); self.frame = None; self.frame_seq = 0; self.dets = []
         self.stream_fps = 0; self.det_fps = 0; self.labels = None; self.jpeg_q = 75
         self.gimbal = None; self.follower = None; self.tracking = False; self.target = None
+        self.drone = None; self.fc = None        # Betaflight follow-me flight controller
         self.obj = ObjectTracker(); self.manual_req = None; self.manual_clear = False; self.manual_box = None
+        self.pick_request = None                  # click-to-pick among multiple targets (visual-only mode)
         self.running = True
 
 
@@ -916,21 +926,50 @@ def capture_loop(state, cap):
     cap.release()
 
 
+def _pick_for_hud(state, dets, prev, fw, fh):
+    """Target pick for the visual-only lock (no actuator). A fresh mouse click
+    (state.pick_request) selects the detection under the cursor — so you can choose
+    among several targets; otherwise it stays on the previous one / the largest."""
+    req = state.pick_request
+    if req is not None and dets:
+        state.pick_request = None
+        px, py = req[0] * fw, req[1] * fh
+        inside = [d for d in dets if d[0] <= px <= d[2] and d[1] <= py <= d[3]]
+        pool = inside if inside else dets
+        return min(pool, key=lambda d: ((d[0] + d[2]) / 2 - px) ** 2 + ((d[1] + d[3]) / 2 - py) ** 2)
+    if flight_controller is not None:
+        return flight_controller.pick_target(dets, prev, fw)
+    return max(dets, key=lambda d: (d[2] - d[0]) * (d[3] - d[1])) if dets else None
+
+
 def follow_loop(state):
+    """Drives whatever actuators exist while tracking is on: the SIYI gimbal and/or a
+    Betaflight FC (follow-the-target flight). With NEITHER it still picks and shows a
+    target — so lock-on works on a plain Pi camera with no gimbal at all."""
     while state.running:
-        if state.tracking and state.follower is not None:
+        if state.tracking:
             with state.lock:
                 frame = state.frame; dets = list(state.dets)
             mb = state.manual_box
-            if mb is not None:
+            if mb is not None:                       # manual drag-lock overrides detections
                 dets = [(mb[0], mb[1], mb[2], mb[3], 1.0, -1)]
             if frame is not None:
-                h, w = frame.shape[:2]; state.target = state.follower.step(dets, w, h)
+                h, w = frame.shape[:2]
+                target = None
+                if state.follower is not None:
+                    target = state.follower.step(dets, w, h)
+                if state.drone is not None:
+                    target = state.drone.step(dets, w, h)
+                if state.follower is None and state.drone is None:
+                    target = _pick_for_hud(state, dets, state.target, w, h)  # visual-only lock for the HUD
+                state.target = target
             else:
                 state.target = None
         else:
             if state.follower is not None:
                 state.follower.stop()
+            if state.drone is not None:
+                state.drone.stop()
             state.target = None
         time.sleep(0.066)
 
@@ -986,6 +1025,8 @@ def _status_json(state):
         "streamFps": int(state.stream_fps), "detFps": int(state.det_fps), "ndet": len(state.dets),
         "firmware": (g.firmware if g else "") or "",
         "hardwareId": (g.hardware_id if g else "") or "",
+        "hasFC": state.fc is not None,
+        "fcControlling": bool(state.fc.status().get("active")) if state.fc is not None else False,
     }, allow_nan=False)
 
 
@@ -1048,8 +1089,12 @@ def make_handler(state):
                 elif path == "/track":
                     on = q.get("on"); state.tracking = (on in ("1", "true")) if on is not None else (not state.tracking)
                 elif path == "/pick":
-                    if fol is not None and "nx" in q and "ny" in q:
-                        fol.request_pick(float(q["nx"]), float(q["ny"])); state.tracking = True
+                    if "nx" in q and "ny" in q:
+                        nx, ny = float(q["nx"]), float(q["ny"])
+                        if fol is not None: fol.request_pick(nx, ny)
+                        if state.drone is not None: state.drone.request_pick(nx, ny)
+                        state.pick_request = (nx, ny)      # also for the visual-only HUD lock
+                        state.tracking = True
                 elif g is None:
                     pass
                 elif path == "/rotate": g.rotate(int(float(q.get("yaw", 0))), int(float(q.get("pitch", 0))))
@@ -1099,8 +1144,8 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 </style></head><body>
 <img id="vid" alt="stream"><div id="sel"></div>
 <div id="st" class="ov">loading...</div>
-<div id="trk" class="ov">TRACK OFF <span style="opacity:.7">(Space)</span></div>
-<div id="hint" class="ov">drag = lock target &middot; C = clear &middot; H = gimbal panel</div>
+<div id="trk" class="ov">LOCK OFF <span style="opacity:.7">(Space)</span></div>
+<div id="hint" class="ov">Space = lock-on &middot; drag/click = pick target &middot; C = clear &middot; H = gimbal panel</div>
 <div id="pad" class="ov">
 <span></span><button data-y="0" data-p="60">^</button><span></span>
 <button data-y="-60" data-p="0">&lt;</button><button onclick="g('/center')">o</button><button data-y="60" data-p="0">&gt;</button>
@@ -1118,18 +1163,19 @@ var vid=document.getElementById('vid'),sel=document.getElementById('sel');vid.sr
 var HASGIMBAL=false,showG=false,gotStatus=false;
 function g(u){return fetch(u).then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
 function fail(){if(!gotStatus)document.getElementById('st').textContent='disconnected — retrying…'}
-function applyG(){['pad','side','top','trk'].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display=(HASGIMBAL&&showG)?'':'none'})}
+function applyG(){['pad','side','top'].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display=(HASGIMBAL&&showG)?'':'none'})}
 function show(s){gotStatus=true;var st=document.getElementById('st');
  if(s.hasGimbal){st.textContent='yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\\nmode '+s.mode+'  rec '+s.recording}
- else{st.textContent='NanoDet-Plus (NCNN) — no gimbal'}
+ else if(s.hasFC){st.textContent='NanoDet-Plus (NCNN) — Betaflight FC'+(s.fcControlling?' · FLYING':' · hold')}
+ else{st.textContent='NanoDet-Plus (NCNN) — camera only'}
  if(s.hasGimbal!==HASGIMBAL){HASGIMBAL=s.hasGimbal;showG=s.hasGimbal;applyG()}
- var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'* TRACK ON ':'TRACK OFF ');
+ var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'\\u25cf LOCK ON ':'LOCK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
 applyG();
 document.addEventListener('keydown',function(e){
  if(e.key==='h'||e.key==='H'){showG=!showG;applyG()}
  else if(e.key==='c'||e.key==='C'||e.key==='Escape'){g('/unlock')}
- else if(e.code==='Space'||e.key===' '){e.preventDefault();if(HASGIMBAL)g('/track')}});
+ else if(e.code==='Space'||e.key===' '){e.preventDefault();g('/track')}});
 function mapPt(e){var nw=vid.naturalWidth,nh=vid.naturalHeight;if(!nw||!nh)return null;
  var r=vid.getBoundingClientRect();var sc=Math.min(r.width/nw,r.height/nh);var dw=nw*sc,dh=nh*sc;
  var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;var x=(e.clientX-ox)/dw,y=(e.clientY-oy)/dh;
@@ -1143,7 +1189,7 @@ vid.addEventListener('pointermove',function(e){if(!drag)return;
 vid.addEventListener('pointerup',function(e){if(!drag)return;sel.style.display='none';
  var p=mapPt(e),moved=Math.abs(e.clientX-drag.sx)+Math.abs(e.clientY-drag.sy);
  if(p&&moved>8)g('/lock?x1='+drag.x1.toFixed(4)+'&y1='+drag.y1.toFixed(4)+'&x2='+p.x.toFixed(4)+'&y2='+p.y.toFixed(4));
- else if(p&&HASGIMBAL)g('/pick?nx='+p.x.toFixed(4)+'&ny='+p.y.toFixed(4));
+ else if(p)g('/pick?nx='+p.x.toFixed(4)+'&ny='+p.y.toFixed(4));
  drag=null});
 function hold(el,dn,up){if(!el)return;el.onmousedown=dn;el.onmouseup=up;el.onmouseleave=up;
  el.ontouchstart=function(e){e.preventDefault();dn()};el.ontouchend=function(e){e.preventDefault();up()}}
@@ -1228,8 +1274,22 @@ def main():
             state.gimbal, max_speed=int(env("YOLO_TRACK_SPEED", "40")),
             invert_yaw=env("YOLO_TRACK_INVERT_YAW", "off").lower() == "on",
             invert_pitch=env("YOLO_TRACK_INVERT_PITCH", "off").lower() == "on")
-        threading.Thread(target=follow_loop, args=(state,), daemon=True).start()
         print(f"  gimbal control: enabled ({g_host}:{g_port}) — Space to follow")
+
+    # Betaflight follow-me flight controller (FC=betaflight). Independent of the
+    # gimbal — works with a plain Pi camera. Drives yaw + forward/back over MSP.
+    if flight_controller is not None:
+        made = flight_controller.make_follower()
+        if made:
+            state.fc, state.drone = made
+            flight_controller.print_safety_banner(state.fc)
+            print("  flight controller: ENABLED — Space (track) to follow the locked target")
+    elif (env("FC", "") or "").lower() not in ("", "off", "0", "none"):
+        sys.stderr.write("WARNING: FC set but flight_controller.py not found next to the sidecar.\n")
+
+    # Lock-on works with NO actuator too (plain camera): always run the follow loop so
+    # Space picks/holds a target and the gimbal/FC act on it when present.
+    threading.Thread(target=follow_loop, args=(state,), daemon=True).start()
 
     threading.Thread(target=capture_loop, args=(state, cap), daemon=True).start()
     threading.Thread(target=inference_loop, args=(state, detector, track_on, filter_set), daemon=True).start()
@@ -1248,6 +1308,8 @@ def main():
         state.running = False
         if state.gimbal is not None:
             state.gimbal.close()
+        if state.fc is not None:
+            state.fc.close()                 # centre sticks + close serial → FC fails safe
 
 
 if __name__ == "__main__":

@@ -110,6 +110,47 @@ PyTorch + Lightning, so the cu128 nightly torch trains it natively on Blackwell.
 > config schema is stable but not frozen — the trainer prints every field it patches;
 > if it warns a key wasn't found, open `nd_data/custom.yml` and set it by hand.
 
+## Follow-me flight (Betaflight FC) — lock-on without a gimbal
+
+Lock-on now works with **no gimbal at all** — a plain Pi camera. Press **Space**
+(or the `track` button) and the sidecar locks the picked/clicked target and shows the
+crosshair. With a **Betaflight** flight controller wired in (`flight_controller.py`),
+that lock also **flies the drone**: it yaws to keep the person centred and pitches
+forward/back to hold distance (box height = range proxy — person walks away ⇒ fly
+forward, comes closer ⇒ back off).
+
+**Multiple people in frame?** Click the one you want — the lock switches to that
+detection (works with or without an FC); drag a box to lock an arbitrary object.
+
+Use a **COCO model** so `person` is a class and add `YOLO_FILTER=person`. Enable the FC:
+
+```bash
+pip3 install pyserial
+ND_PARAM=nanodet.param ND_BIN=nanodet.bin ND_INPUT=320 \
+  YOLO_LABELS=coco.names YOLO_FILTER=person YOLO_SOURCE=rpicam \
+  FC=betaflight FC_PORT=/dev/ttyAMA0 \
+  python3 nanodet_ncnn_sidecar.py
+# open http://<pi-ip>:8080 · Space = lock-on · click a person to pick · C = clear
+```
+
+| FC var | Meaning | Default |
+|---|---|---|
+| `FC` | `betaflight` to enable, else off | off |
+| `FC_PORT` | serial port (`/dev/ttyAMA0` UART, `/dev/ttyACM0` USB) | `/dev/ttyAMA0` |
+| `FC_BAUD` / `FC_RATE` | MSP baud / RC stream rate (Hz) | `115200` / `50` |
+| `FC_MAX_YAW` / `FC_MAX_PITCH` | max stick offset from centre (µs) | `150` / `120` |
+| `FC_KP_YAW` / `FC_KP_PITCH` | P-gains (µs per unit error) | `360` / `500` |
+| `FC_TARGET_FILL` | desired box-height / frame-height (distance setpoint) | `0.45` |
+| `FC_YAW_DEADZONE` / `FC_FILL_DEADZONE` | no-move bands | `0.06` / `0.08` |
+| `FC_INVERT_YAW` / `FC_INVERT_PITCH` | flip an axis if it moves the wrong way | off |
+| `FC_CH_ROLL/PITCH/THROTTLE/YAW` | channel indices (Betaflight `map`, default AETR) | `0/1/2/3` |
+
+**Wiring (Pi 5 ↔ FC) and full Betaflight setup (MSP Override on an AUX switch, the
+channel mask, failsafe) + a SAFETY checklist** are in the main README:
+[Follow-me на дроне (Betaflight)](../../README.md#follow-me-дрон-следит-за-человеком-betaflight-fc).
+The MSP framing and the follow controller are unit-tested; the flight itself is not —
+**test props off first.**
+
 ## 4. Where it runs
 
 - **Pi 5 sidecar** — yes (this folder).
