@@ -28,6 +28,13 @@ import shutil
 import subprocess
 import sys
 
+# Don't let a legacy Windows console code page (cp1251 etc.) crash on the arrows we log.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 
 def _log(msg): print(msg, flush=True)
 

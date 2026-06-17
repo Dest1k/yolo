@@ -32,6 +32,13 @@ import sys
 import glob
 import subprocess
 
+# Don't let a legacy Windows console code page (cp1251 etc.) crash on the arrows we print.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 # ========================= CONFIG — EDIT ME ==================================
 DATASET    = r"C:\Users\dest\Desktop\test\merged_dataset"   # YOLO dataset root (images/{train,val}, labels/{train,val})
 CLASSES    = ["Birds", "Drones", "Dron2"]                   # in YOLO id order

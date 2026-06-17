@@ -37,6 +37,15 @@ import json
 import shutil
 import subprocess
 
+# Windows consoles default to a legacy code page (e.g. cp1251) that can't encode the
+# arrows/emoji we print -> UnicodeEncodeError. Replace un-encodable chars instead of
+# crashing training. (Also covers export_ncnn.py, imported in-process below.)
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 # ========================= CONFIG — EDIT ME ==================================
 DATASET    = r"C:\Users\dest\Desktop\test\merged_dataset"   # YOLO root (images/{train,val} + labels/{train,val})
 CLASSES    = ["Birds", "Drones", "Dron2"]                   # in YOLO id order
@@ -188,7 +197,7 @@ def write_config(train_img, train_json, val_img, val_json):
     def sub(pattern, repl, n, what, flags=0):
         nonlocal s
         s, c = re.subn(pattern, repl, s, count=n, flags=flags)
-        print(f"  patch {what}: {c} site(s)" + ("  ⚠️ NOT FOUND" if c == 0 else ""))
+        print(f"  patch {what}: {c} site(s)" + ("  [!] NOT FOUND" if c == 0 else ""))
 
     names = ", ".join(f"'{c}'" for c in CLASSES)
     sub(r"(?m)^save_dir:.*$", "save_dir: workspace/custom", 1, "save_dir")
@@ -214,7 +223,7 @@ def write_config(train_img, train_json, val_img, val_json):
         s = re.sub(rf"(?m)^[ \t]*#?[ \t]*{key}:.*$\n?", "", s)          # strip old/commented
         ins = f'\\g<1>\n  {key}: "{value}"'                             # quote: YAML-safe paths
         s, c = re.subn(r"(?m)^(schedule:)[ \t]*$", ins, s, count=1)     # insert right under schedule:
-        print(f"  patch schedule.{key}: {value}" + ("  ⚠️ 'schedule:' not found" if c == 0 else ""))
+        print(f"  patch schedule.{key}: {value}" + ("  [!] 'schedule:' not found" if c == 0 else ""))
     if WEIGHTS:
         set_schedule_key("load_model", os.path.abspath(WEIGHTS).replace("\\", "/"))
     if RESUME:
@@ -223,12 +232,12 @@ def write_config(train_img, train_json, val_img, val_json):
     os.makedirs(OUT, exist_ok=True)
     out_cfg = os.path.abspath(os.path.join(OUT, "custom.yml"))
     open(out_cfg, "w", encoding="utf-8").write(s)
-    print(f"  config → {out_cfg}")
+    print(f"  config -> {out_cfg}")
     return out_cfg
 
 
 def main():
-    print("[1/4] Converting dataset to COCO…")
+    print("[1/4] Converting dataset to COCO...")
     if not os.path.isdir(DATASET):
         sys.exit(f"ERROR: DATASET not found: {DATASET}")
     tr_img, tr_json, n_tr = build_coco("train")
@@ -239,7 +248,7 @@ def main():
         print("  WARNING: no val split found — using train as val (metrics will be optimistic)")
         va_img, va_json = tr_img, tr_json
 
-    print("[2/4] Getting the repo (clone if missing)…")
+    print("[2/4] Getting the repo (clone if missing)...")
     if not os.path.isdir(REPO_DIR):
         if sh(["git", "clone", "--depth", "1", "https://github.com/RangiLyu/nanodet.git", REPO_DIR]):
             sys.exit("ERROR: git clone failed")
@@ -247,13 +256,13 @@ def main():
 
     mode = (f"fine-tune from {os.path.basename(WEIGHTS)}" if WEIGHTS
             else f"resume {os.path.basename(RESUME)}" if RESUME else "from scratch")
-    print(f"[3/4] Training on {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})…")
+    print(f"[3/4] Training on {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})...")
     if sh([sys.executable, "tools/train.py", cfg], cwd=REPO_DIR):
         sys.exit("ERROR: training failed (see output above). Common fixes: pip install "
                  "pytorch-lightning pycocotools omegaconf tensorboard; check the config warnings.")
 
     if EXPORT:
-        print("[4/4] Exporting an optimised, verified NCNN model…")
+        print("[4/4] Exporting an optimised, verified NCNN model...")
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         try:
             import export_ncnn
@@ -264,14 +273,14 @@ def main():
             param, binf = res
             names = os.path.abspath(os.path.join(OUT, "classes.txt"))
             open(names, "w").write("\n".join(CLASSES) + "\n")
-            print("\n✅ Done — trained AND exported. Run it:")
+            print("\n[OK] Done - trained AND exported. Run it:")
             print(f"  Pi sidecar:  ND_PARAM={param} ND_BIN={binf} ND_INPUT={INPUT} \\")
             print(f"               YOLO_LABELS={names} python3 nanodet_ncnn_sidecar.py --inspect")
-            print(f"  Phone:       NanoDet needs an Android decoder (GFL/DFL) — Pi-only for now.")
+            print(f"  Phone:       NanoDet needs an Android decoder (GFL/DFL) - Pi-only for now.")
             return
-        print("  Auto-export didn't complete — run it manually:")
+        print("  Auto-export didn't complete - run it manually:")
     else:
-        print("[4/4] Export (EXPORT=False) — run manually:")
+        print("[4/4] Export (EXPORT=False) - run manually:")
     print(f"  python export_ncnn.py --repo {REPO_DIR} --cfg {cfg} --out {OUT_STEM} "
           f"--input {INPUT} --reg-max {REG_MAX} --classes {len(CLASSES)}")
 

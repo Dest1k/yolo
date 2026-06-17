@@ -34,11 +34,13 @@ import copy
 import random
 import subprocess
 
-# Instant, unbuffered console (so the GUI's log streams line-by-line).
-try:
-    sys.stdout.reconfigure(line_buffering=True)
-except Exception:
-    pass
+# Instant, unbuffered console (so the GUI's log streams line-by-line), and don't let a
+# legacy Windows code page (cp1251 etc.) crash on any non-ASCII we print.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace", line_buffering=True)
+    except Exception:
+        pass
 
 
 # =====================================================================
