@@ -63,6 +63,26 @@ ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py --inspect
 | `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
 | `YOLO_SOURCE` / `YOLO_LABELS` / `YOLO_CONF` / `YOLO_NMS` / `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | as the other sidecars | |
 
+### Any video URL (ffmpeg + yt-dlp) — great for testing models
+
+`YOLO_SOURCE` ruthlessly ingests almost anything. Besides `rpicam` and a webcam index
+(`0`), give it **any URL or file** and it's piped through system **ffmpeg** (HLS `.m3u8`,
+DASH, RTSP, RTMP, MJPEG, `.mp4`/`.mkv`, …); **site pages** (YouTube/Twitch/…) are first
+resolved to a direct stream with **yt-dlp**. Newest-frame-wins (low latency) and ffmpeg
+auto-reconnects if the stream drops.
+
+```bash
+sudo apt install -y ffmpeg          # required for URL ingestion
+pip3 install -U yt-dlp              # only for site pages (YouTube/Twitch/…)
+
+YOLO_SOURCE="https://youtu.be/XXXX"                ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py
+YOLO_SOURCE="https://cam/stream.m3u8"              …
+YOLO_SOURCE="rtsp://192.168.1.10:554/h264"         …
+YOLO_SOURCE="/home/dest/test_clip.mp4"             …
+```
+`YOLO_FFMPEG=0` falls back to OpenCV's own backend; `YOLO_YTDLP_FORMAT` overrides the
+yt-dlp format (default `best`).
+
 The decode mirrors RangiLyu/nanodet's `demo_ncnn`: per grid point, argmax class
 score (sigmoid auto-applied if the export left logits), then each of the 4 box sides
 is a softmax-integral over `reg_max+1` bins → distance from the cell centre. The

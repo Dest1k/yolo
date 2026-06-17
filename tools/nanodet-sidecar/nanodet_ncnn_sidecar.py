@@ -40,6 +40,7 @@ import socket
 import struct
 import math
 import json
+import shutil
 import threading
 import subprocess
 from collections import deque
@@ -965,6 +966,126 @@ class RpicamCapture:
             self.proc.terminate()
 
 
+def _resolve_stream_url(url):
+    """Turn a site/page URL (YouTube, Twitch, …) into a direct media URL via yt-dlp.
+    Direct media URLs and non-http sources are returned unchanged. Best effort — on any
+    failure we just hand the original URL to ffmpeg, which copes with a lot on its own."""
+    low = url.split("?", 1)[0].lower()
+    if not url.lower().startswith(("http://", "https://")):
+        return url
+    if low.endswith((".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".ts", ".flv",
+                      ".mjpg", ".mjpeg", ".jpg", ".jpeg")):
+        return url                                    # already a direct stream/file
+    exe = shutil.which("yt-dlp") or shutil.which("youtube-dl")
+    if not exe:
+        return url
+    try:
+        fmt = env("YOLO_YTDLP_FORMAT", "best")
+        out = subprocess.run([exe, "-g", "-f", fmt, url], capture_output=True, text=True, timeout=40)
+        cand = [ln.strip() for ln in out.stdout.splitlines()
+                if ln.strip().startswith(("http", "rtmp", "rtsp"))]
+        if cand:
+            print(f"  yt-dlp resolved the page → {cand[0][:80]}…")
+            return cand[0]
+        if out.stderr.strip():
+            print(f"  yt-dlp: {out.stderr.strip().splitlines()[-1][:120]}")
+    except Exception as e:
+        print(f"  yt-dlp resolve failed ({e}); using the URL as-is")
+    return url
+
+
+class FFmpegCapture:
+    """Ruthless universal source: pipe ANY URL/file through system ffmpeg and read the
+    decoded video as a stream of JPEGs (newest-frame-wins for low latency). ffmpeg
+    handles HLS/DASH/RTSP/RTMP/MJPEG/mp4/mkv/… ; yt-dlp first resolves site pages. Auto
+    re-launches ffmpeg if the stream drops. Needs `ffmpeg` in PATH (`yt-dlp` for sites)."""
+
+    def __init__(self, url, w, h, fps):
+        self.src = _resolve_stream_url(url)
+        self.label = "ffmpeg"
+        self.err = deque(maxlen=40)
+        self._hinted = False
+        self._last_spawn = 0.0
+        s = self.src.lower()
+        pre = ["-fflags", "nobuffer", "-flags", "low_delay"]
+        if s.startswith(("rtsp://",)):
+            pre = ["-rtsp_transport", "tcp"] + pre
+        if s.startswith(("http://", "https://")):
+            pre = ["-reconnect", "1", "-reconnect_streamed", "1",
+                   "-reconnect_delay_max", "5"] + pre
+        self.cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + pre +
+                    ["-i", self.src, "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "-"])
+        self.buf = bytearray()
+        self.proc = None
+        self._spawn()
+
+    def _spawn(self):
+        self._last_spawn = time.time()
+        try:
+            self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, bufsize=0)
+            self.buf = bytearray()
+            threading.Thread(target=self._drain_err, daemon=True).start()
+        except FileNotFoundError:
+            self.proc = None
+            sys.stderr.write("ERROR: ffmpeg not found — install it.  sudo apt install -y ffmpeg\n")
+
+    def _drain_err(self):
+        p = self.proc
+        try:
+            for line in p.stderr:
+                self.err.append(line.decode("utf-8", "replace").rstrip())
+        except Exception:
+            pass
+
+    def _hint(self):
+        if self._hinted:
+            return
+        self._hinted = True
+        tail = " | ".join(list(self.err)[-6:])
+        sys.stderr.write(
+            f"WARNING: ffmpeg got no frames from {self.src[:70]}…\n"
+            f"  ffmpeg said: {tail or '(no output)'}\n"
+            "  For site pages (YouTube/Twitch/…) install yt-dlp:  pip3 install -U yt-dlp\n")
+
+    def _maybe_restart(self):
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        if time.time() - self._last_spawn < 2.0:        # backoff, don't hammer
+            return
+        print(f"  [ffmpeg] stream ended/stalled — reconnecting…")
+        self._spawn()
+
+    def isOpened(self):
+        return self.proc is not None
+
+    def read(self):
+        if self.proc is None:
+            return False, None
+        while True:
+            e = self.buf.rfind(b"\xff\xd9")
+            s = self.buf.rfind(b"\xff\xd8", 0, e) if e > 0 else -1
+            if s >= 0 and e > s:
+                jpg = bytes(self.buf[s:e + 2]); del self.buf[:e + 2]
+                img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    return True, img
+                continue
+            chunk = self.proc.stdout.read(65536)
+            if not chunk:
+                self._hint()
+                self._maybe_restart()
+                return False, None
+            self.buf.extend(chunk)
+
+    def release(self):
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+
+
 def open_source(src, w, h, fps):
     if src.lower() in ("rpicam", "libcamera", "csi"):
         return RpicamCapture(w, h, fps)
@@ -974,7 +1095,14 @@ def open_source(src, w, h, fps):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h); cap.set(cv2.CAP_PROP_FPS, fps)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)        # drop stale buffered frames -> low latency
         return cap
-    if src.startswith(("http", "rtsp")):
+    # Any URL / file: ruthlessly extract via ffmpeg (+yt-dlp for site pages). Set
+    # YOLO_FFMPEG=0 to fall back to OpenCV's own backend instead.
+    if env("YOLO_FFMPEG", "1") != "0" and shutil.which("ffmpeg"):
+        cap = FFmpegCapture(src, w, h, fps)
+        if cap.isOpened():
+            return cap
+        print("  ffmpeg source failed to start — falling back to OpenCV")
+    if src.startswith(("http", "rtsp", "rtmp", "udp", "tcp")):
         cap = cv2.VideoCapture(src); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
     return cv2.VideoCapture(src, cv2.CAP_GSTREAMER)
