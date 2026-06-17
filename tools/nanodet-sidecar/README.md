@@ -153,7 +153,21 @@ sticks only — for **both** autonomous follow and manual control. When an FC is
 the panel also shows a **d-pad** (▲/▼ forward/back = pitch, ⟲/⟳ = yaw, ◄/► = roll
 strafe): held = move, released = recentre, and if the page is lost the sticks recentre
 within ~0.4 s. A manual nudge briefly overrides the follower. HTTP API:
-`/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=` (each −1..1), `/fcstop`.
+`/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=` (each -1..1), `/fcstop`.
+
+### Full RX=MSP mode (no transmitter) — `FC_MODE=full`
+
+For boards without MSP Override. The Pi becomes the **whole** receiver and drives
+roll/pitch/yaw **plus throttle and arm**; the panel ARM button arms the **motors** and
+the panel gains **THR down/up** (a held throttle setpoint — you fly altitude). Three
+safeties: software ARM, a ground-station watchdog (panel silent > `FC_LINK_TIMEOUT` =>
+auto-descent + disarm via `FC_DESCENT_RATE`), and Betaflight's own failsafe if MSP
+frames stop. Vars: `FC_MODE=full`, `FC_CH_ARM` (AUX1=4), `FC_ARM_US`/`FC_DISARM_US`,
+`FC_THROTTLE_MIN`/`FC_THROTTLE_MAX`, `FC_THR_STEP`, `FC_LINK_TIMEOUT`, `FC_DESCENT_RATE`.
+Extra endpoint: `/fcthrottle?d=+1|-1`. **Full step-by-step (Betaflight RX=MSP, arm
+channel, Angle-always-on, props-off bench test, first flight) is in the main README**
+([no MSP Override](../../README.md#если-в-прошивке-нет-msp-override)). Much higher risk —
+no manual override; **bench-test props off.**
 
 **Wiring (Pi 5 ↔ FC) and full Betaflight setup (MSP Override on an AUX switch, the
 channel mask, failsafe) + a SAFETY checklist** are in the main README:

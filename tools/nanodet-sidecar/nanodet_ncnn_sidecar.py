@@ -1028,6 +1028,8 @@ def _status_json(state):
         "hasFC": state.fc is not None,
         "fcControlling": bool(state.fc.status().get("active")) if state.fc is not None else False,
         "fcArmed": bool(state.fc.armed) if state.fc is not None else False,
+        "fcFull": bool(state.fc.full) if state.fc is not None else False,
+        "fcThrottle": int(state.fc.throttle) if state.fc is not None else 0,
     }, allow_nan=False)
 
 
@@ -1068,6 +1070,8 @@ def make_handler(state):
         def do_GET(self):
             u = urlparse(self.path); path = u.path
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if state.fc is not None and path != "/stream":
+                state.fc.touch()                 # ground-station heartbeat (full-mode failsafe)
             if path == "/stream":
                 self._stream(); return
             if path == "/":
@@ -1110,6 +1114,8 @@ def make_handler(state):
                                             float(q.get("yaw", 0)) * d.max_yaw)
                 elif path == "/fcstop":                    # button released → recentre
                     if state.fc is not None: state.fc.neutral()
+                elif path == "/fcthrottle":                 # full RX=MSP mode: throttle trim
+                    if state.fc is not None: state.fc.set_throttle(int(float(q.get("d", 0))))
                 elif g is None:
                     pass
                 elif path == "/rotate": g.rotate(int(float(q.get("yaw", 0))), int(float(q.get("pitch", 0))))
@@ -1183,7 +1189,9 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 <div id="dpad">
 <span></span><button data-d="pitch=1">▲ fwd</button><span></span>
 <button data-d="yaw=-1">⟲ yaw</button><button id="dstop">■</button><button data-d="yaw=1">yaw ⟳</button>
-<button data-d="roll=-1">◄</button><button data-d="pitch=-1">▼ back</button><button data-d="roll=1">►</button></div></div>
+<button data-d="roll=-1">◄</button><button data-d="pitch=-1">▼ back</button><button data-d="roll=1">►</button></div>
+<div id="thr" style="display:none;margin-top:4px">
+<button id="thrdn">THR ▼</button><span id="thrval" style="display:inline-block;min-width:54px;text-align:center">—</span><button id="thrup">THR ▲</button></div></div>
 <script>
 var vid=document.getElementById('vid'),sel=document.getElementById('sel');vid.src='/stream';
 var HASGIMBAL=false,showG=false,gotStatus=false;
@@ -1196,7 +1204,9 @@ function show(s){gotStatus=true;var st=document.getElementById('st');
  else{st.textContent='NanoDet-Plus (NCNN) — camera only'}
  if(s.hasGimbal!==HASGIMBAL){HASGIMBAL=s.hasGimbal;showG=s.hasGimbal;applyG()}
  var dr=document.getElementById('drone');if(dr)dr.style.display=s.hasFC?'flex':'none';
- var ab=document.getElementById('arm');if(ab){ab.textContent='ARM: '+(s.fcArmed?'ON':'OFF');ab.className=s.fcArmed?'on':''}
+ var ab=document.getElementById('arm');if(ab){ab.textContent=(s.fcFull?'ARM MOTORS: ':'ARM: ')+(s.fcArmed?'ON':'OFF');ab.className=s.fcArmed?'on':''}
+ var th=document.getElementById('thr');if(th)th.style.display=s.fcFull?'':'none';
+ var tv=document.getElementById('thrval');if(tv&&s.fcThrottle!=null)tv.textContent='thr '+s.fcThrottle;
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'\\u25cf LOCK ON ':'LOCK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
 applyG();
@@ -1230,6 +1240,8 @@ hold(document.getElementById('fn'),function(){g('/focus?dir=near')},function(){g
 document.querySelectorAll('#dpad button[data-d]').forEach(function(b){
  hold(b,function(){g('/fcmove?'+b.dataset.d)},function(){g('/fcstop')})});
 hold(document.getElementById('dstop'),function(){g('/fcstop')},function(){g('/fcstop')});
+var tu=document.getElementById('thrup');if(tu)tu.onclick=function(){g('/fcthrottle?d=1')};
+var tdn=document.getElementById('thrdn');if(tdn)tdn.onclick=function(){g('/fcthrottle?d=-1')};
 function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
 poll();setInterval(poll,1000);
 </script></body></html>"""
