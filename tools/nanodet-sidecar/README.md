@@ -67,9 +67,15 @@ ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py --inspect
 
 `YOLO_SOURCE` ruthlessly ingests almost anything. Besides `rpicam` and a webcam index
 (`0`), give it **any URL or file** and it's piped through system **ffmpeg** (HLS `.m3u8`,
-DASH, RTSP, RTMP, MJPEG, `.mp4`/`.mkv`, …); **site pages** (YouTube/Twitch/…) are first
-resolved to a direct stream with **yt-dlp**. Newest-frame-wins (low latency) and ffmpeg
-auto-reconnects if the stream drops.
+DASH, RTSP, RTMP, MJPEG, `.mp4`/`.mkv`, …). For a **site page** the stream URL is found in
+three escalating steps: **yt-dlp** (YouTube/Twitch/…) → if that fails, the sidecar
+**downloads the page HTML and scrapes** it for an `.m3u8`/`.mpd`/`.mp4`/rtmp/rtsp (digging
+one `<iframe>` level deep, un-escaping JSON), passing the page as **Referer** (many webcams
+hot-link-protect). Newest-frame-wins (low latency); ffmpeg auto-reconnects on drop.
+
+If a page builds its URL in JavaScript (nothing in the HTML), open it in a browser, watch
+the **Network tab** for the `.m3u8`/`.mp4` request and pass **that** URL directly.
+`YOLO_SCRAPE=0` disables the HTML scrape.
 
 ```bash
 sudo apt install -y ffmpeg          # required for URL ingestion

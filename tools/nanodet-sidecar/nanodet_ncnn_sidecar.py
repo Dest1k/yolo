@@ -42,10 +42,12 @@ import math
 import json
 import shutil
 import threading
+import re
 import subprocess
+import urllib.request
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin, urlsplit
 
 import numpy as np
 import cv2
@@ -966,32 +968,86 @@ class RpicamCapture:
             self.proc.terminate()
 
 
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_MEDIA_PATTERNS = [
+    r'https?://[^\s"\'<>\\)]+?\.m3u8[^\s"\'<>\\)]*',
+    r'https?://[^\s"\'<>\\)]+?\.mpd[^\s"\'<>\\)]*',
+    r'(?:rtmps?|rtsp)://[^\s"\'<>\\)]+',
+    r'https?://[^\s"\'<>\\)]+?\.mp4[^\s"\'<>\\)]*',
+]
+
+
+def _http_get_text(url, timeout=15):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA, "Referer": url,
+                                                   "Accept": "*/*"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(3_000_000).decode("utf-8", "replace")
+    except Exception as e:
+        print(f"  page fetch failed ({e})")
+        return None
+
+
+def _scrape_page_for_stream(url, depth=2):
+    """Best-effort: download the page HTML and dig out a media URL (.m3u8/.mpd/.mp4/
+    rtmp/rtsp), following one level of <iframe> player embeds. Handles JSON-escaped
+    slashes and HTML entities. Returns the URL or None."""
+    html = _http_get_text(url)
+    if not html:
+        return None
+    text = html.replace("\\/", "/").replace("&amp;", "&")
+    for pat in _MEDIA_PATTERNS:
+        m = re.search(pat, text, re.I)
+        if m:
+            return m.group(0)
+    # relative media in a player config (file:/src:/source:/hls:/"url":…"….m3u8")
+    m = re.search(r'(?:file|src|source|hls|stream|url)\s*["\']?\s*[:=]\s*["\']'
+                  r'([^"\']+\.(?:m3u8|mpd|mp4)(?:\?[^"\']*)?)["\']', text, re.I)
+    if m:
+        return urljoin(url, m.group(1))
+    if depth > 0:                                     # follow a player iframe one level
+        for fm in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', text, re.I):
+            sub = urljoin(url, fm.group(1))
+            if sub.rstrip("/") == url.rstrip("/"):
+                continue
+            got = _scrape_page_for_stream(sub, depth - 1)
+            if got:
+                return got
+    return None
+
+
 def _resolve_stream_url(url):
-    """Turn a site/page URL (YouTube, Twitch, …) into a direct media URL via yt-dlp.
-    Direct media URLs and non-http sources are returned unchanged. Best effort — on any
-    failure we just hand the original URL to ffmpeg, which copes with a lot on its own."""
+    """→ (stream_url, referer). Direct media & non-http are returned unchanged. For site
+    pages: try yt-dlp, then fall back to scraping the page HTML. `referer` is set when we
+    scraped a page, so ffmpeg can send it (many webcams reject hot-linking without it)."""
     low = url.split("?", 1)[0].lower()
     if not url.lower().startswith(("http://", "https://")):
-        return url
+        return url, None
     if low.endswith((".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".ts", ".flv",
                       ".mjpg", ".mjpeg", ".jpg", ".jpeg")):
-        return url                                    # already a direct stream/file
+        return url, None
     exe = shutil.which("yt-dlp") or shutil.which("youtube-dl")
-    if not exe:
-        return url
-    try:
-        fmt = env("YOLO_YTDLP_FORMAT", "best")
-        out = subprocess.run([exe, "-g", "-f", fmt, url], capture_output=True, text=True, timeout=40)
-        cand = [ln.strip() for ln in out.stdout.splitlines()
-                if ln.strip().startswith(("http", "rtmp", "rtsp"))]
-        if cand:
-            print(f"  yt-dlp resolved the page → {cand[0][:80]}…")
-            return cand[0]
-        if out.stderr.strip():
-            print(f"  yt-dlp: {out.stderr.strip().splitlines()[-1][:120]}")
-    except Exception as e:
-        print(f"  yt-dlp resolve failed ({e}); using the URL as-is")
-    return url
+    if exe:
+        try:
+            out = subprocess.run([exe, "-g", "-f", env("YOLO_YTDLP_FORMAT", "best"), url],
+                                 capture_output=True, text=True, timeout=40)
+            cand = [ln.strip() for ln in out.stdout.splitlines()
+                    if ln.strip().startswith(("http", "rtmp", "rtsp"))]
+            if cand:
+                print(f"  yt-dlp resolved the page → {cand[0][:80]}…")
+                return cand[0], None
+        except Exception as e:
+            print(f"  yt-dlp failed ({e})")
+    if env("YOLO_SCRAPE", "1") != "0":
+        print("  scraping the page HTML for a stream URL…")
+        got = _scrape_page_for_stream(url)
+        if got:
+            print(f"  found stream in page → {got[:80]}…")
+            return got, url                           # pass the page as Referer to ffmpeg
+        print("  no stream URL in the page HTML — it may be built by JS. Open the page in a\n"
+              "  browser, watch the Network tab for a .m3u8/.mp4 request, and pass THAT URL directly.")
+    return url, None
 
 
 class FFmpegCapture:
@@ -1001,7 +1057,7 @@ class FFmpegCapture:
     re-launches ffmpeg if the stream drops. Needs `ffmpeg` in PATH (`yt-dlp` for sites)."""
 
     def __init__(self, url, w, h, fps):
-        self.src = _resolve_stream_url(url)
+        self.src, referer = _resolve_stream_url(url)
         self.label = "ffmpeg"
         self.err = deque(maxlen=40)
         self._hinted = False
@@ -1011,8 +1067,12 @@ class FFmpegCapture:
         if s.startswith(("rtsp://",)):
             pre = ["-rtsp_transport", "tcp"] + pre
         if s.startswith(("http://", "https://")):
-            pre = ["-reconnect", "1", "-reconnect_streamed", "1",
-                   "-reconnect_delay_max", "5"] + pre
+            hdr = ["-user_agent", _BROWSER_UA]         # some servers reject ffmpeg's default UA
+            if referer:                                # hot-link-protected cams want Referer/Origin
+                o = urlsplit(referer)
+                hdr += ["-referer", referer, "-headers", f"Origin: {o.scheme}://{o.netloc}\r\n"]
+            pre = hdr + ["-reconnect", "1", "-reconnect_streamed", "1",
+                         "-reconnect_delay_max", "5"] + pre
         self.cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error"] + pre +
                     ["-i", self.src, "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "-"])
         self.buf = bytearray()
