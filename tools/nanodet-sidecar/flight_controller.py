@@ -132,6 +132,18 @@ class BetaflightMSP:
         self.tx_count = 0
         self.running = True
         threading.Thread(target=self._tx_loop, daemon=True).start()
+        threading.Thread(target=self._rx_drain, daemon=True).start()
+
+    def _rx_drain(self):
+        """Read and discard the FC's MSP replies. Every MSP_SET_RAW_RC gets an ACK; if
+        nobody consumes them the serial buffers back up — on USB-VCP that can stall the
+        FC's USB task and make it reboot in a loop. We don't need the ACK contents."""
+        while self.running:
+            try:
+                if not self.ser.read(256):      # blocks up to the port timeout (0.1 s)
+                    continue
+            except Exception:
+                time.sleep(0.2)
 
     def _tx_loop(self):
         period = 1.0 / max(1.0, self.rate)
