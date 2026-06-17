@@ -1027,6 +1027,7 @@ def _status_json(state):
         "hardwareId": (g.hardware_id if g else "") or "",
         "hasFC": state.fc is not None,
         "fcControlling": bool(state.fc.status().get("active")) if state.fc is not None else False,
+        "fcArmed": bool(state.fc.armed) if state.fc is not None else False,
     }, allow_nan=False)
 
 
@@ -1095,6 +1096,20 @@ def make_handler(state):
                         if state.drone is not None: state.drone.request_pick(nx, ny)
                         state.pick_request = (nx, ny)      # also for the visual-only HUD lock
                         state.tracking = True
+                elif path == "/fcarm":                     # software safety switch (panel ARM)
+                    if state.fc is not None:
+                        on = q.get("on")
+                        state.fc.arm((on in ("1", "true")) if on is not None else (not state.fc.armed))
+                        if not state.fc.armed:
+                            state.tracking = False         # disarm also stops autonomous follow
+                elif path == "/fcmove":                    # manual stick nudge from the panel d-pad
+                    if state.fc is not None and state.drone is not None:
+                        d = state.drone
+                        state.fc.set_manual(float(q.get("roll", 0)) * d.max_roll,
+                                            float(q.get("pitch", 0)) * d.max_pitch,
+                                            float(q.get("yaw", 0)) * d.max_yaw)
+                elif path == "/fcstop":                    # button released → recentre
+                    if state.fc is not None: state.fc.neutral()
                 elif g is None:
                     pass
                 elif path == "/rotate": g.rotate(int(float(q.get("yaw", 0))), int(float(q.get("pitch", 0))))
@@ -1139,6 +1154,11 @@ padding:12px 14px;font-size:16px;margin:3px;cursor:pointer}button:active{backgro
 #pad{bottom:12px;left:12px;display:grid;grid-template-columns:repeat(3,56px);gap:4px}
 #side{bottom:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end}
 #top{top:8px;right:8px;display:flex;flex-wrap:wrap;justify-content:flex-end;max-width:60vw}
+#drone{bottom:12px;left:12px;display:none;flex-direction:column;align-items:flex-start}
+#dpad{display:grid;grid-template-columns:repeat(3,54px);gap:4px;margin-top:4px}
+#dpad button{min-width:54px;padding:12px 0}
+#arm{font-weight:bold;min-width:172px;background:rgba(0,90,0,.55);border-color:#0c0}
+#arm.on{background:#ff3030;color:#fff;border-color:#ff3030}
 input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;border-radius:6px;padding:6px}
 .grp{display:flex;align-items:center;margin:2px 0}
 </style></head><body>
@@ -1158,6 +1178,12 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 <div class="grp"><button id="zin">+</button><button id="zout">-</button>x<input id="zx" value="2"><button onclick="g('/zoom?x='+zx.value)">set</button></div>
 <div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus+</button><button id="fn">focus-</button></div>
 <div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div></div>
+<div id="drone" class="ov">
+<button id="arm" onclick="g('/fcarm')">ARM: OFF</button>
+<div id="dpad">
+<span></span><button data-d="pitch=1">▲ fwd</button><span></span>
+<button data-d="yaw=-1">⟲ yaw</button><button id="dstop">■</button><button data-d="yaw=1">yaw ⟳</button>
+<button data-d="roll=-1">◄</button><button data-d="pitch=-1">▼ back</button><button data-d="roll=1">►</button></div></div>
 <script>
 var vid=document.getElementById('vid'),sel=document.getElementById('sel');vid.src='/stream';
 var HASGIMBAL=false,showG=false,gotStatus=false;
@@ -1166,9 +1192,11 @@ function fail(){if(!gotStatus)document.getElementById('st').textContent='disconn
 function applyG(){['pad','side','top'].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display=(HASGIMBAL&&showG)?'':'none'})}
 function show(s){gotStatus=true;var st=document.getElementById('st');
  if(s.hasGimbal){st.textContent='yaw '+s.yaw+'  pitch '+s.pitch+'  roll '+s.roll+'\\nmode '+s.mode+'  rec '+s.recording}
- else if(s.hasFC){st.textContent='NanoDet-Plus (NCNN) — Betaflight FC'+(s.fcControlling?' · FLYING':' · hold')}
+ else if(s.hasFC){st.textContent='NanoDet-Plus (NCNN) — Betaflight FC'+(s.fcArmed?(s.fcControlling?' · FLYING':' · ARMED'):' · safe (disarmed)')}
  else{st.textContent='NanoDet-Plus (NCNN) — camera only'}
  if(s.hasGimbal!==HASGIMBAL){HASGIMBAL=s.hasGimbal;showG=s.hasGimbal;applyG()}
+ var dr=document.getElementById('drone');if(dr)dr.style.display=s.hasFC?'flex':'none';
+ var ab=document.getElementById('arm');if(ab){ab.textContent='ARM: '+(s.fcArmed?'ON':'OFF');ab.className=s.fcArmed?'on':''}
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'\\u25cf LOCK ON ':'LOCK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
 applyG();
@@ -1199,6 +1227,9 @@ hold(document.getElementById('zin'),function(){g('/zoom?dir=in')},function(){g('
 hold(document.getElementById('zout'),function(){g('/zoom?dir=out')},function(){g('/zoom?dir=stop')});
 hold(document.getElementById('ff'),function(){g('/focus?dir=far')},function(){g('/focus?dir=stop')});
 hold(document.getElementById('fn'),function(){g('/focus?dir=near')},function(){g('/focus?dir=stop')});
+document.querySelectorAll('#dpad button[data-d]').forEach(function(b){
+ hold(b,function(){g('/fcmove?'+b.dataset.d)},function(){g('/fcstop')})});
+hold(document.getElementById('dstop'),function(){g('/fcstop')},function(){g('/fcstop')});
 function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
 poll();setInterval(poll,1000);
 </script></body></html>"""
@@ -1283,7 +1314,8 @@ def main():
         if made:
             state.fc, state.drone = made
             flight_controller.print_safety_banner(state.fc)
-            print("  flight controller: ENABLED — Space (track) to follow the locked target")
+            print("  flight controller: ENABLED — press ARM on the panel, then Space (track) "
+                  "to follow, or use the d-pad for manual control")
     elif (env("FC", "") or "").lower() not in ("", "off", "0", "none"):
         sys.stderr.write("WARNING: FC set but flight_controller.py not found next to the sidecar.\n")
 

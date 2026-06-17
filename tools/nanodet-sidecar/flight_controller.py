@@ -107,7 +107,10 @@ class BetaflightMSP:
         self.base[self.ch_throttle] = self.throttle_us
         self.lock = threading.Lock()
         self.channels = list(self.base)
-        self.active = False                              # are we currently overriding?
+        self.active = False                              # are we currently overriding (non-centre)?
+        self.armed = False                               # SOFTWARE safety: nothing moves until armed
+        self.manual_until = 0.0                          # manual nudges win until this time
+        self.manual_on = False
         self.tx_count = 0
         self.running = True
         threading.Thread(target=self._tx_loop, daemon=True).start()
@@ -115,6 +118,11 @@ class BetaflightMSP:
     def _tx_loop(self):
         period = 1.0 / max(1.0, self.rate)
         while self.running:
+            # Manual watchdog: a held button refreshes manual_until; if the browser
+            # stops sending (button released / page lost), recentre within ~0.4 s.
+            if self.manual_on and time.time() > self.manual_until:
+                self.manual_on = False
+                self.neutral()
             with self.lock:
                 ch = list(self.channels)
             try:
@@ -124,8 +132,7 @@ class BetaflightMSP:
                 pass
             time.sleep(period)
 
-    def set_control(self, roll=0.0, pitch=0.0, yaw=0.0):
-        """Set signed microsecond offsets from centre for the controlled axes."""
+    def _apply(self, roll, pitch, yaw):
         ch = list(self.base)
         ch[self.ch_roll] = int(clamp(1500 + roll, 1000, 2000))
         ch[self.ch_pitch] = int(clamp(1500 + pitch, 1000, 2000))
@@ -133,6 +140,34 @@ class BetaflightMSP:
         with self.lock:
             self.channels = ch
             self.active = (abs(roll) + abs(pitch) + abs(yaw)) > 0.5
+
+    def arm(self, on):
+        """The software safety switch. Off ⇒ centre sticks and ignore all commands."""
+        self.armed = bool(on)
+        if not self.armed:
+            self.manual_on = False
+            self.neutral()
+        return self.armed
+
+    def set_control(self, roll=0.0, pitch=0.0, yaw=0.0):
+        """Auto-follow output (signed µs offsets). Ignored unless armed; a recent
+        manual nudge takes priority over the follower for a moment."""
+        if not self.armed:
+            return self.neutral()
+        if time.time() < self.manual_until:
+            return
+        self._apply(roll, pitch, yaw)
+
+    def set_manual(self, roll=0.0, pitch=0.0, yaw=0.0):
+        """Manual stick nudge from the panel (signed µs offsets). Only acts when armed;
+        wins over the follower and self-centres if not refreshed (see watchdog)."""
+        if not self.armed:
+            self.neutral()
+            return False
+        self._apply(roll, pitch, yaw)
+        self.manual_until = time.time() + 0.4
+        self.manual_on = (abs(roll) + abs(pitch) + abs(yaw)) > 0.5
+        return True
 
     def neutral(self):
         """Centre the controlled axes (hold) — keeps streaming so the FC stays happy."""
@@ -142,7 +177,8 @@ class BetaflightMSP:
 
     def status(self):
         with self.lock:
-            return {"port": self.port, "active": self.active, "tx": self.tx_count}
+            return {"port": self.port, "active": self.active,
+                    "armed": self.armed, "manual": self.manual_on, "tx": self.tx_count}
 
     def close(self):
         self.running = False
@@ -184,6 +220,7 @@ class DroneFollower:
         self.fc = fc
         self.max_yaw = _envf("FC_MAX_YAW", 150)        # ±µs from centre on the yaw channel
         self.max_pitch = _envf("FC_MAX_PITCH", 120)    # ±µs from centre on the pitch channel
+        self.max_roll = _envf("FC_MAX_ROLL", 120)      # ±µs for manual strafe (panel only; auto keeps roll=0)
         self.kp_yaw = _envf("FC_KP_YAW", 360)          # µs per unit horizontal error (−0.5..0.5)
         self.kp_pitch = _envf("FC_KP_PITCH", 500)      # µs per unit fill error
         self.yaw_dz = _envf("FC_YAW_DEADZONE", 0.06)   # frac of frame width
@@ -260,8 +297,9 @@ def print_safety_banner(fc):
         "\n" + "=" * 70 + "\n"
         "  ⚠️  BETAFLIGHT FOLLOW MODE ENABLED — autonomous flight toward a target\n"
         f"     port={st['port']}  channels: yaw+pitch overridden, throttle/arm = pilot\n"
-        "     • MUST use Betaflight 'MSP Override' on an AUX switch (Modes tab).\n"
+        "     • Two safeties: hardware 'MSP Override' (AUX switch) AND the web-panel\n"
+        "       ARM button — nothing is sent to the FC until BOTH are on.\n"
         "     • Test PROPS OFF; verify the Receiver tab moves the right way first.\n"
         "     • Keep the transmitter on; pilot owns throttle/arm/failsafe.\n"
-        "     • Tracking off or target lost ⇒ centre sticks (hold), never coast.\n"
+        "     • ARM off / tracking off / target lost ⇒ centre sticks (hold), never coast.\n"
         + "=" * 70 + "\n")

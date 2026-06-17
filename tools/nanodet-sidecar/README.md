@@ -138,18 +138,28 @@ ND_PARAM=nanodet.param ND_BIN=nanodet.bin ND_INPUT=320 \
 | `FC` | `betaflight` to enable, else off | off |
 | `FC_PORT` | serial port (`/dev/ttyAMA0` UART, `/dev/ttyACM0` USB) | `/dev/ttyAMA0` |
 | `FC_BAUD` / `FC_RATE` | MSP baud / RC stream rate (Hz) | `115200` / `50` |
-| `FC_MAX_YAW` / `FC_MAX_PITCH` | max stick offset from centre (µs) | `150` / `120` |
+| `FC_MAX_YAW` / `FC_MAX_PITCH` / `FC_MAX_ROLL` | max stick offset from centre (µs); ROLL = manual strafe only | `150` / `120` / `120` |
 | `FC_KP_YAW` / `FC_KP_PITCH` | P-gains (µs per unit error) | `360` / `500` |
 | `FC_TARGET_FILL` | desired box-height / frame-height (distance setpoint) | `0.45` |
 | `FC_YAW_DEADZONE` / `FC_FILL_DEADZONE` | no-move bands | `0.06` / `0.08` |
 | `FC_INVERT_YAW` / `FC_INVERT_PITCH` | flip an axis if it moves the wrong way | off |
 | `FC_CH_ROLL/PITCH/THROTTLE/YAW` | channel indices (Betaflight `map`, default AETR) | `0/1/2/3` |
 
+### Panel ARM + manual control
+
+Two safety interlocks gate the drone: the hardware **MSP Override** switch on the TX,
+and a software **ARM** button on the web panel. Until ARM is on, the Pi streams centre
+sticks only — for **both** autonomous follow and manual control. When an FC is present
+the panel also shows a **d-pad** (▲/▼ forward/back = pitch, ⟲/⟳ = yaw, ◄/► = roll
+strafe): held = move, released = recentre, and if the page is lost the sticks recentre
+within ~0.4 s. A manual nudge briefly overrides the follower. HTTP API:
+`/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=` (each −1..1), `/fcstop`.
+
 **Wiring (Pi 5 ↔ FC) and full Betaflight setup (MSP Override on an AUX switch, the
 channel mask, failsafe) + a SAFETY checklist** are in the main README:
 [Follow-me на дроне (Betaflight)](../../README.md#follow-me-дрон-следит-за-человеком-betaflight-fc).
-The MSP framing and the follow controller are unit-tested; the flight itself is not —
-**test props off first.**
+The MSP framing, the follow controller and the ARM/manual gating are unit-tested; the
+flight itself is not — **test props off first.**
 
 ## 4. Where it runs
 
