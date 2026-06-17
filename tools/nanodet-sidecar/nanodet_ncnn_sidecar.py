@@ -42,6 +42,7 @@ import math
 import json
 import threading
 import subprocess
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -898,13 +899,44 @@ class RpicamCapture:
         args = ["-t", "0", "--codec", "mjpeg", "--nopreview", "--width", str(w),
                 "--height", str(h), "--framerate", str(fps), "-o", "-"]
         self.proc = None
+        self.bin = None
+        self.err = deque(maxlen=40)
+        self._hinted = False
         for b in ("rpicam-vid", "libcamera-vid"):
             try:
-                self.proc = subprocess.Popen([b] + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+                self.proc = subprocess.Popen([b] + args, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, bufsize=0)
+                self.bin = b
+                threading.Thread(target=self._drain_err, daemon=True).start()
                 break
             except FileNotFoundError:
                 continue
+        if self.proc is None:
+            sys.stderr.write(
+                "ERROR: neither rpicam-vid nor libcamera-vid is installed.\n"
+                "  sudo apt install -y rpicam-apps   then check:  rpicam-hello --list-cameras\n")
         self.buf = bytearray()
+
+    def _drain_err(self):
+        try:
+            for line in self.proc.stderr:
+                self.err.append(line.decode("utf-8", "replace").rstrip())
+        except Exception:
+            pass
+
+    def _hint(self):
+        if self._hinted:
+            return
+        self._hinted = True
+        tail = " | ".join(list(self.err)[-6:])
+        sys.stderr.write(
+            f"ERROR: {self.bin} gave no frames — the CSI camera isn't detected.\n"
+            f"  {self.bin} said: {tail or '(no output)'}\n"
+            "  Diagnose:  rpicam-hello --list-cameras   (it must list your sensor)\n"
+            "  Pi 5 checklist: use the 22-pin Pi-5 camera cable (or a 15→22 adapter), insert it the\n"
+            "  right way round (contacts toward the board), `camera_auto_detect=1` in\n"
+            "  /boot/firmware/config.txt (some 3rd-party sensors need dtoverlay=imx219/ov5647/…),\n"
+            "  then reboot. A lit LED only means the module has power, not that data is connected.\n")
 
     def isOpened(self): return self.proc is not None
 
@@ -924,6 +956,7 @@ class RpicamCapture:
                 continue
             chunk = self.proc.stdout.read(65536)
             if not chunk:
+                self._hint()            # process ended with no video → explain why (camera not detected)
                 return False, None
             self.buf.extend(chunk)
 
