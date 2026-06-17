@@ -50,10 +50,23 @@ def find_ckpt(repo):
         or _newest(glob.glob(os.path.join("workspace", "**", "*.ckpt"), recursive=True))
 
 
+def _shim_torch_six():
+    """torch._six was removed in torch 2.0; older nanodet code still imports it. Restore
+    the few names it used so export (which loads nanodet model code) doesn't crash."""
+    import torch, types, sys
+    import collections.abc as _abc
+    if not hasattr(torch, "_six"):
+        m = types.ModuleType("torch._six")
+        m.string_classes = (str, bytes); m.int_classes = int
+        m.container_abcs = _abc; m.PY3 = True; m.PY37 = sys.version_info >= (3, 7)
+        torch._six = m; sys.modules["torch._six"] = m
+
+
 def export_onnx(repo, cfg, ckpt, onnx_out, input_size):
     """Run nanodet's tools/export_onnx.py in-process, forcing a legacy opset-11
     export (monkeypatch torch.onnx.export) so it's correct on any torch version."""
     import torch
+    _shim_torch_six()
     # Resolve every path to absolute BEFORE chdir'ing into the repo — otherwise a
     # relative --model_path / --cfg_path / out would resolve against the repo dir and
     # vanish (the "No such file …/nanodet/<ckpt>" trap).
