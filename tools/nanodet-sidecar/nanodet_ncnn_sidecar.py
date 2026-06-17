@@ -76,6 +76,44 @@ def env(key, default=None):
     return v if v not in (None, "") else default
 
 
+def _diagnose_ncnn_files(param, bin_):
+    """ncnn says 'parse magic failed' when the .param's first line isn't 7767517. Look
+    at the actual bytes and explain the likely cause (swapped files, LFS pointer, binary
+    param, wrong/empty file) instead of leaving the user guessing."""
+    try:
+        with open(param, "rb") as f:
+            head = f.read(96)
+    except OSError as e:
+        return f"can't open ND_PARAM ({e})."
+    try:
+        bsize = os.path.getsize(bin_)
+    except OSError:
+        bsize = -1
+    if not head:
+        return "ND_PARAM is empty (0 bytes) — re-copy it."
+    s = head.lstrip()
+    if s[:7] == b"version" and b"git-lfs" in head:
+        return "ND_PARAM is a Git-LFS pointer, not the model — run `git lfs pull` (or copy the real file)."
+    if s[:1] == b"<":
+        return "ND_PARAM looks like HTML/XML (a failed download?), not an ncnn param."
+    if head[:2] == b"\x80\x02" or head[:4] == b"PK\x03\x04" or head[:2] == b"\xff\xd8":
+        return "ND_PARAM isn't a text ncnn param (looks like a pickle/zip/image/ONNX) — wrong file."
+    first = head.split(b"\n", 1)[0].strip()
+    try:
+        first_txt = first.decode("ascii")
+    except Exception:
+        return (f"ND_PARAM starts with non-text bytes {first[:12]!r} — it's probably a BINARY param "
+                "(.param.bin) or the .bin itself. Check the files aren't swapped.")
+    if first_txt == "7767517":
+        return (f"ND_PARAM magic is OK, so it's the .bin that failed (size={bsize}). The .bin is "
+                "truncated/mismatched — re-export, or check ND_PARAM/ND_BIN aren't swapped.")
+    if first_txt.isdigit():
+        return (f"ND_PARAM first line is '{first_txt}', not '7767517'. ND_PARAM and ND_BIN are likely "
+                "SWAPPED (you passed the .bin as the param), or it's a different/old ncnn format.")
+    return (f"ND_PARAM first line is {first_txt!r}, expected '7767517'. This isn't an ncnn text param — "
+            "wrong file, or param/bin swapped.")
+
+
 def _tune_ncnn_opt(opt):
     """Squeeze more CPU FPS out of ncnn on a Pi 5. Its Cortex-A76 is ARMv8.2-A with
     native FP16, so fp16 *arithmetic* (off by default in ncnn) plus packed layout and
@@ -198,6 +236,9 @@ class NanoDetNCNN:
             sys.exit(2)
         if self.net.load_param(param) != 0 or self.net.load_model(bin_) != 0:
             sys.stderr.write(f"ERROR: failed to load ncnn model ({param} / {bin_})\n")
+            hint = _diagnose_ncnn_files(param, bin_)
+            if hint:
+                sys.stderr.write("  → " + hint + "\n")
             sys.exit(1)
         self.in_name = env("ND_INPUT_BLOB") or (self._names("input") or ["in0"])[0]
         outs = self._names("output") or []
