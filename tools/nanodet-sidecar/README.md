@@ -117,13 +117,20 @@ YOLO-format dataset in, verified ncnn model out — same paradigm as
 `train_yolofastest.py`.
 
 ```bash
-# on your GPU box (Windows + RTX 5090):
+# on your GPU box. Use Python 3.10 or 3.11 — torch/pytorch-lightning/pycocotools
+# usually have NO wheels yet for 3.12+/3.14, which is the usual "No module named nanodet"
+# / failed-install trap. Then:
 pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
-pip install opencv-python numpy onnx onnxsim ncnn pnnx pytorch-lightning pycocotools omegaconf
+pip install opencv-python numpy onnx onnxsim ncnn pnnx
 
 # edit the CONFIG block in train_nanodet.py (DATASET, CLASSES, INPUT, BATCH…), then:
 python train_nanodet.py
 ```
+
+You do **not** need to `pip install nanodet` yourself: the trainer clones the repo, puts it
+on `PYTHONPATH` for the import, and auto-installs its requirements **minus torch** (so your
+cu128 build is untouched) — getting the right pytorch-lightning/omegaconf/etc. versions.
+`TRAIN_PIP=0` skips that auto-install.
 
 Prefer a window? `python train_nanodet_gui.py` exposes every field — including
 **fine-tuning / resume (дообучение)** — and streams the live training log underneath.

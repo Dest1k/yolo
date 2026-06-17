@@ -104,9 +104,41 @@ if os.environ.get("TRAIN_EXPORT"):
 IMG_EXT = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
 
 
-def sh(cmd, cwd=None):
+def sh(cmd, cwd=None, extra_env=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
-    return subprocess.call([str(c) for c in cmd], cwd=cwd)
+    e = dict(os.environ)
+    if extra_env:
+        e.update(extra_env)
+    return subprocess.call([str(c) for c in cmd], cwd=cwd, env=e)
+
+
+def setup_repo_env():
+    """Install the cloned nanodet's dependencies — WITHOUT clobbering your torch — so the
+    next steps don't die on a missing sub-module or the wrong pytorch-lightning.
+
+    `tools/train.py` does `import nanodet`; that's handled by PYTHONPATH=<repo> (set on the
+    training call), so we don't pip-install the package itself (avoids a setup.py build).
+    Here we only install the repo's requirements EXCEPT torch/vision/audio, which pulls the
+    right pytorch-lightning/omegaconf/tabulate/… versions while keeping your cu128 nightly
+    torch. Skip the whole thing with TRAIN_PIP=0."""
+    if os.environ.get("TRAIN_PIP", "1").lower() in ("0", "false", "no", "off"):
+        print("  (TRAIN_PIP=0 — skipping auto dep install; relying on PYTHONPATH + your env)")
+        return
+    req = os.path.join(os.path.abspath(REPO_DIR), "requirements.txt")
+    if not os.path.isfile(req):
+        return
+    pkgs = []
+    for line in open(req, encoding="utf-8"):
+        spec = line.strip()
+        if not spec or spec.startswith(("#", "-")):
+            continue
+        name = re.split(r"[<>=!~;\[ ]", spec)[0].strip().lower()
+        if name in ("torch", "torchvision", "torchaudio"):
+            continue                                  # keep the user's cu128 nightly build
+        pkgs.append(spec)
+    if pkgs:
+        print(f"[2b/4] Installing nanodet deps (minus torch): {', '.join(pkgs)}")
+        sh([sys.executable, "-m", "pip", "install", *pkgs])
 
 
 def _has_imgs(d):
@@ -237,6 +269,11 @@ def write_config(train_img, train_json, val_img, val_json):
 
 
 def main():
+    if sys.version_info >= (3, 13):
+        print(f"  [!] You're on Python {sys.version_info.major}.{sys.version_info.minor}. The training "
+              "stack (torch, pytorch-lightning, pycocotools) often has NO wheels yet for such a new\n"
+              "      Python, so installs silently land in the wrong place / fail to build. If anything\n"
+              "      below errors on imports, use Python 3.10 or 3.11 for the training box (see README).")
     print("[1/4] Converting dataset to COCO...")
     if not os.path.isdir(DATASET):
         sys.exit(f"ERROR: DATASET not found: {DATASET}")
@@ -252,14 +289,19 @@ def main():
     if not os.path.isdir(REPO_DIR):
         if sh(["git", "clone", "--depth", "1", "https://github.com/RangiLyu/nanodet.git", REPO_DIR]):
             sys.exit("ERROR: git clone failed")
+    setup_repo_env()                         # make `import nanodet` work + deps (no torch touch)
     cfg = write_config(tr_img, tr_json, va_img, va_json)
 
     mode = (f"fine-tune from {os.path.basename(WEIGHTS)}" if WEIGHTS
             else f"resume {os.path.basename(RESUME)}" if RESUME else "from scratch")
     print(f"[3/4] Training on {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})...")
-    if sh([sys.executable, "tools/train.py", cfg], cwd=REPO_DIR):
-        sys.exit("ERROR: training failed (see output above). Common fixes: pip install "
-                 "pytorch-lightning pycocotools omegaconf tensorboard; check the config warnings.")
+    # PYTHONPATH=<repo> guarantees `import nanodet` resolves to the cloned repo even if
+    # the pip step was skipped/offline or a different 'nanodet' is installed elsewhere.
+    train_env = {"PYTHONPATH": os.path.abspath(REPO_DIR) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    if sh([sys.executable, "tools/train.py", cfg], cwd=REPO_DIR, extra_env=train_env):
+        sys.exit("ERROR: training failed (see output above). If it's a pytorch-lightning API\n"
+                 "  error, the auto-installed nanodet deps set the right PL version — re-run; or\n"
+                 "  pip install -r nanodet/requirements.txt (keep your torch). Check config warnings.")
 
     if EXPORT:
         print("[4/4] Exporting an optimised, verified NCNN model...")
