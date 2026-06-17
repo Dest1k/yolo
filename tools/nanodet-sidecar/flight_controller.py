@@ -112,6 +112,7 @@ class BetaflightMSP:
         self.thr_min = _envi("FC_THROTTLE_MIN", 1000)
         self.thr_max = _envi("FC_THROTTLE_MAX", 1700)    # safety cap on commanded throttle
         self.thr_step = _envi("FC_THR_STEP", 25)         # µs per panel throttle press
+        self.thr_smooth = _envf("FC_THR_SMOOTH", 0.35)   # low-pass on stick throttle (0..1; lower = smoother)
         self.link_timeout = _envf("FC_LINK_TIMEOUT", 3.0)
         self.descent_rate = _envf("FC_DESCENT_RATE", 150.0)   # µs/s throttle drop if ground station lost
         self.throttle = self.thr_min                     # persistent throttle setpoint (full mode)
@@ -260,7 +261,12 @@ class BetaflightMSP:
             self.neutral()
             return False
         if self.full and throttle_frac is not None:
-            self.throttle = clamp(self.thr_min + float(throttle_frac) * (self.thr_max - self.thr_min),
+            target = clamp(self.thr_min + float(throttle_frac) * (self.thr_max - self.thr_min),
+                           self.thr_min, self.thr_max)
+            # Low-pass the stick throttle: a single glitchy frame (axis momentarily reads
+            # its endpoint and would slam throttle to min) only nudges it, and a steady
+            # stick converges to the target — so throttle HOLDS instead of stuttering.
+            self.throttle = clamp(self.throttle + (target - self.throttle) * self.thr_smooth,
                                   self.thr_min, self.thr_max)
         self._compose(roll, pitch, yaw)
         self.manual_until = time.time() + 0.4

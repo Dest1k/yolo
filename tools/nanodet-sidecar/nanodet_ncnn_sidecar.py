@@ -1022,6 +1022,10 @@ def follow_loop(state):
     Betaflight FC (follow-the-target flight). With NEITHER it still picks and shows a
     target — so lock-on works on a plain Pi camera with no gimbal at all."""
     while state.running:
+        # While the operator is on the sticks/d-pad, manual owns the FC — don't let the
+        # follower/hold/neutral churn fight it (that was jittering roll/pitch/yaw).
+        if state.fc is not None and time.time() < state.fc.manual_until:
+            time.sleep(0.066); continue
         if state.tracking:
             with state.lock:
                 frame = state.frame; dets = list(state.dets)
@@ -1291,7 +1295,7 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 <div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus+</button><button id="fn">focus-</button></div>
 <div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div></div>
 <div id="drone" class="ov">
-<div><button id="hold" onclick="g('/fchold')">HOLD: OFF</button><button id="sticks">Sticks: OFF</button></div>
+<div><button id="hold" onclick="g('/fchold')">HOLD: OFF</button><button id="sticks">Sticks: OFF</button><button id="stkthr">Stick thr: OFF</button></div>
 <button id="arm" onclick="g('/fcarm')">ARM: OFF</button>
 <div id="dpad">
 <span></span><button data-d="pitch=1">▲ fwd</button><span></span>
@@ -1358,19 +1362,26 @@ hold(document.getElementById('dstop'),function(){g('/fcstop')},function(){g('/fc
 var tu=document.getElementById('thrup');if(tu)tu.onclick=function(){g('/fcthrottle?d=1')};
 var tdn=document.getElementById('thrdn');if(tdn)tdn.onclick=function(){g('/fcthrottle?d=-1')};
 // ── transmitter sticks via the browser Gamepad API (RadioMaster TX12 in USB joystick mode) ──
-var sticksOn=false;
-function curPad(){var ps=navigator.getGamepads?navigator.getGamepads():[];for(var i=0;i<ps.length;i++)if(ps[i])return ps[i];return null}
+var sticksOn=false,stickThr=false;
+function curPad(){var ps=navigator.getGamepads?navigator.getGamepads():[];var best=null;
+ for(var i=0;i<ps.length;i++)if(ps[i]&&ps[i].axes&&(!best||ps[i].axes.length>best.axes.length))best=ps[i];return best}
 function dz(v){return Math.abs(v)<0.05?0:v}
-function axv(p,ax,sg){var i=parseInt((document.getElementById(ax)||{}).value)||0;var s=parseFloat((document.getElementById(sg)||{}).value)||1;return dz(p.axes[i]||0)*s}
+function getax(p,ax,sg){var i=parseInt((document.getElementById(ax)||{}).value)||0;var s=parseFloat((document.getElementById(sg)||{}).value)||1;
+ var v=p.axes[i];if(typeof v!=='number'||!isFinite(v))return null;return dz(v)*s}
 function rcTick(){var p=curPad();var gp=document.getElementById('gp');
  if(!p){if(gp)gp.textContent='no gamepad (move a stick / press a button to wake it)';return}
  if(gp)gp.textContent=(p.id||'pad').slice(0,22)+' | '+p.axes.map(function(a){return a.toFixed(1)}).join(' ');
  if(!sticksOn)return;
- var roll=axv(p,'axr','sgr'),pitch=axv(p,'axp','sgp'),yaw=axv(p,'axy','sgy'),thr=(axv(p,'axt','sgt')+1)/2;
- g('/fcsticks?roll='+roll.toFixed(3)+'&pitch='+pitch.toFixed(3)+'&yaw='+yaw.toFixed(3)+'&throttle='+thr.toFixed(3))}
+ var roll=getax(p,'axr','sgr'),pitch=getax(p,'axp','sgp'),yaw=getax(p,'axy','sgy');
+ if(roll===null||pitch===null||yaw===null)return;          // bad frame → skip, don't slam controls
+ var u='/fcsticks?roll='+roll.toFixed(3)+'&pitch='+pitch.toFixed(3)+'&yaw='+yaw.toFixed(3);
+ if(stickThr){var t=getax(p,'axt','sgt');if(t!==null)u+='&throttle='+(((t)+1)/2).toFixed(3)}
+ g(u)}
 setInterval(rcTick,40);
 var sk=document.getElementById('sticks');
 if(sk)sk.onclick=function(){sticksOn=!sticksOn;sk.textContent='Sticks: '+(sticksOn?'ON':'OFF');sk.className=sticksOn?'on':''};
+var stb=document.getElementById('stkthr');
+if(stb)stb.onclick=function(){stickThr=!stickThr;stb.textContent='Stick thr: '+(stickThr?'ON':'OFF');stb.className=stickThr?'on':''};
 function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
 poll();setInterval(poll,1000);
 </script></body></html>"""
