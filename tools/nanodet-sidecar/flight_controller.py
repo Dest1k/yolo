@@ -116,7 +116,22 @@ class BetaflightMSP:
         self.descent_rate = _envf("FC_DESCENT_RATE", 150.0)   # µs/s throttle drop if ground station lost
         self.throttle = self.thr_min                     # persistent throttle setpoint (full mode)
 
-        self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+        # exclusive=True locks the port so ModemManager/brltty can't grab it while we
+        # run. Clearing HUPCL stops the close() from pulsing DTR (which resets some FCs).
+        # The real cure for the "boot-loops after the script exits" is to stop
+        # ModemManager probing the port at all — see the README (udev ignore / mask).
+        try:
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.1, exclusive=True)
+        except TypeError:                                # very old pyserial: no exclusive kw
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+        try:
+            import termios
+            fd = self.ser.fileno()
+            a = termios.tcgetattr(fd)
+            a[2] &= ~termios.HUPCL                        # cflag: keep modem lines on close
+            termios.tcsetattr(fd, termios.TCSANOW, a)
+        except Exception:
+            pass
         n = max(8, self.ch_yaw + 1, self.ch_arm + 1)
         self.base = [1500] * n
         self.base[self.ch_throttle] = self.thr_min if self.full else self.throttle_us
