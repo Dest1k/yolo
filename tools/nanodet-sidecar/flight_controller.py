@@ -250,6 +250,23 @@ class BetaflightMSP:
         self._compose(0, 0, 0)
         return True
 
+    def set_sticks(self, roll, pitch, yaw, throttle_frac=None):
+        """Live transmitter sticks from the ground station (e.g. a RadioMaster TX12 in USB
+        joystick mode, read by the browser Gamepad API). Like set_manual but also takes an
+        ABSOLUTE throttle fraction 0..1 (full mode). Streamed continuously by the panel; the
+        watchdog recentres roll/pitch/yaw if the stream stops."""
+        self.last_panel = time.time()
+        if not self.armed:
+            self.neutral()
+            return False
+        if self.full and throttle_frac is not None:
+            self.throttle = clamp(self.thr_min + float(throttle_frac) * (self.thr_max - self.thr_min),
+                                  self.thr_min, self.thr_max)
+        self._compose(roll, pitch, yaw)
+        self.manual_until = time.time() + 0.4
+        self.manual_on = True
+        return True
+
     def neutral(self):
         """Centre roll/pitch/yaw (hold). Keeps streaming so the FC stays happy; in full
         mode the persistent throttle + arm state are preserved (the craft hovers)."""
@@ -351,6 +368,65 @@ class DroneFollower:
     def stop(self):
         self.fc.neutral()
         self.prev = None
+
+
+class HoldController:
+    """Experimental vision station-keeping ("resist the wind, stay put"). Estimates how
+    far the scene has drifted with optical flow (phase correlation on a downscaled grey
+    frame), integrates it into a displacement, and commands the OPPOSITE roll/pitch to
+    fly back — so wind drift gets cancelled. Output is µs offsets, fed to the FC like the
+    follower.
+
+    Works best with a **downward-facing camera** (image translation ≈ horizontal motion).
+    With a forward camera it counters framing drift but can't see forward/back well (that
+    shows as scale, not translation). Needs texture and light. Every gain/limit is env
+    tunable; flip an axis with FC_HOLD_INVERT_X/Y if it pushes the wrong way."""
+
+    def __init__(self):
+        self.kp = _envf("FC_HOLD_KP", 6.0)            # µs per pixel of accumulated drift
+        self.maxc = _envf("FC_HOLD_MAX", 110)         # clamp on the correction (µs)
+        self.res = _envi("FC_HOLD_RES", 160)          # work at this width (px)
+        self.leak = _envf("FC_HOLD_LEAK", 0.97)       # decay accumulated drift (flow-noise guard)
+        self.dead = _envf("FC_HOLD_DEAD", 1.0)        # ignore tiny drift (px)
+        self.invert_x = _envb("FC_HOLD_INVERT_X", False)
+        self.invert_y = _envb("FC_HOLD_INVERT_Y", False)
+        self.prev = None
+        self.px = 0.0
+        self.py = 0.0
+
+    def reset(self):
+        self.prev = None
+        self.px = 0.0
+        self.py = 0.0
+
+    def update(self, frame):
+        """frame (BGR) → (roll, pitch) µs offsets that fly back toward the held spot."""
+        import cv2
+        import numpy as np
+        h, w = frame.shape[:2]
+        if w <= 0 or h <= 0:
+            return 0.0, 0.0
+        scale = self.res / float(w)
+        g = cv2.cvtColor(cv2.resize(frame, (self.res, max(1, int(h * scale)))), cv2.COLOR_BGR2GRAY)
+        g = g.astype(np.float32)
+        if self.prev is None or self.prev.shape != g.shape:
+            self.prev = g
+            return 0.0, 0.0
+        try:
+            (dx, dy), _resp = cv2.phaseCorrelate(self.prev, g)
+        except Exception:
+            self.prev = g
+            return 0.0, 0.0
+        self.prev = g
+        self.px = self.px * self.leak + dx
+        self.py = self.py * self.leak + dy
+        rx = 0.0 if abs(self.px) < self.dead else clamp(self.kp * self.px, -self.maxc, self.maxc)
+        ry = 0.0 if abs(self.py) < self.dead else clamp(self.kp * self.py, -self.maxc, self.maxc)
+        if self.invert_x:
+            rx = -rx
+        if self.invert_y:
+            ry = -ry
+        return rx, ry
 
 
 def make_follower():

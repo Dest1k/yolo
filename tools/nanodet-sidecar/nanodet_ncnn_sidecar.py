@@ -846,6 +846,7 @@ class State:
         self.stream_fps = 0; self.det_fps = 0; self.labels = None; self.jpeg_q = 75
         self.gimbal = None; self.follower = None; self.tracking = False; self.target = None
         self.drone = None; self.fc = None        # Betaflight follow-me flight controller
+        self.hold = False; self.hold_ctl = None  # vision station-keeping (wind resist)
         self.obj = ObjectTracker(); self.manual_req = None; self.manual_clear = False; self.manual_box = None
         self.pick_request = None                  # click-to-pick among multiple targets (visual-only mode)
         self.running = True
@@ -965,11 +966,27 @@ def follow_loop(state):
                 state.target = target
             else:
                 state.target = None
+            if state.hold_ctl is not None:
+                state.hold_ctl.reset()               # tracking has priority — don't let hold fight it
+        elif state.hold and state.fc is not None and state.hold_ctl is not None:
+            # Station-keeping (wind resist). Manual sticks/d-pad win: if the operator is
+            # commanding, release the held spot to wherever they put it.
+            if time.time() < state.fc.manual_until:
+                state.hold_ctl.reset()
+            else:
+                with state.lock:
+                    frame = state.frame
+                if frame is not None:
+                    roll, pitch = state.hold_ctl.update(frame)
+                    state.fc.set_control(roll=roll, pitch=pitch, yaw=0.0)
+            state.target = None
         else:
             if state.follower is not None:
                 state.follower.stop()
             if state.drone is not None:
                 state.drone.stop()
+            if state.hold_ctl is not None:
+                state.hold_ctl.reset()
             state.target = None
         time.sleep(0.066)
 
@@ -1030,6 +1047,7 @@ def _status_json(state):
         "fcArmed": bool(state.fc.armed) if state.fc is not None else False,
         "fcFull": bool(state.fc.full) if state.fc is not None else False,
         "fcThrottle": int(state.fc.throttle) if state.fc is not None else 0,
+        "fcHold": bool(state.hold),
     }, allow_nan=False)
 
 
@@ -1093,6 +1111,7 @@ def make_handler(state):
                     if path == "/attitude" and g: g.request_attitude()
                 elif path == "/track":
                     on = q.get("on"); state.tracking = (on in ("1", "true")) if on is not None else (not state.tracking)
+                    if state.tracking: state.hold = False    # mutually exclusive with station-keeping
                 elif path == "/pick":
                     if "nx" in q and "ny" in q:
                         nx, ny = float(q["nx"]), float(q["ny"])
@@ -1116,6 +1135,19 @@ def make_handler(state):
                     if state.fc is not None: state.fc.neutral()
                 elif path == "/fcthrottle":                 # full RX=MSP mode: throttle trim
                     if state.fc is not None: state.fc.set_throttle(int(float(q.get("d", 0))))
+                elif path == "/fcsticks":                   # live transmitter sticks (TX12 via Gamepad API)
+                    if state.fc is not None and state.drone is not None:
+                        d = state.drone; thr = q.get("throttle")
+                        state.fc.set_sticks(float(q.get("roll", 0)) * d.max_roll,
+                                            float(q.get("pitch", 0)) * d.max_pitch,
+                                            float(q.get("yaw", 0)) * d.max_yaw,
+                                            float(thr) if thr is not None else None)
+                elif path == "/fchold":                     # station-keeping (wind resist) toggle
+                    on = q.get("on")
+                    state.hold = (on in ("1", "true")) if on is not None else (not state.hold)
+                    if state.hold:
+                        state.tracking = False              # mutually exclusive with follow
+                        if state.hold_ctl is not None: state.hold_ctl.reset()
                 elif g is None:
                     pass
                 elif path == "/rotate": g.rotate(int(float(q.get("yaw", 0))), int(float(q.get("pitch", 0))))
@@ -1185,13 +1217,20 @@ input{width:52px;background:rgba(0,0,0,.5);color:#eee;border:1px solid #777;bord
 <div class="grp"><button onclick="g('/autofocus')">AF</button><button id="ff">focus+</button><button id="fn">focus-</button></div>
 <div class="grp">yaw<input id="ay" value="0">pitch<input id="ap" value="0"><button onclick="g('/angle?yaw='+ay.value+'&pitch='+ap.value)">go</button></div></div>
 <div id="drone" class="ov">
+<div><button id="hold" onclick="g('/fchold')">HOLD: OFF</button><button id="sticks">Sticks: OFF</button></div>
 <button id="arm" onclick="g('/fcarm')">ARM: OFF</button>
 <div id="dpad">
 <span></span><button data-d="pitch=1">▲ fwd</button><span></span>
 <button data-d="yaw=-1">⟲ yaw</button><button id="dstop">■</button><button data-d="yaw=1">yaw ⟳</button>
 <button data-d="roll=-1">◄</button><button data-d="pitch=-1">▼ back</button><button data-d="roll=1">►</button></div>
 <div id="thr" style="display:none;margin-top:4px">
-<button id="thrdn">THR ▼</button><span id="thrval" style="display:inline-block;min-width:54px;text-align:center">—</span><button id="thrup">THR ▲</button></div></div>
+<button id="thrdn">THR ▼</button><span id="thrval" style="display:inline-block;min-width:54px;text-align:center">—</span><button id="thrup">THR ▲</button></div>
+<div id="rcmap" style="display:none;font-size:11px;margin-top:4px;line-height:1.7">
+<div id="gp" style="opacity:.8">no gamepad</div>
+axis/sign &mdash; R<input id="axr" value="0" style="width:30px"><input id="sgr" value="1" style="width:30px">
+P<input id="axp" value="1" style="width:30px"><input id="sgp" value="-1" style="width:30px">
+Y<input id="axy" value="3" style="width:30px"><input id="sgy" value="1" style="width:30px">
+T<input id="axt" value="2" style="width:30px"><input id="sgt" value="1" style="width:30px"></div></div>
 <script>
 var vid=document.getElementById('vid'),sel=document.getElementById('sel');vid.src='/stream';
 var HASGIMBAL=false,showG=false,gotStatus=false;
@@ -1207,6 +1246,8 @@ function show(s){gotStatus=true;var st=document.getElementById('st');
  var ab=document.getElementById('arm');if(ab){ab.textContent=(s.fcFull?'ARM MOTORS: ':'ARM: ')+(s.fcArmed?'ON':'OFF');ab.className=s.fcArmed?'on':''}
  var th=document.getElementById('thr');if(th)th.style.display=s.fcFull?'':'none';
  var tv=document.getElementById('thrval');if(tv&&s.fcThrottle!=null)tv.textContent='thr '+s.fcThrottle;
+ var hb=document.getElementById('hold');if(hb){hb.textContent='HOLD: '+(s.fcHold?'ON':'OFF');hb.className=s.fcHold?'on':''}
+ var rm=document.getElementById('rcmap');if(rm)rm.style.display=s.hasFC?'':'none';
  var t=document.getElementById('trk');t.firstChild.nodeValue=(s.tracking?'\\u25cf LOCK ON ':'LOCK OFF ');
  t.style.background=s.tracking?'rgba(255,40,40,.75)':'rgba(0,0,0,.5)'}
 applyG();
@@ -1242,6 +1283,20 @@ document.querySelectorAll('#dpad button[data-d]').forEach(function(b){
 hold(document.getElementById('dstop'),function(){g('/fcstop')},function(){g('/fcstop')});
 var tu=document.getElementById('thrup');if(tu)tu.onclick=function(){g('/fcthrottle?d=1')};
 var tdn=document.getElementById('thrdn');if(tdn)tdn.onclick=function(){g('/fcthrottle?d=-1')};
+// ── transmitter sticks via the browser Gamepad API (RadioMaster TX12 in USB joystick mode) ──
+var sticksOn=false;
+function curPad(){var ps=navigator.getGamepads?navigator.getGamepads():[];for(var i=0;i<ps.length;i++)if(ps[i])return ps[i];return null}
+function dz(v){return Math.abs(v)<0.05?0:v}
+function axv(p,ax,sg){var i=parseInt((document.getElementById(ax)||{}).value)||0;var s=parseFloat((document.getElementById(sg)||{}).value)||1;return dz(p.axes[i]||0)*s}
+function rcTick(){var p=curPad();var gp=document.getElementById('gp');
+ if(!p){if(gp)gp.textContent='no gamepad (move a stick / press a button to wake it)';return}
+ if(gp)gp.textContent=(p.id||'pad').slice(0,22)+' | '+p.axes.map(function(a){return a.toFixed(1)}).join(' ');
+ if(!sticksOn)return;
+ var roll=axv(p,'axr','sgr'),pitch=axv(p,'axp','sgp'),yaw=axv(p,'axy','sgy'),thr=(axv(p,'axt','sgt')+1)/2;
+ g('/fcsticks?roll='+roll.toFixed(3)+'&pitch='+pitch.toFixed(3)+'&yaw='+yaw.toFixed(3)+'&throttle='+thr.toFixed(3))}
+setInterval(rcTick,40);
+var sk=document.getElementById('sticks');
+if(sk)sk.onclick=function(){sticksOn=!sticksOn;sk.textContent='Sticks: '+(sticksOn?'ON':'OFF');sk.className=sticksOn?'on':''};
 function poll(){fetch('/status').then(function(r){if(!r.ok)throw 0;return r.json()}).then(show).catch(fail)}
 poll();setInterval(poll,1000);
 </script></body></html>"""
@@ -1325,6 +1380,7 @@ def main():
         made = flight_controller.make_follower()
         if made:
             state.fc, state.drone = made
+            state.hold_ctl = flight_controller.HoldController()   # vision station-keeping (wind resist)
             flight_controller.print_safety_banner(state.fc)
             print("  flight controller: ENABLED — press ARM on the panel, then Space (track) "
                   "to follow, or use the d-pad for manual control")

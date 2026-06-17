@@ -155,6 +155,17 @@ strafe): held = move, released = recentre, and if the page is lost the sticks re
 within ~0.4 s. A manual nudge briefly overrides the follower. HTTP API:
 `/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=` (each -1..1), `/fcstop`.
 
+**Transmitter sticks** (RadioMaster TX12 in USB joystick mode) drive the drone straight
+from the panel via the browser **Gamepad API** — toggle **Sticks: ON**, set the axis/sign
+mapping shown at the bottom of the panel. Endpoint `/fcsticks?roll=&pitch=&yaw=&throttle=`
+(r/p/y -1..1, throttle 0..1 for full mode).
+
+**Station-keeping (wind resist)** — the **HOLD** button turns on vision position-hold:
+optical-flow (phase-correlation) estimates scene drift and commands opposite roll/pitch to
+stay put. Experimental, mutually exclusive with follow, best with a **downward camera**.
+Tune `FC_HOLD_KP`/`FC_HOLD_MAX`/`FC_HOLD_RES`/`FC_HOLD_LEAK`/`FC_HOLD_DEAD`,
+flip `FC_HOLD_INVERT_X/Y`. Endpoint `/fchold?on=1|0`.
+
 ### Full RX=MSP mode (no transmitter) — `FC_MODE=full`
 
 For boards without MSP Override. The Pi becomes the **whole** receiver and drives
