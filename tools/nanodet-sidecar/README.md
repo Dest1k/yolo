@@ -77,6 +77,23 @@ If a page builds its URL in JavaScript (nothing in the HTML), open it in a brows
 the **Network tab** for the `.m3u8`/`.mp4` request and pass **that** URL directly.
 `YOLO_SCRAPE=0` disables the HTML scrape.
 
+### Detecting small objects in big/wide streams — tiling (`ND_TILES`)
+
+A high-res or wide webcam squashed to the model's small input turns distant people/cars
+into a few pixels → no detections. **Tiling** splits each frame into overlapping tiles,
+detects on each (objects are now larger), and merges with NMS:
+
+```bash
+ND_TILES=auto  …    # pick a grid from the frame size (e.g. 1080p→3×2, 4K→4×3)
+ND_TILES=3x2   …    # force a 3×2 grid
+ND_TILES=off   …    # default (whole frame at once)
+```
+Tune `ND_TILE_OVERLAP` (0.2), `ND_TILE_SCALE` (auto aggressiveness, lower = more tiles),
+`ND_TILE_NMS`. Cost: an N×M grid is ~N·M inferences per frame, so FPS drops accordingly —
+it's for **accuracy/testing**, not max FPS. Also remember the model only finds classes it
+was trained on (street cam → use a **COCO** model + `YOLO_FILTER=person,car`), and a high
+`YOLO_CONF` can hide weak small-object hits — try `YOLO_CONF=0.25`.
+
 ```bash
 sudo apt install -y ffmpeg          # required for URL ingestion
 pip3 install -U yt-dlp              # only for site pages (YouTube/Twitch/…)

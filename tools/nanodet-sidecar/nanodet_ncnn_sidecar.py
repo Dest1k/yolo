@@ -1257,8 +1257,67 @@ def follow_loop(state):
         time.sleep(0.066)
 
 
+def _tile_rects(W, H, cols, rows, overlap):
+    """Split WxH into cols×rows overlapping rectangles (overlap = fraction of a tile)."""
+    rects = []
+    tw, th = W / cols, H / rows
+    ox, oy = tw * overlap, th * overlap
+    for r in range(rows):
+        for c in range(cols):
+            x1 = int(max(0, c * tw - ox)); y1 = int(max(0, r * th - oy))
+            x2 = int(min(W, (c + 1) * tw + ox)); y2 = int(min(H, (r + 1) * th + oy))
+            if x2 - x1 > 8 and y2 - y1 > 8:
+                rects.append((x1, y1, x2, y2))
+    return rects
+
+
+def _nms_merge(dets, conf, iou):
+    """Per-class NMS over boxes from all tiles (kills overlap-zone duplicates)."""
+    if not dets:
+        return []
+    out = []
+    labels = np.array([d[5] for d in dets])
+    for cls in np.unique(labels):
+        idx = np.where(labels == cls)[0]
+        boxes = [[dets[i][0], dets[i][1], dets[i][2] - dets[i][0], dets[i][3] - dets[i][1]] for i in idx]
+        scores = [float(dets[i][4]) for i in idx]
+        ind = cv2.dnn.NMSBoxes(boxes, scores, conf, iou)
+        for k in np.array(ind).reshape(-1):
+            out.append(dets[idx[k]])
+    return out
+
+
+def tiled_detect(detector, frame, cols, rows, overlap, iou):
+    """Run the detector on each tile and merge — so small objects in a big/wide frame
+    aren't lost when the whole thing is squashed to the model's small input."""
+    H, W = frame.shape[:2]
+    alld = []
+    for (x1, y1, x2, y2) in _tile_rects(W, H, cols, rows, overlap):
+        tile = np.ascontiguousarray(frame[y1:y2, x1:x2])
+        for (bx1, by1, bx2, by2, conf, cls) in detector.detect(tile):
+            alld.append((bx1 + x1, by1 + y1, bx2 + x1, by2 + y1, conf, cls))
+    return _nms_merge(alld, detector.conf, iou)
+
+
+def _auto_tiles(W, H, inp):
+    """Pick a tile grid so each tile is only modestly downscaled into the model input."""
+    scale = float(env("ND_TILE_SCALE", "1.6"))
+    cols = max(1, min(4, round(W / (inp * scale))))
+    rows = max(1, min(4, round(H / (inp * scale))))
+    return cols, rows
+
+
 def inference_loop(state, detector, track_on, filter_set=None):
     tracker = Tracker(hold_s=float(env("YOLO_TRACK_HOLD", "0.3"))) if track_on else None
+    # Tiling: ND_TILES = off (default) | auto | CxR (e.g. 3x2). Helps high-res / wide
+    # streams where distant objects vanish when the frame is squashed to the input size.
+    spec = (env("ND_TILES", "off") or "off").lower()
+    overlap = float(env("ND_TILE_OVERLAP", "0.2"))
+    tile_iou = float(env("ND_TILE_NMS", str(detector.nms)))
+    cols = rows = 1
+    auto = (spec == "auto")
+    if re.match(r"^\d+x\d+$", spec):
+        cols, rows = (int(v) for v in spec.split("x"))
     count, t0 = 0, time.time(); last_seq = -1
     while state.running:
         with state.lock:
@@ -1267,8 +1326,14 @@ def inference_loop(state, detector, track_on, filter_set=None):
         last_seq = seq
         if frame is None:
             time.sleep(0.01); continue
+        if auto:                                       # resolve the grid from the real frame size, once
+            h, w = frame.shape[:2]; cols, rows = _auto_tiles(w, h, detector.input); auto = False
+            print(f"  tiling: auto → {cols}x{rows} grid for {w}x{h} input (ND_TILES to override)")
         try:
-            dets = detector.detect(frame)
+            if cols * rows > 1:
+                dets = tiled_detect(detector, frame, cols, rows, overlap, tile_iou)
+            else:
+                dets = detector.detect(frame)
             if filter_set is not None:
                 dets = [d for d in dets if d[5] in filter_set]
             if tracker is not None:
