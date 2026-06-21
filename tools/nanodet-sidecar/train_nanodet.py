@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 r"""
-Train NanoDet-Plus on your dataset AND auto-export an optimised NCNN model — one
-command, same paradigm as train_yolofastest.py.
+Обучение NanoDet-Plus на своём датасете И автоматический экспорт оптимизированной
+NCNN-модели — одной командой, в той же логике, что и train_yolofastest.py.
 
->>> Edit the CONFIG block below and run:   python train_nanodet.py
-    (No environment variables needed. Windows-friendly.)
-    Prefer clicking? Run the GUI:           python train_nanodet_gui.py
-    (every field below — including fine-tuning — set in a window, live log under it.)
+>>> Поправь блок НАСТРОЙКИ ниже и запусти:   python train_nanodet.py
+    (Никаких переменных окружения не нужно. Дружелюбно к Windows.)
+    Любишь кликать мышкой? Запусти окно:      python train_nanodet_gui.py
+    (там же — вкладка «Готовые модели»: COCO-модель в один клик, без обучения.)
 
-Fine-tuning (дообучение): point WEIGHTS at a finished .ckpt to continue a model on
-new/expanded data, or RESUME at an interrupted run. Both also drivable from the GUI.
+Дообучение: укажи WEIGHTS на готовый .ckpt, чтобы продолжить модель на новых/расширенных
+данных, или RESUME на прерванный запуск. И то, и другое доступно из окна.
 
-What it does: converts your YOLO dataset to COCO JSON (no image copying), clones
-RangiLyu/nanodet, writes a custom config off the stock nanodet-plus-m, trains, then
-runs export_ncnn.py → a verified, fp16 .param/.bin for the NanoDet sidecar.
+Что делает: конвертирует твой YOLO-датасет в COCO JSON (без копирования картинок),
+клонирует RangiLyu/nanodet, пишет кастомный конфиг на основе штатного nanodet-plus-m,
+обучает, затем запускает export_ncnn.py -> проверенную fp16 .param/.bin для сайдкара.
 
-Why NanoDet-Plus over YOLO-FastestV2: an FPN over 3-4 strides (8/16/32/64) means
-much better SMALL-object detection, while still CPU-real-time on a Pi 5. It's plain
-PyTorch + PyTorch-Lightning, so a cu128 nightly trains it on a Blackwell GPU (unlike
-PaddleDetection/PicoDet, which won't run on Blackwell at all).
+Почему NanoDet-Plus, а не YOLO-FastestV2: FPN по 3-4 страйдам (8/16/32/64) даёт намного
+лучшее обнаружение МЕЛКИХ объектов, оставаясь реалтаймом на CPU Pi 5. Это чистый
+PyTorch + PyTorch-Lightning, поэтому nightly cu128 обучает его на GPU Blackwell (в отличие
+от PaddleDetection/PicoDet, которые на Blackwell вообще не пойдут).
 
-Install (Windows, in your venv):
+Установка (Windows, в твоём venv):
     pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
     pip install opencv-python numpy onnx onnxsim ncnn pnnx pytorch-lightning pycocotools omegaconf
 
-⚠️ This is an orchestration wrapper around the upstream repo. NanoDet's config schema
-   is stable but not frozen — the trainer reports every field it patches; if it warns
-   that a key wasn't found, open the generated config and set it by hand.
+⚠️ Это обёртка-оркестратор поверх апстрим-репозитория. Схема конфига NanoDet стабильна,
+   но не заморожена — тренер печатает каждое поле, которое патчит; если предупредит, что
+   ключ не найден — открой сгенерированный конфиг и поправь руками.
 """
 
 import os
@@ -37,55 +38,56 @@ import json
 import shutil
 import subprocess
 
-# Windows consoles default to a legacy code page (e.g. cp1251) that can't encode the
-# arrows/emoji we print -> UnicodeEncodeError. Replace un-encodable chars instead of
-# crashing training. (Also covers export_ncnn.py, imported in-process below.)
+# Консоли Windows по умолчанию в legacy-кодировке (cp1251), которая не может закодировать
+# стрелки/эмодзи -> UnicodeEncodeError. Просим заменять непечатаемые символы вместо краха.
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(errors="replace")
     except Exception:
         pass
 
-# ========================= CONFIG — EDIT ME ==================================
-DATASET    = r"C:\Users\dest\Desktop\test\merged_dataset"   # YOLO root (images/{train,val} + labels/{train,val})
-CLASSES    = ["Birds", "Drones", "Dron2"]                   # in YOLO id order
+# ========================= НАСТРОЙКИ — ПРАВЬ ЗДЕСЬ ===========================
+DATASET    = r"C:\Users\dest\Desktop\test\merged_dataset"   # корень YOLO (images/{train,val} + labels/{train,val})
+CLASSES    = ["Birds", "Drones", "Dron2"]                   # в порядке id из YOLO
 
-INPUT      = 416            # square input (NanoDet-Plus-m default 416; 320 = faster, less small-object reach)
-EPOCHS     = 200            # NanoDet converges faster than from-scratch YOLO; 100-300 typical
-REG_MAX    = 7             # DFL bins per side − 1 (nanodet-plus default 7) — keep unless you change the head
-LR         = None           # learning rate; None = keep the stock config's. Fine-tuning wants a lower one (e.g. 0.0005)
+MODEL_SIZE = "1.0x"        # тяжесть модели: "1.0x" (легче/быстрее) или "1.5x" (тяжелее/точнее)
+INPUT      = 416           # квадратный вход (у nanodet-plus-m по умолчанию 416; 320 = быстрее, хуже мелочь)
+EPOCHS     = 200           # NanoDet сходится быстрее, чем YOLO с нуля; обычно 100-300
+REG_MAX    = 7             # число бинов DFL на сторону − 1 (по умолчанию 7) — не трогай, если не менял голову
+LR         = None          # learning rate; None = оставить из штатного конфига. Для дообучения берут поменьше (напр. 0.0005)
 
-# ── Fine-tuning / resuming (дообучение) ───────────────────────────────────────
-#   WEIGHTS — load these weights as a STARTING point and train fresh on your data
-#             (transfer-learning / continue a finished model on new/expanded data).
-#   RESUME  — continue an INTERRUPTED run, keeping optimizer state + epoch counter.
-#   Give a .ckpt path to either (leave "" to train from scratch). WEIGHTS is the
-#   usual "дообучение" lever; RESUME is for picking a crashed run back up.
-WEIGHTS    = ""             # e.g. r"C:\...\nanodet\workspace\custom\model_best\model_best.ckpt"
-RESUME     = ""             # e.g. r"C:\...\nanodet\workspace\custom\model_last.ckpt"
+# ── Дообучение / возобновление ────────────────────────────────────────────────
+#   WEIGHTS — загрузить эти веса как СТАРТОВУЮ точку и обучаться заново на твоих данных
+#             (transfer-learning / продолжить готовую модель на новых/расширенных данных).
+#   RESUME  — продолжить ПРЕРВАННЫЙ запуск, сохранив состояние оптимизатора + счётчик эпох.
+#   Передай путь к .ckpt в одно из двух (оставь "" — обучение с нуля). WEIGHTS — обычный
+#   рычаг «дообучения»; RESUME — чтобы подхватить упавший запуск.
+WEIGHTS    = ""            # напр. r"C:\...\nanodet\workspace\custom\model_best\model_best.ckpt"
+RESUME     = ""            # напр. r"C:\...\nanodet\workspace\custom\model_last.ckpt"
 
-# ── Hardware (Ultra 9 285K + RTX 5090 32GB + 128GB) ───────────────────────────
-DEVICE     = "gpu"          # "gpu" (RTX 5090, cu128 nightly torch) or "cpu"
+# ── Железо (Ultra 9 285K + RTX 5090 32GB + 128GB RAM, Windows) ────────────────
+DEVICE     = "gpu"         # "gpu" (RTX 5090, nightly torch cu128) или "cpu"
 GPU_IDS    = [0]
-BATCH      = 96             # nanodet-plus-m is small; 96-160 fits 32GB. OOM? lower.
-WORKERS    = 20             # dataloader workers per GPU (285K = 24 cores)
+BATCH      = 96            # nanodet-plus-m небольшой; 96-160 влезает в 32GB. OOM? уменьши.
+WORKERS    = 20            # воркеров загрузчика на GPU (у 285K — 24 ядра)
 
-# ── Plumbing ──────────────────────────────────────────────────────────────────
-OUT        = "nd_data"                 # where the COCO .json files are written
-REPO_DIR   = "nanodet"                 # where RangiLyu/nanodet is cloned
-BASE_CFG   = "config/nanodet-plus-m_416.yml"   # stock config to start from
-EXPORT     = True                      # after training, auto-export a verified ncnn model
-OUT_STEM   = "nanodet"                 # output stem for the exported .param/.bin
+# ── Служебное ──────────────────────────────────────────────────────────────────
+OUT        = "nd_data"                 # куда писать COCO .json
+REPO_DIR   = "nanodet"                 # куда клонируется RangiLyu/nanodet
+BASE_CFG   = ""                        # базовый конфиг; "" = выбрать автоматически по MODEL_SIZE+INPUT
+EXPORT     = True                      # после обучения — авто-экспорт проверенной ncnn-модели
+OUT_STEM   = "nanodet"                 # имя-основа для экспортируемых .param/.bin
 # =============================================================================
 
-# ── Env overrides — so the command center (or any launcher) can drive training
-#    without editing this file. Same TRAIN_* keys for every trainer. ───────────
+# ── Переопределения через окружение — чтобы командный центр (или любой запускатель)
+#    управлял обучением без правки этого файла. Одни и те же ключи TRAIN_* у всех тренеров.
 def _envc(name, cur, cast=str):
     v = os.environ.get(name)
     return cast(v) if v not in (None, "") else cur
 DATASET = _envc("TRAIN_DATASET", DATASET)
 if os.environ.get("TRAIN_CLASSES"):
     CLASSES = [c.strip() for c in os.environ["TRAIN_CLASSES"].split(",") if c.strip()]
+MODEL_SIZE = _envc("TRAIN_MODEL_SIZE", MODEL_SIZE)
 INPUT   = _envc("TRAIN_INPUT", INPUT, int)
 EPOCHS  = _envc("TRAIN_EPOCHS", EPOCHS, int)
 REG_MAX = _envc("TRAIN_REG_MAX", REG_MAX, int)
@@ -94,6 +96,7 @@ WORKERS = _envc("TRAIN_WORKERS", WORKERS, int)
 DEVICE  = _envc("TRAIN_DEVICE", DEVICE)
 WEIGHTS = _envc("TRAIN_WEIGHTS", WEIGHTS)
 RESUME  = _envc("TRAIN_RESUME", RESUME)
+BASE_CFG = _envc("TRAIN_BASE_CFG", BASE_CFG)
 if os.environ.get("TRAIN_LR"):
     LR = float(os.environ["TRAIN_LR"])
 if os.environ.get("TRAIN_GPU_IDS"):
@@ -102,6 +105,17 @@ if os.environ.get("TRAIN_EXPORT"):
     EXPORT = os.environ["TRAIN_EXPORT"].lower() not in ("0", "false", "no", "off")
 
 IMG_EXT = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+
+
+def выбрать_базовый_конфиг():
+    """Базовый конфиг под выбранную тяжесть модели (1.0x/1.5x) и вход. У NanoDet-Plus есть
+    штатные конфиги на 320 и 416; для нестандартного входа берём ближайший и патчим
+    input_size. BASE_CFG, заданный явно, имеет приоритет."""
+    if BASE_CFG:
+        return BASE_CFG
+    size = "-1.5x" if str(MODEL_SIZE).strip().lower() in ("1.5x", "1.5", "m-1.5x") else ""
+    base_res = 320 if INPUT <= 352 else 416     # какой штатный конфиг ближе по разрешению
+    return f"config/nanodet-plus-m{size}_{base_res}.yml"
 
 
 def sh(cmd, cwd=None, extra_env=None):
@@ -113,16 +127,16 @@ def sh(cmd, cwd=None, extra_env=None):
 
 
 def setup_repo_env():
-    """Install the cloned nanodet's dependencies — WITHOUT clobbering your torch — so the
-    next steps don't die on a missing sub-module or the wrong pytorch-lightning.
+    """Ставим зависимости склонированного nanodet — БЕЗ затрагивания твоего torch — чтобы
+    следующие шаги не упали на отсутствующем подмодуле или не той версии pytorch-lightning.
 
-    `tools/train.py` does `import nanodet`; that's handled by PYTHONPATH=<repo> (set on the
-    training call), so we don't pip-install the package itself (avoids a setup.py build).
-    Here we only install the repo's requirements EXCEPT torch/vision/audio, which pulls the
-    right pytorch-lightning/omegaconf/tabulate/… versions while keeping your cu128 nightly
-    torch. Skip the whole thing with TRAIN_PIP=0."""
+    `tools/train.py` делает `import nanodet`; это решается через PYTHONPATH=<repo> (он задаётся
+    на вызове обучения), поэтому сам пакет pip-ом не ставим (избегаем сборки setup.py). Тут
+    ставим только зависимости из requirements репозитория, КРОМЕ torch/vision/audio — это тянет
+    правильные версии pytorch-lightning/omegaconf/tabulate/…, не трогая твой nightly cu128 torch.
+    Пропустить всё это можно через TRAIN_PIP=0."""
     if os.environ.get("TRAIN_PIP", "1").lower() in ("0", "false", "no", "off"):
-        print("  (TRAIN_PIP=0 — skipping auto dep install; relying on PYTHONPATH + your env)")
+        print("  (TRAIN_PIP=0 — пропускаю авто-установку зависимостей; полагаюсь на PYTHONPATH + твоё окружение)")
         return
     req = os.path.join(os.path.abspath(REPO_DIR), "requirements.txt")
     if not os.path.isfile(req):
@@ -134,23 +148,24 @@ def setup_repo_env():
             continue
         name = re.split(r"[<>=!~;\[ ]", spec)[0].strip().lower()
         if name in ("torch", "torchvision", "torchaudio"):
-            continue                                  # keep the user's cu128 nightly build
+            continue                                  # сохраняем nightly cu128 сборку пользователя
         pkgs.append(spec)
     if pkgs:
-        print(f"[2b/4] Installing nanodet deps (minus torch): {', '.join(pkgs)}")
+        print(f"[2b/4] Ставлю зависимости nanodet (без torch): {', '.join(pkgs)}")
         sh([sys.executable, "-m", "pip", "install", *pkgs])
 
 
 _WRAPPER_SRC = '''\
-# Auto-generated by train_nanodet.py. Restores APIs that newer PyTorch removed so the
-# (older) nanodet / pytorch-lightning code runs on a torch 2.x / cu128 build, then runs
-# nanodet's tools/train.py.
+# -*- coding: utf-8 -*-
+# Авто-сгенерировано train_nanodet.py. Возвращает API, которые свежий PyTorch убрал, чтобы
+# (старый) код nanodet / pytorch-lightning работал на сборке torch 2.x / cu128, затем
+# запускает nanodet/tools/train.py.
 import os, sys, types, runpy
 import collections.abc as _abc
-sys.path.insert(0, os.getcwd())                     # so `import nanodet` finds the cloned repo
+sys.path.insert(0, os.getcwd())                     # чтобы `import nanodet` нашёл склонированный репозиторий
 try:
     import torch
-    if not hasattr(torch, "_six"):                  # removed in torch 2.0 — old code still imports it
+    if not hasattr(torch, "_six"):                  # убрано в torch 2.0 — старый код всё ещё импортирует
         m = types.ModuleType("torch._six")
         m.string_classes = (str, bytes)
         m.int_classes = int
@@ -159,9 +174,16 @@ try:
         m.PY37 = sys.version_info >= (3, 7)
         torch._six = m
         sys.modules["torch._six"] = m
-        print("  [compat] shimmed torch._six for the older training code")
+        print("  [совместимость] подменил torch._six для старого кода обучения")
+    # torch 2.6+: weights_only по умолчанию True -> дообучение с .ckpt (объекты Lightning)
+    # иначе падает. Чекпойнты — твои/официальные, источник доверенный.
+    _orig_load = torch.load
+    def _load_compat(*a, **k):
+        k.setdefault("weights_only", False)
+        return _orig_load(*a, **k)
+    torch.load = _load_compat
 except Exception as e:
-    print("  [compat] torch._six shim skipped:", e)
+    print("  [совместимость] шим torch пропущен:", e)
 cfg = sys.argv[1]
 sys.argv = [os.path.join("tools", "train.py"), cfg]
 runpy.run_path(os.path.join("tools", "train.py"), run_name="__main__")
@@ -169,9 +191,9 @@ runpy.run_path(os.path.join("tools", "train.py"), run_name="__main__")
 
 
 def write_train_wrapper():
-    """Write a tiny launcher that shims torch._six (and friends) before nanodet's
-    tools/train.py — the usual 'No module named torch._six' on a modern torch. Returns
-    its absolute path; it's run with cwd=<repo>."""
+    """Пишем крошечный лаунчер, который подменяет torch._six (и torch.load) до nanodet/
+    tools/train.py — обычная ошибка 'No module named torch._six' на современном torch.
+    Возвращает абсолютный путь; запускается с cwd=<repo>."""
     os.makedirs(OUT, exist_ok=True)
     path = os.path.abspath(os.path.join(OUT, "_nd_train_wrapper.py"))
     with open(path, "w", encoding="utf-8") as f:
@@ -186,7 +208,7 @@ def _has_imgs(d):
 
 
 def _split_dir(split):
-    """Find the images dir for a split across common YOLO layouts."""
+    """Находим папку с картинками сплита для частых раскладок YOLO."""
     for c in (os.path.join(DATASET, "images", split),
               os.path.join(DATASET, split, "images"),
               os.path.join(DATASET, split)):
@@ -203,7 +225,7 @@ def _list_images(d):
 
 
 def _img_size(path):
-    """(w, h) without fully decoding when possible (PIL), else OpenCV."""
+    """(w, h) без полного декодирования, когда можно (PIL), иначе OpenCV."""
     try:
         from PIL import Image
         with Image.open(path) as im:
@@ -221,7 +243,7 @@ def _label_path(img_path):
 
 
 def build_coco(split):
-    """YOLO → COCO JSON (no image copy). Returns (img_dir, json_path, n_imgs)."""
+    """YOLO -> COCO JSON (без копирования картинок). Возвращает (img_dir, json_path, n_imgs)."""
     d = _split_dir(split)
     if not d:
         return None, None, 0
@@ -252,28 +274,28 @@ def build_coco(split):
     os.makedirs(OUT, exist_ok=True)
     jp = os.path.abspath(os.path.join(OUT, f"instances_{split}.json"))
     json.dump(coco, open(jp, "w"))
-    print(f"  {split}: {img_id - 1} images, {n_obj} objects  (img_path={d})")
+    print(f"  {split}: {img_id - 1} картинок, {n_obj} объектов  (img_path={d})")
     return os.path.abspath(d), jp, img_id - 1
 
 
-def write_config(train_img, train_json, val_img, val_json):
-    """Copy the stock nanodet-plus config and patch only the dataset/class/schedule
-    fields. Reports each patch; warns on any key it couldn't find (schema drift)."""
-    src = os.path.join(REPO_DIR, BASE_CFG)
+def write_config(base_cfg, train_img, train_json, val_img, val_json):
+    """Копируем штатный конфиг nanodet-plus и патчим только поля датасета/классов/расписания.
+    Сообщаем о каждом патче; предупреждаем о ключе, который не нашли (дрейф схемы)."""
+    src = os.path.join(REPO_DIR, *base_cfg.split("/"))
     if not os.path.isfile(src):
-        sys.exit(f"ERROR: base config not found: {src}\n  (check BASE_CFG / the clone)")
+        sys.exit(f"ОШИБКА: базовый конфиг не найден: {src}\n  (проверь MODEL_SIZE/INPUT/BASE_CFG и клон)")
     s = open(src, encoding="utf-8").read()
 
     def sub(pattern, repl, n, what, flags=0):
         nonlocal s
         s, c = re.subn(pattern, repl, s, count=n, flags=flags)
-        print(f"  patch {what}: {c} site(s)" + ("  [!] NOT FOUND" if c == 0 else ""))
+        print(f"  патч {what}: {c} мест" + ("  [!] НЕ НАЙДЕНО" if c == 0 else ""))
 
     names = ", ".join(f"'{c}'" for c in CLASSES)
     sub(r"(?m)^save_dir:.*$", "save_dir: workspace/custom", 1, "save_dir")
     sub(r"num_classes:\s*\d+", f"num_classes: {len(CLASSES)}", 0, "num_classes")
     sub(r"(?m)^class_names:.*$", f"class_names: &class_names [{names}]", 1, "class_names")
-    # img_path / ann_path appear train-then-val; replace the first two of each in order.
+    # img_path / ann_path идут train-затем-val; меняем первые два каждого по порядку.
     img_it = iter([train_img, val_img]); ann_it = iter([train_json, val_json])
     sub(r"(?m)^(\s*img_path:\s*).*$", lambda m: m.group(1) + next(img_it), 2, "img_path (train,val)")
     sub(r"(?m)^(\s*ann_path:\s*).*$", lambda m: m.group(1) + next(ann_it), 2, "ann_path (train,val)")
@@ -282,18 +304,18 @@ def write_config(train_img, train_json, val_img, val_json):
     sub(r"workers_per_gpu:\s*\d+", f"workers_per_gpu: {WORKERS}", 0, "workers_per_gpu")
     sub(r"batchsize_per_gpu:\s*\d+", f"batchsize_per_gpu: {BATCH}", 0, "batchsize_per_gpu")
     sub(r"total_epochs:\s*\d+", f"total_epochs: {EPOCHS}", 0, "total_epochs")
-    if LR is not None:                       # first lr: under schedule.optimizer
+    if LR is not None:                       # первый lr: под schedule.optimizer
         sub(r"(?m)^(\s*lr:\s*).*$", lambda m: m.group(1) + repr(float(LR)), 1, "optimizer lr")
 
-    # Fine-tuning / resume: nanodet reads schedule.load_model (transfer weights, fresh
-    # schedule) and schedule.resume (continue a run). The stock config ships them as
-    # commented placeholders; drop any existing copy and re-insert under `schedule:`.
+    # Дообучение / возобновление: nanodet читает schedule.load_model (перенос весов, свежее
+    # расписание) и schedule.resume (продолжить запуск). В штатном конфиге это закомментированные
+    # заглушки; удаляем любую копию и вставляем заново под `schedule:`.
     def set_schedule_key(key, value):
         nonlocal s
-        s = re.sub(rf"(?m)^[ \t]*#?[ \t]*{key}:.*$\n?", "", s)          # strip old/commented
-        ins = f'\\g<1>\n  {key}: "{value}"'                             # quote: YAML-safe paths
-        s, c = re.subn(r"(?m)^(schedule:)[ \t]*$", ins, s, count=1)     # insert right under schedule:
-        print(f"  patch schedule.{key}: {value}" + ("  [!] 'schedule:' not found" if c == 0 else ""))
+        s = re.sub(rf"(?m)^[ \t]*#?[ \t]*{key}:.*$\n?", "", s)          # вырезаем старое/закомментированное
+        ins = f'\\g<1>\n  {key}: "{value}"'                             # кавычки: безопасные для YAML пути
+        s, c = re.subn(r"(?m)^(schedule:)[ \t]*$", ins, s, count=1)     # вставляем прямо под schedule:
+        print(f"  патч schedule.{key}: {value}" + ("  [!] 'schedule:' не найдено" if c == 0 else ""))
     if WEIGHTS:
         set_schedule_key("load_model", os.path.abspath(WEIGHTS).replace("\\", "/"))
     if RESUME:
@@ -302,66 +324,74 @@ def write_config(train_img, train_json, val_img, val_json):
     os.makedirs(OUT, exist_ok=True)
     out_cfg = os.path.abspath(os.path.join(OUT, "custom.yml"))
     open(out_cfg, "w", encoding="utf-8").write(s)
-    print(f"  config -> {out_cfg}")
+    print(f"  конфиг -> {out_cfg}")
     return out_cfg
 
 
 def main():
     if sys.version_info >= (3, 13):
-        print(f"  [!] You're on Python {sys.version_info.major}.{sys.version_info.minor}. The training "
-              "stack (torch, pytorch-lightning, pycocotools) often has NO wheels yet for such a new\n"
-              "      Python, so installs silently land in the wrong place / fail to build. If anything\n"
-              "      below errors on imports, use Python 3.10 or 3.11 for the training box (see README).")
-    print("[1/4] Converting dataset to COCO...")
+        print(f"  [!] У тебя Python {sys.version_info.major}.{sys.version_info.minor}. У стека обучения "
+              "(torch, pytorch-lightning, pycocotools) часто ещё НЕТ колёс под такой свежий\n"
+              "      Python, поэтому установка тихо попадает не туда / не собирается. Если что-то ниже\n"
+              "      упадёт на импортах — используй для машины обучения Python 3.11 (см. README).")
+    print(f"[1/4] Конвертирую датасет в COCO... (модель {MODEL_SIZE}, вход {INPUT})")
     if not os.path.isdir(DATASET):
-        sys.exit(f"ERROR: DATASET not found: {DATASET}")
+        sys.exit(f"ОШИБКА: DATASET не найден: {DATASET}")
     tr_img, tr_json, n_tr = build_coco("train")
     va_img, va_json, n_va = build_coco("val")
     if n_tr == 0:
-        sys.exit(f"ERROR: no training images under {DATASET} (looked in images/train, train/images, train)")
-    if n_va == 0:                       # NanoDet needs a val set; fall back to train
-        print("  WARNING: no val split found — using train as val (metrics will be optimistic)")
+        sys.exit(f"ОШИБКА: нет картинок для обучения в {DATASET} (искал в images/train, train/images, train)")
+    if n_va == 0:                       # NanoDet нужен val-сет; откатываемся на train
+        print("  ВНИМАНИЕ: val-сплит не найден — использую train как val (метрики будут оптимистичными)")
         va_img, va_json = tr_img, tr_json
 
-    print("[2/4] Getting the repo (clone if missing)...")
+    print("[2/4] Беру репозиторий (клонирую, если нужно)...")
     if not os.path.isdir(REPO_DIR):
-        if sh(["git", "clone", "--depth", "1", "https://github.com/RangiLyu/nanodet.git", REPO_DIR]):
-            sys.exit("ERROR: git clone failed")
-    setup_repo_env()                         # make `import nanodet` work + deps (no torch touch)
-    cfg = write_config(tr_img, tr_json, va_img, va_json)
+        ok = False
+        for попытка in range(1, 5):
+            if sh(["git", "clone", "--depth", "1", "https://github.com/RangiLyu/nanodet.git", REPO_DIR]) == 0:
+                ok = True; break
+            print(f"  клонирование не удалось (попытка {попытка}/4) — повтор…")
+        if not ok:
+            sys.exit("ОШИБКА: git clone не удался (проверь интернет/доступ к github.com)")
+    setup_repo_env()                         # делаем `import nanodet` рабочим + зависимости (torch не трогаем)
+    base_cfg = выбрать_базовый_конфиг()
+    print(f"  базовый конфиг: {base_cfg}")
+    cfg = write_config(base_cfg, tr_img, tr_json, va_img, va_json)
 
-    mode = (f"fine-tune from {os.path.basename(WEIGHTS)}" if WEIGHTS
-            else f"resume {os.path.basename(RESUME)}" if RESUME else "from scratch")
-    print(f"[3/4] Training on {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})...")
-    # PYTHONPATH=<repo> guarantees `import nanodet` resolves to the cloned repo even if
-    # the pip step was skipped/offline or a different 'nanodet' is installed elsewhere.
+    mode = (f"дообучение от {os.path.basename(WEIGHTS)}" if WEIGHTS
+            else f"возобновление {os.path.basename(RESUME)}" if RESUME else "с нуля")
+    print(f"[3/4] Обучение на {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})...")
+    # PYTHONPATH=<repo> гарантирует, что `import nanodet` укажет на склонированный репозиторий,
+    # даже если pip-шаг пропущен/офлайн или другой 'nanodet' установлен где-то ещё.
     train_env = {"PYTHONPATH": os.path.abspath(REPO_DIR) + os.pathsep + os.environ.get("PYTHONPATH", "")}
-    wrapper = write_train_wrapper()          # shims removed-in-torch-2.x torch._six, then runs train
+    wrapper = write_train_wrapper()          # шимит убранный в torch 2.x torch._six + torch.load, затем обучает
     if sh([sys.executable, wrapper, cfg], cwd=REPO_DIR, extra_env=train_env):
-        sys.exit("ERROR: training failed (see output above). If it's a pytorch-lightning API\n"
-                 "  error, the auto-installed nanodet deps set the right PL version — re-run; or\n"
-                 "  pip install -r nanodet/requirements.txt (keep your torch). Check config warnings.")
+        sys.exit("ОШИБКА: обучение не удалось (см. вывод выше). Если это ошибка API pytorch-\n"
+                 "  lightning — авто-установленные зависимости nanodet ставят правильную версию PL,\n"
+                 "  перезапусти; либо pip install -r nanodet/requirements.txt (сохрани свой torch).\n"
+                 "  Проверь предупреждения о патчах конфига.")
 
     if EXPORT:
-        print("[4/4] Exporting an optimised, verified NCNN model...")
+        print("[4/4] Экспортирую оптимизированную, проверенную NCNN-модель...")
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         try:
             import export_ncnn
             res = export_ncnn.run_export(REPO_DIR, cfg, OUT_STEM, INPUT, REG_MAX, classes=len(CLASSES))
         except Exception as e:
-            res = None; print(f"  export step errored: {e}")
+            res = None; print(f"  шаг экспорта упал: {e}")
         if res:
             param, binf = res
             names = os.path.abspath(os.path.join(OUT, "classes.txt"))
-            open(names, "w").write("\n".join(CLASSES) + "\n")
-            print("\n[OK] Done - trained AND exported. Run it:")
-            print(f"  Pi sidecar:  ND_PARAM={param} ND_BIN={binf} ND_INPUT={INPUT} \\")
-            print(f"               YOLO_LABELS={names} python3 nanodet_ncnn_sidecar.py --inspect")
-            print(f"  Phone:       NanoDet needs an Android decoder (GFL/DFL) - Pi-only for now.")
+            open(names, "w", encoding="utf-8").write("\n".join(CLASSES) + "\n")
+            print("\n[ГОТОВО] Обучено И экспортировано. Запуск:")
+            print(f"  Сайдкар на Pi:  ND_PARAM={param} ND_BIN={binf} ND_INPUT={INPUT} \\")
+            print(f"                  YOLO_LABELS={names} python3 nanodet_ncnn_sidecar.py --inspect")
+            print(f"  Телефон:        NanoDet нужен Android-декодер (GFL/DFL) — пока только Pi.")
             return
-        print("  Auto-export didn't complete - run it manually:")
+        print("  Авто-экспорт не завершился — запусти вручную:")
     else:
-        print("[4/4] Export (EXPORT=False) - run manually:")
+        print("[4/4] Экспорт (EXPORT=False) — запусти вручную:")
     print(f"  python export_ncnn.py --repo {REPO_DIR} --cfg {cfg} --out {OUT_STEM} "
           f"--input {INPUT} --reg-max {REG_MAX} --classes {len(CLASSES)}")
 

@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 r"""
-NanoDet-Plus trainer — graphical front-end (Windows-friendly, zero extra deps).
+Тренер NanoDet-Plus — графическое окно (дружелюбно к Windows, без лишних зависимостей).
 
-A window for every knob in train_nanodet.py — dataset, classes, input size,
-epochs, batch, workers, device, learning rate, and **fine-tuning / resume
-(дообучение)** — with a live log pane underneath that streams everything the
-trainer prints (data conversion → training → ncnn export → VERIFY OK).
+Две вкладки:
+  • «Обучение на своих данных» — каждая ручка из train_nanodet.py: датасет, классы,
+    тяжесть модели, входное разрешение, эпохи, батч, воркеры, устройство, learning rate
+    и дообучение / возобновление.
+  • «Готовые модели» — собрать официальную COCO-модель (80 классов) в ОДИН клик: выбери
+    вариант (вес × разрешение) и нажми «Создать» — скрипт всё скачает и сконвертирует.
+
+Снизу — общий лог, куда живьём льётся всё, что печатают скрипты (конвертация данных ->
+обучение -> экспорт ncnn -> ПРОВЕРКА OK).
 
     python train_nanodet_gui.py
 
-It doesn't reimplement training: it just sets the TRAIN_* environment variables
-that train_nanodet.py already understands and runs it as a child process, so the
-GUI and the plain `python train_nanodet.py` path stay in lock-step. Field values
-are remembered between runs (~/.nanodet_trainer_gui.json).
+Окно ничего не переизобретает: для обучения оно выставляет переменные TRAIN_*, которые
+понимает train_nanodet.py, а для готовых моделей зовёт get_model.py — и запускает их
+дочерним процессом. Значения полей запоминаются между запусками (~/.nanodet_trainer_gui.json).
 
-Only the standard library is used (tkinter ships with python on Windows/macOS and
-is `apt install python3-tk` on Linux). torch/nanodet are needed by the trainer it
-launches, not by this window.
+Используется только стандартная библиотека (tkinter идёт с python на Windows/macOS, на
+Linux — `sudo apt install python3-tk`). torch/nanodet нужны запускаемым скриптам, не этому окну.
 """
 
 import json
@@ -30,20 +34,31 @@ import threading
 try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
-except Exception as e:                                       # headless box / no Tk
+except Exception as e:                                       # машина без графики / без Tk
     sys.stderr.write(
-        "ERROR: tkinter is not available — this is the GUI launcher.\n"
+        "ОШИБКА: tkinter недоступен — а это графический лаунчер.\n"
         f"  ({type(e).__name__}: {e})\n"
         "  Linux:   sudo apt install python3-tk\n"
-        "  Or just run the trainer without a GUI:  python train_nanodet.py\n")
+        "  Или запусти тренер без окна:  python train_nanodet.py\n"
+        "  Или собери готовую модель:    python get_model.py\n")
     sys.exit(1)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRAINER = os.path.join(HERE, "train_nanodet.py")
+GETMODEL = os.path.join(HERE, "get_model.py")
 STATE_PATH = os.path.expanduser("~/.nanodet_trainer_gui.json")
 
 INPUT_CHOICES = ["256", "320", "352", "416", "512"]
 DEVICE_CHOICES = ["gpu", "cpu"]
+SIZE_CHOICES = ["1.0x", "1.5x"]
+
+# Готовые COCO-варианты (зеркало каталога из get_model.py) — для вкладки «Готовые модели».
+READY_VARIANTS = [
+    ("m-320",      "вес 1.0x · вход 320 — самая БЫСТРАЯ"),
+    ("m-416",      "вес 1.0x · вход 416 — БАЛАНС (рекомендую)"),
+    ("m-1.5x-320", "вес 1.5x · вход 320 — точнее, чуть медленнее"),
+    ("m-1.5x-416", "вес 1.5x · вход 416 — самая ТОЧНАЯ"),
+]
 
 
 def load_state():
@@ -57,7 +72,7 @@ def load_state():
 def save_state(state):
     try:
         with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=1)
+            json.dump(state, f, indent=1, ensure_ascii=False)
     except Exception:
         pass
 
@@ -68,85 +83,97 @@ class TrainerGUI:
         self.proc = None
         self.q = queue.Queue()
         self.state = load_state()
-        root.title("NanoDet-Plus Trainer")
-        root.minsize(760, 620)
+        root.title("Тренер NanoDet-Plus")
+        root.minsize(800, 680)
 
-        self._build_form()
+        self.nb = ttk.Notebook(root)
+        self.nb.pack(fill="x", side="top")
+        self.tab_train = ttk.Frame(self.nb)
+        self.tab_ready = ttk.Frame(self.nb)
+        self.nb.add(self.tab_train, text="  Обучение на своих данных  ")
+        self.nb.add(self.tab_ready, text="  Готовые модели (1 клик)  ")
+
+        self._build_train_form(self.tab_train)
+        self._build_ready_form(self.tab_ready)
         self._build_log()
         self._restore()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(80, self._drain)
 
-    # ── layout ────────────────────────────────────────────────────────────────
-    def _build_form(self):
-        f = ttk.Frame(self.root, padding=10)
+    # ── вкладка обучения ────────────────────────────────────────────────────────
+    def _build_train_form(self, parent):
+        f = ttk.Frame(parent, padding=10)
         f.pack(fill="x", side="top")
         for c in range(4):
             f.columnconfigure(c, weight=(1 if c in (1, 3) else 0))
         self.vars = {}
         r = 0
 
-        # Dataset + browse (spans the row)
-        ttk.Label(f, text="Dataset (YOLO root)").grid(row=r, column=0, sticky="w", pady=3)
+        # Датасет + кнопка обзора (на всю строку)
+        ttk.Label(f, text="Папка датасета (корень YOLO)").grid(row=r, column=0, sticky="w", pady=3)
         self.vars["TRAIN_DATASET"] = v = tk.StringVar()
         ttk.Entry(f, textvariable=v).grid(row=r, column=1, columnspan=2, sticky="ew", padx=6)
-        ttk.Button(f, text="Browse…", command=self._pick_dataset).grid(row=r, column=3, sticky="ew")
+        ttk.Button(f, text="Обзор…", command=self._pick_dataset).grid(row=r, column=3, sticky="ew")
         r += 1
 
-        # Classes (spans the row)
-        ttk.Label(f, text="Classes (id order, comma-sep)").grid(row=r, column=0, sticky="w", pady=3)
+        # Классы (на всю строку)
+        ttk.Label(f, text="Классы (в порядке id, через запятую)").grid(row=r, column=0, sticky="w", pady=3)
         self.vars["TRAIN_CLASSES"] = v = tk.StringVar()
         ttk.Entry(f, textvariable=v).grid(row=r, column=1, columnspan=3, sticky="ew", padx=6)
         r += 1
 
-        # Two-up numeric / combo fields
+        # Парные числовые / выпадающие поля
         def pair(label_l, key_l, kind_l, label_r, key_r, kind_r):
             nonlocal r
             self._field(f, r, 0, label_l, key_l, kind_l)
             self._field(f, r, 2, label_r, key_r, kind_r)
             r += 1
 
-        pair("Input size", "TRAIN_INPUT", INPUT_CHOICES, "Epochs", "TRAIN_EPOCHS", "int")
-        pair("Batch size", "TRAIN_BATCH", "int", "Dataloader workers", "TRAIN_WORKERS", "int")
-        pair("Device", "TRAIN_DEVICE", DEVICE_CHOICES, "GPU ids (comma-sep)", "TRAIN_GPU_IDS", "str")
-        pair("reg_max (DFL bins−1)", "TRAIN_REG_MAX", "int",
-             "Learning rate (blank=stock)", "TRAIN_LR", "str")
+        pair("Тяжесть модели", "TRAIN_MODEL_SIZE", SIZE_CHOICES,
+             "Входное разрешение", "TRAIN_INPUT", INPUT_CHOICES)
+        pair("Эпохи", "TRAIN_EPOCHS", "int", "Размер батча", "TRAIN_BATCH", "int")
+        pair("Воркеры загрузчика", "TRAIN_WORKERS", "int", "Устройство", "TRAIN_DEVICE", DEVICE_CHOICES)
+        pair("ID видеокарт (через запятую)", "TRAIN_GPU_IDS", "str",
+             "reg_max (бинов DFL−1)", "TRAIN_REG_MAX", "int")
+        pair("Learning rate (пусто = из конфига)", "TRAIN_LR", "str", "", "_pad", "str")
 
-        # Export checkbox
+        # Чекбокс экспорта
         self.export_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text="Auto-export a verified NCNN model after training",
+        ttk.Checkbutton(f, text="После обучения авто-экспортировать проверенную NCNN-модель",
                         variable=self.export_var).grid(row=r, column=0, columnspan=4, sticky="w", pady=(6, 2))
         r += 1
 
-        # ── Fine-tuning / resume (дообучение) ──
-        lf = ttk.LabelFrame(f, text="Fine-tuning / resume (дообучение)", padding=8)
+        # ── Дообучение / возобновление ──
+        lf = ttk.LabelFrame(f, text="Дообучение / возобновление", padding=8)
         lf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         lf.columnconfigure(1, weight=1)
         self.ft_mode = tk.StringVar(value="scratch")
         modes = ttk.Frame(lf); modes.grid(row=0, column=0, columnspan=3, sticky="w")
-        for text, val in (("Train from scratch", "scratch"),
-                          ("Fine-tune from weights", "weights"),
-                          ("Resume interrupted run", "resume")):
+        for text, val in (("Обучать с нуля", "scratch"),
+                          ("Дообучить от весов", "weights"),
+                          ("Продолжить прерванный запуск", "resume")):
             ttk.Radiobutton(modes, text=text, value=val, variable=self.ft_mode,
                             command=self._sync_ft).pack(side="left", padx=(0, 12))
-        ttk.Label(lf, text="Checkpoint (.ckpt)").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(lf, text="Чекпойнт (.ckpt)").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.ckpt_var = tk.StringVar()
         self.ckpt_entry = ttk.Entry(lf, textvariable=self.ckpt_var)
         self.ckpt_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
-        self.ckpt_btn = ttk.Button(lf, text="Browse…", command=self._pick_ckpt)
+        self.ckpt_btn = ttk.Button(lf, text="Обзор…", command=self._pick_ckpt)
         self.ckpt_btn.grid(row=1, column=2, sticky="ew", pady=(6, 0))
         r += 1
 
-        # Action buttons
+        # Кнопки действий
         bar = ttk.Frame(f); bar.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        self.start_btn = ttk.Button(bar, text="▶  Start training", command=self.start)
+        self.start_btn = ttk.Button(bar, text="▶  Начать обучение", command=self.start)
         self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(bar, text="■  Stop", command=self.stop, state="disabled")
+        self.stop_btn = ttk.Button(bar, text="■  Стоп", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
-        ttk.Button(bar, text="Clear log", command=self._clear_log).pack(side="left", padx=6)
-        self.status = ttk.Label(bar, text="idle"); self.status.pack(side="right")
+        ttk.Button(bar, text="Очистить лог", command=self._clear_log).pack(side="left", padx=6)
+        self.status = ttk.Label(bar, text="простаивает"); self.status.pack(side="right")
 
     def _field(self, parent, row, col, label, key, kind):
+        if key == "_pad":                               # пустышка-заполнитель колонки
+            return
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", pady=3)
         v = tk.StringVar()
         self.vars[key] = v
@@ -157,13 +184,41 @@ class TrainerGUI:
             ttk.Entry(parent, textvariable=v, width=16).grid(
                 row=row, column=col + 1, sticky="ew", padx=6)
 
+    # ── вкладка готовых моделей ──────────────────────────────────────────────────
+    def _build_ready_form(self, parent):
+        f = ttk.Frame(parent, padding=12)
+        f.pack(fill="x", side="top")
+        f.columnconfigure(0, weight=1)
+        ttk.Label(f, text="Готовая модель на 80 классах COCO — собирается в один клик:\n"
+                          "скачиваем официальный чекпойнт и конвертируем в проверенную "
+                          "fp16-модель для сайдкара.", justify="left").grid(
+            row=0, column=0, sticky="w", pady=(0, 8))
+
+        self.ready_var = tk.StringVar(value="m-416")
+        box = ttk.LabelFrame(f, text="Выбери вариант (тяжесть × разрешение)", padding=8)
+        box.grid(row=1, column=0, sticky="ew")
+        for i, (ключ, описание) in enumerate(READY_VARIANTS):
+            ttk.Radiobutton(box, text=f"{ключ:<12}  —  {описание}",
+                            value=ключ, variable=self.ready_var).grid(
+                row=i, column=0, sticky="w", pady=2)
+
+        bar = ttk.Frame(f); bar.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.ready_btn = ttk.Button(bar, text="⬇  Создать модель", command=self.build_ready)
+        self.ready_btn.pack(side="left")
+        self.ready_all_btn = ttk.Button(bar, text="Создать все четыре", command=self.build_ready_all)
+        self.ready_all_btn.pack(side="left", padx=6)
+        ttk.Button(bar, text="Очистить лог", command=self._clear_log).pack(side="left", padx=6)
+        ttk.Label(f, text="Первый запуск дольше: качаются репозиторий и чекпойнт. "
+                          "Прогресс — в логе ниже.", justify="left").grid(
+            row=3, column=0, sticky="w", pady=(10, 0))
+
     def _build_log(self):
         frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Training log").pack(anchor="w")
+        ttk.Label(frame, text="Лог").pack(anchor="w")
         wrap = ttk.Frame(frame); wrap.pack(fill="both", expand=True)
         self.log = tk.Text(wrap, wrap="none", bg="#101418", fg="#d6e2ec",
-                           insertbackground="#d6e2ec", font=("Consolas", 10), height=18)
+                           insertbackground="#d6e2ec", font=("Consolas", 10), height=16)
         ys = ttk.Scrollbar(wrap, orient="vertical", command=self.log.yview)
         xs = ttk.Scrollbar(frame, orient="horizontal", command=self.log.xview)
         self.log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -173,17 +228,20 @@ class TrainerGUI:
         self.log.tag_config("err", foreground="#ff9b9b")
         self.log.tag_config("ok", foreground="#8ce6a0")
 
-    # ── persistence ────────────────────────────────────────────────────────────
+    # ── сохранение состояния ─────────────────────────────────────────────────────
     def _restore(self):
         saved = self.state.get("fields", {})
-        defaults = {"TRAIN_INPUT": "416", "TRAIN_EPOCHS": "200", "TRAIN_BATCH": "96",
-                    "TRAIN_WORKERS": "20", "TRAIN_DEVICE": "gpu", "TRAIN_GPU_IDS": "0",
-                    "TRAIN_REG_MAX": "7", "TRAIN_LR": "", "TRAIN_DATASET": "", "TRAIN_CLASSES": ""}
+        # Дефолты под мощную машину: RTX 5090 32GB + Ultra 9 285K + 128GB RAM, Windows.
+        defaults = {"TRAIN_MODEL_SIZE": "1.0x", "TRAIN_INPUT": "416", "TRAIN_EPOCHS": "200",
+                    "TRAIN_BATCH": "96", "TRAIN_WORKERS": "20", "TRAIN_DEVICE": "gpu",
+                    "TRAIN_GPU_IDS": "0", "TRAIN_REG_MAX": "7", "TRAIN_LR": "",
+                    "TRAIN_DATASET": "", "TRAIN_CLASSES": ""}
         for k, var in self.vars.items():
             var.set(saved.get(k, defaults.get(k, "")))
         self.export_var.set(self.state.get("export", True))
         self.ft_mode.set(self.state.get("ft_mode", "scratch"))
         self.ckpt_var.set(self.state.get("ckpt", ""))
+        self.ready_var.set(self.state.get("ready", "m-416"))
         self._sync_ft()
 
     def _collect(self):
@@ -194,17 +252,18 @@ class TrainerGUI:
         self.state["export"] = bool(self.export_var.get())
         self.state["ft_mode"] = self.ft_mode.get()
         self.state["ckpt"] = self.ckpt_var.get().strip()
+        self.state["ready"] = self.ready_var.get()
         save_state(self.state)
 
-    # ── small handlers ──────────────────────────────────────────────────────────
+    # ── мелкие обработчики ───────────────────────────────────────────────────────
     def _pick_dataset(self):
-        d = filedialog.askdirectory(title="Select the YOLO dataset root")
+        d = filedialog.askdirectory(title="Выбери корень YOLO-датасета")
         if d:
             self.vars["TRAIN_DATASET"].set(d)
 
     def _pick_ckpt(self):
-        p = filedialog.askopenfilename(title="Select a checkpoint",
-                                       filetypes=[("Checkpoints", "*.ckpt"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(title="Выбери чекпойнт",
+                                       filetypes=[("Чекпойнты", "*.ckpt"), ("Все файлы", "*.*")])
         if p:
             self.ckpt_var.set(p)
 
@@ -223,25 +282,25 @@ class TrainerGUI:
         if at_end:
             self.log.see("end")
 
-    # ── run / stop ───────────────────────────────────────────────────────────────
+    # ── запуск / стоп ────────────────────────────────────────────────────────────
     def _validate(self, env):
         ds = env.get("TRAIN_DATASET", "")
         if not ds or not os.path.isdir(ds):
-            messagebox.showerror("Dataset", f"Dataset folder not found:\n{ds or '(empty)'}")
+            messagebox.showerror("Датасет", f"Папка датасета не найдена:\n{ds or '(пусто)'}")
             return False
         if not env.get("TRAIN_CLASSES", ""):
-            messagebox.showerror("Classes", "Enter at least one class name (comma-separated, id order).")
+            messagebox.showerror("Классы", "Укажи хотя бы один класс (через запятую, в порядке id).")
             return False
         if self.ft_mode.get() != "scratch":
             ckpt = self.ckpt_var.get().strip()
             if not ckpt or not os.path.isfile(ckpt):
-                messagebox.showerror("Checkpoint", f"Checkpoint not found:\n{ckpt or '(empty)'}")
+                messagebox.showerror("Чекпойнт", f"Чекпойнт не найден:\n{ckpt or '(пусто)'}")
                 return False
         return True
 
     def _build_env(self):
         env = dict(os.environ)
-        env["PYTHONUNBUFFERED"] = "1"                       # stream the child's prints live
+        env["PYTHONUNBUFFERED"] = "1"                       # лить вывод дочернего процесса живьём
         fields = self._collect()
         for k, v in fields.items():
             if v:
@@ -257,32 +316,67 @@ class TrainerGUI:
             env["TRAIN_RESUME"] = ckpt
         return env
 
-    def start(self):
-        if self.proc and self.proc.poll() is None:
-            return
-        env = self._build_env()
-        if not self._validate(env):
-            return
-        if not os.path.isfile(TRAINER):
-            messagebox.showerror("Trainer", f"train_nanodet.py not found next to this GUI:\n{TRAINER}")
+    def _busy(self):
+        return self.proc and self.proc.poll() is None
+
+    def _launch(self, cmd, env, заголовок):
+        """Общий запуск дочернего процесса с потоковым логом."""
+        if self._busy():
+            messagebox.showinfo("Занято", "Процесс уже выполняется — дождись завершения или нажми «Стоп».")
             return
         self._persist()
-        self._append(f"$ {sys.executable} -u train_nanodet.py   (cwd={HERE})\n", "ok")
+        self._append(f"$ {' '.join(заголовок)}   (cwd={HERE})\n", "ok")
         creflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         try:
             self.proc = subprocess.Popen(
-                [sys.executable, "-u", TRAINER], cwd=HERE, env=env,
+                cmd, cwd=HERE, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 bufsize=1, text=True, errors="replace",
                 creationflags=creflags,
                 start_new_session=(os.name != "nt"))
         except Exception as e:
-            self._append(f"failed to launch: {e}\n", "err")
+            self._append(f"не удалось запустить: {e}\n", "err")
             return
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.status.configure(text="running…")
+        self._set_running(True)
+
+    def _set_running(self, on):
+        st_run = "disabled" if on else "normal"
+        for b in (self.start_btn, self.ready_btn, self.ready_all_btn):
+            b.configure(state=st_run)
+        self.stop_btn.configure(state="normal" if on else "disabled")
+        self.status.configure(text="выполняется…" if on else self.status.cget("text"))
+
+    def start(self):
+        if self._busy():
+            return
+        env = self._build_env()
+        if not self._validate(env):
+            return
+        if not os.path.isfile(TRAINER):
+            messagebox.showerror("Тренер", f"train_nanodet.py не найден рядом с этим окном:\n{TRAINER}")
+            return
+        self._launch([sys.executable, "-u", TRAINER], env,
+                     [os.path.basename(sys.executable), "-u", "train_nanodet.py"])
+
+    def build_ready(self, variants=None):
+        if self._busy():
+            return
+        if not os.path.isfile(GETMODEL):
+            messagebox.showerror("Генератор", f"get_model.py не найден рядом с этим окном:\n{GETMODEL}")
+            return
+        env = dict(os.environ); env["PYTHONUNBUFFERED"] = "1"
+        if variants == "all":
+            cmd = [sys.executable, "-u", GETMODEL, "--все"]
+            заг = [os.path.basename(sys.executable), "-u", "get_model.py", "--все"]
+        else:
+            v = self.ready_var.get()
+            cmd = [sys.executable, "-u", GETMODEL, "--вариант", v]
+            заг = [os.path.basename(sys.executable), "-u", "get_model.py", "--вариант", v]
+        self._launch(cmd, env, заг)
+
+    def build_ready_all(self):
+        self.build_ready(variants="all")
 
     def _reader(self, proc):
         try:
@@ -301,25 +395,26 @@ class TrainerGUI:
                     self._on_exit(item[1])
                 else:
                     low = item.lower()
-                    tag = "err" if ("error" in low or "fail" in low or "traceback" in low) \
-                        else "ok" if ("verify ok" in low or "✅" in item or "done" in low) else None
+                    tag = "err" if ("ошибк" in low or "провал" in low or "error" in low
+                                    or "fail" in low or "traceback" in low) \
+                        else "ok" if ("проверка ok" in low or "verify ok" in low
+                                      or "готово" in low or "done" in low) else None
                     self._append(item, tag)
         except queue.Empty:
             pass
         self.root.after(80, self._drain)
 
     def _on_exit(self, code):
-        self._append(f"\n[trainer exited with code {code}]\n", "ok" if code == 0 else "err")
-        self.status.configure(text="done" if code == 0 else f"exited ({code})")
-        self.start_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
+        self._append(f"\n[процесс завершился с кодом {code}]\n", "ok" if code == 0 else "err")
+        self._set_running(False)
+        self.status.configure(text="готово" if code == 0 else f"вышел ({code})")
         self.proc = None
 
     def stop(self):
         p = self.proc
         if not p or p.poll() is not None:
             return
-        self.status.configure(text="stopping…")
+        self.status.configure(text="останавливаю…")
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
@@ -327,11 +422,11 @@ class TrainerGUI:
             else:
                 os.killpg(os.getpgid(p.pid), signal.SIGTERM)
         except Exception as e:
-            self._append(f"stop failed: {e}\n", "err")
+            self._append(f"не удалось остановить: {e}\n", "err")
 
     def _on_close(self):
-        if self.proc and self.proc.poll() is None:
-            if not messagebox.askyesno("Quit", "Training is still running. Stop it and quit?"):
+        if self._busy():
+            if not messagebox.askyesno("Выход", "Процесс ещё выполняется. Остановить и выйти?"):
                 return
             self.stop()
         self._persist()

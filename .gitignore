@@ -10,3 +10,14 @@ __pycache__/
 
 # dataset-generator GUI transient run config
 tools/dataset-generator/.gen_run_config.json
+
+# nanodet-sidecar: сгенерированные артефакты (клон репо, чекпойнты, модели)
+tools/nanodet-sidecar/nanodet/
+tools/nanodet-sidecar/nd_data/
+tools/nanodet-sidecar/*.ckpt
+tools/nanodet-sidecar/*.onnx
+tools/nanodet-sidecar/*.param
+tools/nanodet-sidecar/*.bin
+tools/nanodet-sidecar/*.ncnn.*
+tools/nanodet-sidecar/*.pnnx.*
+tools/nanodet-sidecar/coco.names

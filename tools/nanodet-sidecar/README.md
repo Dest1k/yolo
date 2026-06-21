@@ -1,178 +1,219 @@
-# NanoDet-Plus (NCNN) sidecar — Raspberry Pi 5
+# Сайдкар NanoDet-Plus (NCNN) — Raspberry Pi 5
 
-**NanoDet-Plus** (RangiLyu) is an anchor-free detector with a GFL head and an FPN
-over 3–4 strides (8/16/32/64). It's heavier than YOLO-FastestV2 but reads **small
-objects much better** thanks to the stride-8 level, while still running
-**CPU-real-time on a Pi 5**. Same panel/stream/manual-capture/gimbal scaffolding as
-the other sidecars — only the model and decode differ.
+**NanoDet-Plus** (RangiLyu) — это anchor-free детектор с головой GFL и FPN по 3-4 страйдам
+(8/16/32/64). Он тяжелее YOLO-FastestV2, но **намного лучше видит мелкие объекты** за счёт
+уровня со страйдом 8, и при этом **работает в реальном времени на CPU Pi 5**. Те же
+панель/стрим/ручной захват/подвес, что и у остальных сайдкаров — отличаются только модель
+и декодирование.
 
-**When to use which** (Pi 5, trained on your own GPU):
-- **YOLO-FastestV2** — absolute max FPS (e.g. ~78 FPS @320), small objects are its weak spot.
-- **NanoDet-Plus** — a step up in small-object accuracy at still-comfortable FPS. This sidecar.
-- (PicoDet/MediaPipe — *not* recommended for this setup: PaddlePaddle won't train on
-  Blackwell GPUs, MediaPipe needs WSL2+CPU and only outputs `.tflite`.)
+**Что когда брать** (Pi 5, обучение на своей видеокарте):
+- **YOLO-FastestV2** — абсолютный максимум FPS (напр. ~78 FPS @320), слабое место — мелкие объекты.
+- **NanoDet-Plus** — шаг вперёд по точности на мелочи при всё ещё комфортном FPS. Это этот сайдкар.
+- (PicoDet/MediaPipe — *не рекомендуются* для этой связки: PaddlePaddle не обучается на
+  видеокартах Blackwell, MediaPipe требует WSL2+CPU и отдаёт только `.tflite`.)
 
-Both YOLO-FastestV2 and NanoDet-Plus train on your **RTX 5090 (Blackwell)** with a
-cu128 nightly PyTorch and export to NCNN with **one command**.
+И YOLO-FastestV2, и NanoDet-Plus обучаются на твоей **RTX 5090 (Blackwell)** с nightly-сборкой
+PyTorch cu128 и экспортируются в NCNN **одной командой**.
 
-## Pieces in this folder
+## Файлы в этой папке
 
-| File | What it does |
+| Файл | Что делает |
 |---|---|
-| `nanodet_ncnn_sidecar.py` | inference + stream + panel (run this on the Pi) |
-| `train_nanodet.py` | one command: YOLO→COCO, clone repo, train, **and auto-export an optimised ncnn model** |
-| `train_nanodet_gui.py` | **graphical** front-end for the above — every field (incl. fine-tuning) in a window, live training log underneath (Windows-friendly, tkinter, zero extra deps) |
-| `export_ncnn.py` | `.ckpt` → ONNX(opset 11) → onnxsim → ncnn → ncnnoptimize(fp16) → **verify** |
+| `nanodet_ncnn_sidecar.py` | инференс + стрим + панель (это запускается на Pi) |
+| `get_model.py` | **генератор готовых моделей** — официальная COCO-модель (80 классов) в NCNN в один шаг, в любом из 4 вариантов (вес × разрешение) |
+| `train_nanodet.py` | одной командой: YOLO→COCO, клон репозитория, обучение **и авто-экспорт оптимизированной ncnn-модели** |
+| `train_nanodet_gui.py` | **графическое** окно: вкладка обучения (все поля, включая дообучение) + вкладка «Готовые модели» (COCO в один клик), живой лог снизу (дружелюбно к Windows, tkinter, без лишних зависимостей) |
+| `export_ncnn.py` | `.ckpt` → ONNX(opset 11) → onnxsim → ncnn → ncnnoptimize(fp16) → **проверка** |
 
-## 1. Install on the Pi
+## 0. Быстрый старт: готовая модель в один клик («нажал и готово»)
+
+Нет своего датасета или хочешь сразу что-то запустить? Собери официальную COCO-модель:
+
+```bash
+# на машине, где есть torch (см. установку ниже). Затем просто:
+python get_model.py
+```
+Скрипт сам покажет меню вариантов (или возьмёт `m-416` по умолчанию), склонирует
+репозиторий, скачает официальный чекпойнт, при необходимости поставит конвертер `pnnx`,
+сконвертирует и **проверит** модель, положит рядом `coco.names` и напечатает готовую команду
+запуска. Чего не хватает (например torch) — скажет по-русски и даст точную команду установки.
+
+**Варианты** (тяжесть модели × входное разрешение):
+
+| вариант | вес | вход | смысл |
+|---|---|---|---|
+| `m-320` | 1.0x | 320 | самая БЫСТРАЯ, точность пониже |
+| `m-416` | 1.0x | 416 | БАЛАНС скорость/точность (по умолчанию) |
+| `m-1.5x-320` | 1.5x | 320 | точнее m-320, чуть медленнее |
+| `m-1.5x-416` | 1.5x | 416 | самая ТОЧНАЯ, самая тяжёлая |
+
+```bash
+python get_model.py --список            # показать таблицу и выйти
+python get_model.py --вариант m-320     # конкретный вариант
+python get_model.py --все               # собрать сразу все четыре
+```
+Любишь окно? В `train_nanodet_gui.py` есть вкладка **«Готовые модели»**: выбери вариант,
+нажми «Создать» — всё то же самое, но мышкой.
+
+## 1. Установка на Pi
 
 ```bash
 pip3 install ncnn numpy opencv-python
 ```
 
-## 2. Run
+## 2. Запуск
 
 ```bash
 ND_PARAM=nanodet.param ND_BIN=nanodet.bin ND_INPUT=416 \
   YOLO_LABELS=classes.txt YOLO_SOURCE=rpicam \
   python3 nanodet_ncnn_sidecar.py
 ```
-Open `http://<pi-ip>:8080`. Drag a box to lock a target; **H** toggles the gimbal
-panel; **Space** toggles auto-follow — same as the other sidecars.
+Открой `http://<ip-малинки>:8080`. Протяни рамку, чтобы захватить цель; **H** — панель
+подвеса; **Space** — авто-следование — как у остальных сайдкаров.
 
-First time / if boxes look wrong, run `--inspect`: it sweeps input sizes and prints
-the output shape and point count so you can confirm `ND_INPUT` / `ND_STRIDES` /
-`ND_REG_MAX` match your export.
+Первый раз / если рамки выглядят странно — запусти `--inspect`: он перебирает входные размеры
+и печатает форму выхода и число точек, чтобы подтвердить совпадение `ND_INPUT` / `ND_STRIDES` /
+`ND_REG_MAX` с твоим экспортом.
 ```bash
 ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py --inspect
 ```
 
-### Environment variables
-| Var | Meaning | Default |
+### Переменные окружения
+| Переменная | Смысл | По умолчанию |
 |---|---|---|
-| `ND_PARAM` / `ND_BIN` | ncnn model files | **required** |
-| `ND_INPUT` | square input size (match training) | `416` |
-| `ND_STRIDES` | FPN strides | `8,16,32,64` |
-| `ND_REG_MAX` | DFL bins per side − 1 | `7` |
-| `ND_OUTPUT` | head output blob name (from `--inspect`) | last output |
-| `ND_INPUT_BLOB` | model input blob name | first input |
-| `ND_MEAN` / `ND_STD` | BGR normalisation | nanodet ImageNet |
-| `ND_THREADS` | inference threads | all cores |
-| `YOLO_FP16` | fp16 arithmetic + winograd/sgemm ncnn kernels (Pi 5 A76 = ARMv8.2 FP16; real FPS win). `0` = fp32 fallback | `1` |
-| `YOLO_CV_THREADS` | OpenCV threads (1 = don't fight inference for cores) | `1` |
-| `YOLO_TRACK_HOLD` | seconds a box lingers after it stops being detected (lower = tighter/less ghosting) | `0.3` |
-| `YOLO_SOURCE` / `YOLO_LABELS` / `YOLO_CONF` / `YOLO_NMS` / `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | as the other sidecars | |
+| `ND_PARAM` / `ND_BIN` | файлы ncnn-модели | **обязательно** |
+| `ND_INPUT` | квадратный вход (как при обучении) | `416` |
+| `ND_STRIDES` | страйды FPN | `8,16,32,64` |
+| `ND_REG_MAX` | бинов DFL на сторону − 1 | `7` |
+| `ND_OUTPUT` | имя выходного блоба головы (из `--inspect`) | последний выход |
+| `ND_INPUT_BLOB` | имя входного блоба модели | первый вход |
+| `ND_MEAN` / `ND_STD` | нормализация BGR | nanodet ImageNet |
+| `ND_THREADS` | потоки инференса | все ядра |
+| `YOLO_FP16` | fp16-арифметика + winograd/sgemm-ядра ncnn (Pi 5 A76 = ARMv8.2 FP16; реальный прирост FPS). `0` = откат на fp32 | `1` |
+| `YOLO_CV_THREADS` | потоки OpenCV (1 = не отбирать ядра у инференса) | `1` |
+| `YOLO_TRACK_HOLD` | сколько секунд рамка держится после пропажи детекта (меньше = плотнее/меньше призраков) | `0.3` |
+| `YOLO_SOURCE` / `YOLO_LABELS` / `YOLO_CONF` / `YOLO_NMS` / `YOLO_FILTER` / `YOLO_PORT` / `YOLO_JPEG_Q` / `YOLO_CAM_*` / `YOLO_TRACK` / `YOLO_GIMBAL` | как у остальных сайдкаров | |
 
-### Any video URL (ffmpeg + yt-dlp) — great for testing models
+### Любой видео-URL (ffmpeg + yt-dlp) — удобно тестировать модели
 
-`YOLO_SOURCE` ruthlessly ingests almost anything. Besides `rpicam` and a webcam index
-(`0`), give it **any URL or file** and it's piped through system **ffmpeg** (HLS `.m3u8`,
-DASH, RTSP, RTMP, MJPEG, `.mp4`/`.mkv`, …). For a **site page** the stream URL is found in
-three escalating steps: **yt-dlp** (YouTube/Twitch/…) → if that fails, the sidecar
-**downloads the page HTML and scrapes** it for an `.m3u8`/`.mpd`/`.mp4`/rtmp/rtsp (digging
-one `<iframe>` level deep, un-escaping JSON), passing the page as **Referer** (many webcams
-hot-link-protect). Newest-frame-wins (low latency); ffmpeg auto-reconnects on drop.
+`YOLO_SOURCE` беспощадно проглатывает почти что угодно. Кроме `rpicam` и индекса веб-камеры
+(`0`), дай ему **любой URL или файл** — он пойдёт через системный **ffmpeg** (HLS `.m3u8`,
+DASH, RTSP, RTMP, MJPEG, `.mp4`/`.mkv`, …). Для **страницы сайта** ссылка на поток ищется в
+три нарастающих шага: **yt-dlp** (YouTube/Twitch/…) → если не вышло, сайдкар **качает HTML
+страницы и парсит** её на `.m3u8`/`.mpd`/`.mp4`/rtmp/rtsp (копая на один уровень `<iframe>`
+вглубь, разэкранируя JSON), передавая страницу как **Referer** (многие веб-камеры
+защищены от хотлинка). Побеждает свежий кадр (низкая задержка); ffmpeg сам переподключается.
 
-If a page builds its URL in JavaScript (nothing in the HTML), open it in a browser, watch
-the **Network tab** for the `.m3u8`/`.mp4` request and pass **that** URL directly.
-`YOLO_SCRAPE=0` disables the HTML scrape.
+Если страница строит URL в JavaScript (в HTML ничего нет) — открой её в браузере, посмотри во
+вкладке **Network** запрос `.m3u8`/`.mp4` и передай **его** напрямую. `YOLO_SCRAPE=0` отключает
+парсинг HTML.
 
-### Detecting small objects in big/wide streams — tiling (`ND_TILES`)
+### Мелкие объекты в больших/широких потоках — тайлинг (`ND_TILES`)
 
-A high-res or wide webcam squashed to the model's small input turns distant people/cars
-into a few pixels → no detections. **Tiling** splits each frame into overlapping tiles,
-detects on each (objects are now larger), and merges with NMS:
+Высокое разрешение или широкая камера, ужатая под маленький вход модели, превращает далёких
+людей/машины в пару пикселей → нет детектов. **Тайлинг** режет кадр на перекрывающиеся плитки,
+детектит на каждой (объекты теперь крупнее) и сливает через NMS:
 
 ```bash
-ND_TILES=auto  …    # pick a grid from the frame size (e.g. 1080p→3×2, 4K→4×3)
-ND_TILES=3x2   …    # force a 3×2 grid
-ND_TILES=off   …    # default (whole frame at once)
+ND_TILES=auto  …    # подобрать сетку по размеру кадра (напр. 1080p→3×2, 4K→4×3)
+ND_TILES=3x2   …    # принудительно сетка 3×2
+ND_TILES=off   …    # по умолчанию (весь кадр целиком)
 ```
-Tune `ND_TILE_OVERLAP` (0.2), `ND_TILE_SCALE` (auto aggressiveness, lower = more tiles),
-`ND_TILE_NMS`. Cost: an N×M grid is ~N·M inferences per frame, so FPS drops accordingly —
-it's for **accuracy/testing**, not max FPS. Also remember the model only finds classes it
-was trained on (street cam → use a **COCO** model + `YOLO_FILTER=person,car`), and a high
-`YOLO_CONF` can hide weak small-object hits — try `YOLO_CONF=0.25`.
+Подстрой `ND_TILE_OVERLAP` (0.2), `ND_TILE_SCALE` (агрессивность авто, меньше = больше плиток),
+`ND_TILE_NMS`. Цена: сетка N×M — это ~N·M инференсов на кадр, FPS падает соответственно — это
+для **точности/тестов**, не для максимума FPS. Помни: модель находит только те классы, на
+которых обучена (уличная камера → возьми **COCO**-модель + `YOLO_FILTER=person,car`), а высокий
+`YOLO_CONF` может прятать слабые мелкие детекты — попробуй `YOLO_CONF=0.25`.
 
 ```bash
-sudo apt install -y ffmpeg          # required for URL ingestion
-pip3 install -U yt-dlp              # only for site pages (YouTube/Twitch/…)
+sudo apt install -y ffmpeg          # нужно для URL-источников
+pip3 install -U yt-dlp              # только для страниц сайтов (YouTube/Twitch/…)
 
 YOLO_SOURCE="https://youtu.be/XXXX"                ND_PARAM=… ND_BIN=… python3 nanodet_ncnn_sidecar.py
 YOLO_SOURCE="https://cam/stream.m3u8"              …
 YOLO_SOURCE="rtsp://192.168.1.10:554/h264"         …
 YOLO_SOURCE="/home/dest/test_clip.mp4"             …
 ```
-`YOLO_FFMPEG=0` falls back to OpenCV's own backend; `YOLO_YTDLP_FORMAT` overrides the
-yt-dlp format (default `best`).
+`YOLO_FFMPEG=0` откатывает на собственный бэкенд OpenCV; `YOLO_YTDLP_FORMAT` переопределяет
+формат yt-dlp (по умолчанию `best`).
 
-The decode mirrors RangiLyu/nanodet's `demo_ncnn`: per grid point, argmax class
-score (sigmoid auto-applied if the export left logits), then each of the 4 box sides
-is a softmax-integral over `reg_max+1` bins → distance from the cell centre. The
-decode math is unit-tested against an independent reference (≤1e-14).
+Декодирование повторяет `demo_ncnn` из RangiLyu/nanodet: на точку сетки — argmax по классам
+(sigmoid применяется сам, если экспорт оставил логиты), затем каждая из 4 сторон рамки —
+softmax-интеграл по `reg_max+1` бинам → расстояние от центра ячейки. Математика декодирования
+покрыта юнит-тестами против независимого эталона (≤1e-14).
 
-## 3. Train on your own data (one command)
+## 3. Обучение на своих данных (одной командой)
 
-YOLO-format dataset in, verified ncnn model out — same paradigm as
-`train_yolofastest.py`.
+На входе — датасет в формате YOLO, на выходе — проверенная ncnn-модель, та же логика, что и
+у `train_yolofastest.py`.
 
 ```bash
-# on your GPU box. Use Python 3.10 or 3.11 — torch/pytorch-lightning/pycocotools
-# usually have NO wheels yet for 3.12+/3.14, which is the usual "No module named nanodet"
-# / failed-install trap. Then:
+# на машине с видеокартой. Используй Python 3.11 — у torch/pytorch-lightning/pycocotools
+# часто ещё НЕТ колёс под 3.12+/3.14, это и есть обычная ловушка «No module named nanodet» /
+# неудачной установки. Затем:
 pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
 pip install opencv-python numpy onnx onnxsim ncnn pnnx
 
-# edit the CONFIG block in train_nanodet.py (DATASET, CLASSES, INPUT, BATCH…), then:
+# поправь блок НАСТРОЙКИ в train_nanodet.py (DATASET, CLASSES, MODEL_SIZE, INPUT, BATCH…), затем:
 python train_nanodet.py
 ```
 
-You do **not** need to `pip install nanodet` yourself: the trainer clones the repo, puts it
-on `PYTHONPATH` for the import, and auto-installs its requirements **minus torch** (so your
-cu128 build is untouched) — getting the right pytorch-lightning/omegaconf/etc. versions.
-`TRAIN_PIP=0` skips that auto-install.
+> **Про Python:** автор использует **Python 3.14** как основной, а рядом держит **3.11** —
+> обучай именно на 3.11, потому что тяжёлый ML-стек под 3.14 часто ещё не собран. Сайдкар на Pi
+> и генератор моделей версии Python нетребовательны.
 
-Prefer a window? `python train_nanodet_gui.py` exposes every field — including
-**fine-tuning / resume (дообучение)** — and streams the live training log underneath.
-It just drives `train_nanodet.py` via `TRAIN_*` env vars, so both paths stay identical.
+`pip install nanodet` руками **не нужен**: тренер сам клонирует репозиторий, кладёт его в
+`PYTHONPATH` для импорта и авто-ставит его зависимости **без torch** (твоя cu128-сборка не
+трогается) — подтягивая правильные версии pytorch-lightning/omegaconf/и т.п. `TRAIN_PIP=0`
+пропускает эту авто-установку.
 
-**Fine-tuning (дообучение):** point `WEIGHTS` (env `TRAIN_WEIGHTS`) at a finished
-`.ckpt` to start from those weights and continue on new/expanded data, or `RESUME`
-(env `TRAIN_RESUME`) to pick an interrupted run back up. In the GUI it's the
-"Fine-tuning / resume" selector.
-It converts your YOLO labels to COCO JSON (no image copying), clones
-`RangiLyu/nanodet`, writes a custom config off the stock `nanodet-plus-m_416.yml`
-(patching classes, data paths, input size, batch/workers/epochs — it reports every
-field it patches), trains, then runs `export_ncnn.py` to produce a **verified,
-fp16** `.param`/`.bin`. The final line prints the exact command to run it.
+Любишь окно? `python train_nanodet_gui.py` показывает каждое поле — включая
+**дообучение / возобновление** — и льёт живой лог обучения снизу. Оно просто управляет
+`train_nanodet.py` через переменные `TRAIN_*`, так что оба пути идентичны. На второй вкладке —
+**«Готовые модели»**: COCO-модель в один клик, без обучения.
 
-**Hardware defaults** (CONFIG block) are tuned for **Ultra 9 285K + RTX 5090 32GB +
-128GB**: `BATCH=96`, `WORKERS=20`, `GPU_IDS=[0]`, `INPUT=416`. NanoDet-Plus is plain
-PyTorch + Lightning, so the cu128 nightly torch trains it natively on Blackwell.
+**Тяжесть модели и разрешение (любые варианты):** в блоке НАСТРОЙКИ задай `MODEL_SIZE`
+(`"1.0x"` или `"1.5x"`) и `INPUT` (320/416/…). Тренер сам подберёт подходящий базовый конфиг
+(`nanodet-plus-m` или `nanodet-plus-m-1.5x`, 320 или 416) и пропатчит входной размер. В окне это
+выпадающие списки «Тяжесть модели» и «Входное разрешение».
 
-> **Why the export is stable:** it forces **opset 11 + `dynamo=False`** (so a new
-> torch can't emit opset-18 that `onnx2ncnn` mis-converts), prefers
-> `onnx2ncnn`+`ncnnoptimize`(fp16) else **`pnnx`**, and loads the model back in
-> ncnn-python to confirm the head blob extracts and its channel count fits
-> `nc + 4*(reg_max+1)` before declaring success.
+**Дообучение:** укажи `WEIGHTS` (env `TRAIN_WEIGHTS`) на готовый `.ckpt`, чтобы стартовать с
+этих весов и продолжить на новых/расширенных данных, или `RESUME` (env `TRAIN_RESUME`), чтобы
+подхватить прерванный запуск. В окне это переключатель «Дообучение / возобновление».
+Тренер конвертирует YOLO-разметку в COCO JSON (без копирования картинок), клонирует
+`RangiLyu/nanodet`, пишет кастомный конфиг от штатного (патчит классы, пути к данным, входной
+размер, batch/workers/epochs — и сообщает о каждом поле), обучает, затем запускает
+`export_ncnn.py` и получает **проверенную, fp16** `.param`/`.bin`. Финальная строка печатает
+точную команду запуска.
 
-> **Orchestration caveat:** `train_nanodet.py` wraps the upstream repo. NanoDet's
-> config schema is stable but not frozen — the trainer prints every field it patches;
-> if it warns a key wasn't found, open `nd_data/custom.yml` and set it by hand.
+**Дефолты железа** (блок НАСТРОЙКИ) подобраны под **Ultra 9 285K + RTX 5090 32GB + 128GB RAM
+на Windows**: `BATCH=96`, `WORKERS=20`, `GPU_IDS=[0]`, `INPUT=416`, `MODEL_SIZE=1.0x`.
+NanoDet-Plus — чистый PyTorch + Lightning, поэтому nightly-torch cu128 обучает его на Blackwell
+нативно.
 
-## Follow-me flight (Betaflight FC) — lock-on without a gimbal
+> **Почему экспорт стабилен:** он форсирует **opset 11 + `dynamo=False`** (чтобы свежий torch не
+> выдал opset-18, который `onnx2ncnn` сконвертирует криво), предпочитает
+> `onnx2ncnn`+`ncnnoptimize`(fp16), иначе **`pnnx`** (fp16 + optlevel=2), и загружает модель
+> обратно в ncnn-python, подтверждая, что выходной блоб извлекается и число каналов
+> соответствует `nc + 4*(reg_max+1)`, прежде чем сказать «готово». Модель проходит **все**
+> доступные оптимизации — она поедет на **Raspberry Pi 5**.
 
-Lock-on now works with **no gimbal at all** — a plain Pi camera. Press **Space**
-(or the `track` button) and the sidecar locks the picked/clicked target and shows the
-crosshair. With a **Betaflight** flight controller wired in (`flight_controller.py`),
-that lock also **flies the drone**: it yaws to keep the person centred and pitches
-forward/back to hold distance (box height = range proxy — person walks away ⇒ fly
-forward, comes closer ⇒ back off).
+> **Оговорка про оркестрацию:** `train_nanodet.py` — обёртка над апстрим-репозиторием. Схема
+> конфига NanoDet стабильна, но не заморожена — тренер печатает каждое патчимое поле; если
+> предупредит, что ключ не найден — открой `nd_data/custom.yml` и поправь руками.
 
-**Multiple people in frame?** Click the one you want — the lock switches to that
-detection (works with or without an FC); drag a box to lock an arbitrary object.
+## Follow-me (полётный контроллер Betaflight) — захват без подвеса
 
-Use a **COCO model** so `person` is a class and add `YOLO_FILTER=person`. Enable the FC:
+Захват цели теперь работает **вообще без подвеса** — на простой камере Pi. Нажми **Space**
+(или кнопку `track`) — сайдкар захватывает выбранную/кликнутую цель и показывает прицел. Если
+подключён **полётный контроллер Betaflight** (`flight_controller.py`), этот захват ещё и
+**управляет дроном**: рыскает, удерживая человека по центру, и тангажом держит дистанцию
+(высота рамки — прокси дальности: человек уходит ⇒ летим вперёд, приближается ⇒ назад).
+
+**Несколько людей в кадре?** Кликни нужного — захват переключится на этот детект (работает с FC
+и без него); протяни рамку, чтобы захватить произвольный объект.
+
+Возьми **COCO-модель**, чтобы `person` был классом, и добавь `YOLO_FILTER=person`. Включи FC:
 
 ```bash
 pip3 install pyserial
@@ -180,74 +221,71 @@ ND_PARAM=nanodet.param ND_BIN=nanodet.bin ND_INPUT=320 \
   YOLO_LABELS=coco.names YOLO_FILTER=person YOLO_SOURCE=rpicam \
   FC=betaflight FC_PORT=/dev/ttyAMA0 \
   python3 nanodet_ncnn_sidecar.py
-# open http://<pi-ip>:8080 · Space = lock-on · click a person to pick · C = clear
+# открой http://<ip-малинки>:8080 · Space = захват · клик по человеку = выбор · C = сброс
 ```
 
-| FC var | Meaning | Default |
+| Переменная FC | Смысл | По умолчанию |
 |---|---|---|
-| `FC` | `betaflight` to enable, else off | off |
-| `FC_PORT` | serial port (`/dev/ttyAMA0` UART, `/dev/ttyACM0` USB) | `/dev/ttyAMA0` |
-| `FC_BAUD` / `FC_RATE` | MSP baud / RC stream rate (Hz) | `115200` / `50` |
-| `FC_MAX_YAW` / `FC_MAX_PITCH` / `FC_MAX_ROLL` | max stick offset from centre (µs); ROLL = manual strafe only | `150` / `120` / `120` |
-| `FC_KP_YAW` / `FC_KP_PITCH` | P-gains (µs per unit error) | `360` / `500` |
-| `FC_TARGET_FILL` | desired box-height / frame-height (distance setpoint) | `0.45` |
-| `FC_YAW_DEADZONE` / `FC_FILL_DEADZONE` | no-move bands | `0.06` / `0.08` |
-| `FC_INVERT_YAW` / `FC_INVERT_PITCH` | flip an axis if it moves the wrong way | off |
-| `FC_CH_ROLL/PITCH/THROTTLE/YAW` | channel indices (Betaflight `map`, default AETR) | `0/1/2/3` |
+| `FC` | `betaflight` — включить, иначе выкл | выкл |
+| `FC_PORT` | последовательный порт (`/dev/ttyAMA0` UART, `/dev/ttyACM0` USB) | `/dev/ttyAMA0` |
+| `FC_BAUD` / `FC_RATE` | скорость MSP / частота потока RC (Гц) | `115200` / `50` |
+| `FC_MAX_YAW` / `FC_MAX_PITCH` / `FC_MAX_ROLL` | макс. смещение стика от центра (µs); ROLL = только ручной стрейф | `150` / `120` / `120` |
+| `FC_KP_YAW` / `FC_KP_PITCH` | P-коэффициенты (µs на единицу ошибки) | `360` / `500` |
+| `FC_TARGET_FILL` | желаемое отношение высота-рамки/высота-кадра (уставка дистанции) | `0.45` |
+| `FC_YAW_DEADZONE` / `FC_FILL_DEADZONE` | зоны нечувствительности | `0.06` / `0.08` |
+| `FC_INVERT_YAW` / `FC_INVERT_PITCH` | инвертировать ось, если едет не туда | выкл |
+| `FC_CH_ROLL/PITCH/THROTTLE/YAW` | индексы каналов (Betaflight `map`, по умолчанию AETR) | `0/1/2/3` |
 
-### Panel ARM + manual control
+### Панель ARM + ручное управление
 
-Two safety interlocks gate the drone: the hardware **MSP Override** switch on the TX,
-and a software **ARM** button on the web panel. Until ARM is on, the Pi streams centre
-sticks only — for **both** autonomous follow and manual control. When an FC is present
-the panel also shows a **d-pad** (▲/▼ forward/back = pitch, ⟲/⟳ = yaw, ◄/► = roll
-strafe): held = move, released = recentre, and if the page is lost the sticks recentre
-within ~0.4 s. A manual nudge briefly overrides the follower. HTTP API:
-`/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=` (each -1..1), `/fcstop`.
+Дрон защищён двумя блокировками: аппаратный **MSP Override** на передатчике и программная
+кнопка **ARM** на веб-панели. Пока ARM выключен, Pi шлёт только центральные стики — и для
+автономного следования, и для ручного управления. При наличии FC панель показывает **крестовину**
+(▲/▼ вперёд/назад = тангаж, ⟲/⟳ = рыскание, ◄/► = стрейф креном): зажал = движение, отпустил =
+центрирование, и если страница потеряна — стики центрируются за ~0.4 с. Ручное вмешательство на
+короткое время перебивает follower. HTTP API: `/fcarm?on=1|0`, `/fcmove?yaw=&pitch=&roll=`
+(каждое -1..1), `/fcstop`.
 
-**Transmitter sticks** (RadioMaster TX12 in USB joystick mode) drive the drone straight
-from the panel via the browser **Gamepad API** — toggle **Sticks: ON**, set the axis/sign
-mapping shown at the bottom of the panel. Endpoint `/fcsticks?roll=&pitch=&yaw=&throttle=`
-(r/p/y -1..1, throttle 0..1 for full mode).
+**Стики передатчика** (RadioMaster TX12 в режиме USB-джойстика) управляют дроном прямо с панели
+через браузерный **Gamepad API** — включи **Sticks: ON**, задай маппинг осей/знаков снизу панели.
+Эндпойнт `/fcsticks?roll=&pitch=&yaw=&throttle=` (r/p/y -1..1, throttle 0..1 для полного режима).
 
-**Station-keeping (wind resist)** — the **HOLD** button turns on vision position-hold:
-optical-flow (phase-correlation) estimates scene drift and commands opposite roll/pitch to
-stay put. Experimental, mutually exclusive with follow, best with a **downward camera**.
-Tune `FC_HOLD_KP`/`FC_HOLD_MAX`/`FC_HOLD_RES`/`FC_HOLD_LEAK`/`FC_HOLD_DEAD`,
-flip `FC_HOLD_INVERT_X/Y`. Endpoint `/fchold?on=1|0`.
+**Удержание позиции (против ветра)** — кнопка **HOLD** включает удержание по зрению: оптический
+поток (фазовая корреляция) оценивает дрейф сцены и командует противоположные крен/тангаж, чтобы
+стоять на месте. Экспериментально, взаимоисключающе с follow, лучше всего с камерой **вниз**.
+Подстрой `FC_HOLD_KP`/`FC_HOLD_MAX`/`FC_HOLD_RES`/`FC_HOLD_LEAK`/`FC_HOLD_DEAD`, инвертируй
+`FC_HOLD_INVERT_X/Y`. Эндпойнт `/fchold?on=1|0`.
 
-### Full RX=MSP mode (no transmitter) — `FC_MODE=full`
+### Полный режим RX=MSP (без передатчика) — `FC_MODE=full`
 
-For boards without MSP Override. The Pi becomes the **whole** receiver and drives
-roll/pitch/yaw **plus throttle and arm**; the panel ARM button arms the **motors** and
-the panel gains **THR down/up** (a held throttle setpoint — you fly altitude). Three
-safeties: software ARM, a ground-station watchdog (panel silent > `FC_LINK_TIMEOUT` =>
-auto-descent + disarm via `FC_DESCENT_RATE`), and Betaflight's own failsafe if MSP
-frames stop. Vars: `FC_MODE=full`, `FC_CH_ARM` (AUX1=4), `FC_ARM_US`/`FC_DISARM_US`,
-`FC_THROTTLE_MIN`/`FC_THROTTLE_MAX`, `FC_THR_STEP`, `FC_LINK_TIMEOUT`, `FC_DESCENT_RATE`.
-Extra endpoint: `/fcthrottle?d=+1|-1`. **Full step-by-step (Betaflight RX=MSP, arm
-channel, Angle-always-on, props-off bench test, first flight) is in the main README**
-([no MSP Override](../../README.md#если-в-прошивке-нет-msp-override)). Much higher risk —
-no manual override; **bench-test props off.**
+Для плат без MSP Override. Pi становится **всем** приёмником и управляет креном/тангажом/рысканием
+**плюс газом и армом**; кнопка ARM на панели армит **моторы**, а на панели появляется **THR
+вниз/вверх** (удерживаемая уставка газа — высотой управляешь ты). Три защиты: программный ARM,
+вотчдог наземной станции (панель молчит > `FC_LINK_TIMEOUT` ⇒ авто-снижение + дизарм через
+`FC_DESCENT_RATE`) и собственный failsafe Betaflight, если MSP-кадры прекратились. Переменные:
+`FC_MODE=full`, `FC_CH_ARM` (AUX1=4), `FC_ARM_US`/`FC_DISARM_US`, `FC_THROTTLE_MIN`/`FC_THROTTLE_MAX`,
+`FC_THR_STEP`, `FC_LINK_TIMEOUT`, `FC_DESCENT_RATE`. Доп. эндпойнт: `/fcthrottle?d=+1|-1`.
+**Полный пошаговый гайд (Betaflight RX=MSP, канал арма, Angle-always-on, бенч-тест без винтов,
+первый полёт) — в главном README** ([нет MSP Override](../../README.md#если-в-прошивке-нет-msp-override)).
+Риск намного выше — ручного перехвата нет; **тестируй на стенде со снятыми винтами.**
 
-**Wiring (Pi 5 ↔ FC) and full Betaflight setup (MSP Override on an AUX switch, the
-channel mask, failsafe) + a SAFETY checklist** are in the main README:
+**Распиновка (Pi 5 ↔ FC) и полная настройка Betaflight (MSP Override на тумблере AUX, маска
+каналов, failsafe) + чеклист БЕЗОПАСНОСТИ** — в главном README:
 [Follow-me на дроне (Betaflight)](../../README.md#follow-me-дрон-следит-за-человеком-betaflight-fc).
-The MSP framing, the follow controller and the ARM/manual gating are unit-tested; the
-flight itself is not — **test props off first.**
+Кадрирование MSP, контроллер следования и блокировки ARM/ручного режима покрыты юнит-тестами;
+сам полёт — нет — **сначала тестируй без винтов.**
 
-## 4. Where it runs
+## 4. Где это работает
 
-- **Pi 5 sidecar** — yes (this folder).
-- **Desktop headless runner** — supported (see `desktop/`); pick the NanoDet model type.
-- **Android phone app** — NanoDet uses a GFL/DFL head; the app decodes it once the
-  NanoDet path is selected (input must match training).
+- **Сайдкар Pi 5** — да (эта папка).
+- **Десктопный headless-раннер** — поддерживается (см. `desktop/`); выбери тип модели NanoDet.
+- **Android-приложение** — NanoDet использует голову GFL/DFL; приложение декодирует её, когда
+  выбран путь NanoDet (вход должен совпадать с обучением).
 
-## Status / caveats
+## Статус / оговорки
 
-The stream/panel/capture/gimbal scaffolding is the same proven code as the other
-sidecars (including the recent panel/JSON fixes). The **decode math is unit-tested**
-against an independent reference, but it **hasn't been run against your exact
-exported model here** — `--inspect`, `ND_INPUT`, `ND_STRIDES`, `ND_REG_MAX`,
-`ND_MEAN`/`ND_STD` and `ND_OUTPUT` are all overridable so you can converge quickly on
-the real model.
+Каркас стрима/панели/захвата/подвеса — тот же проверенный код, что и у остальных сайдкаров
+(включая недавние правки панели/JSON). **Математика декодирования покрыта юнит-тестами** против
+независимого эталона, но она **не прогонялась против именно твоей экспортированной модели здесь**
+— `--inspect`, `ND_INPUT`, `ND_STRIDES`, `ND_REG_MAX`, `ND_MEAN`/`ND_STD` и `ND_OUTPUT` все
+переопределяемы, чтобы быстро сойтись на реальной модели.
