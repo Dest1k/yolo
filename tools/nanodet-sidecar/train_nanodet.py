@@ -83,7 +83,14 @@ OUT_STEM   = "nanodet"                 # имя-основа для экспор
 #    управлял обучением без правки этого файла. Одни и те же ключи TRAIN_* у всех тренеров.
 def _envc(name, cur, cast=str):
     v = os.environ.get(name)
-    return cast(v) if v not in (None, "") else cur
+    if v in (None, ""):
+        return cur
+    try:
+        return cast(v)
+    except (ValueError, TypeError):
+        # Повреждённое значение (например мусор из состояния окна) — оставляем дефолт.
+        print(f"  [!] {name}={v[:60]!r} не подходит — использую значение по умолчанию ({cur})")
+        return cur
 DATASET = _envc("TRAIN_DATASET", DATASET)
 if os.environ.get("TRAIN_CLASSES"):
     CLASSES = [c.strip() for c in os.environ["TRAIN_CLASSES"].split(",") if c.strip()]
@@ -97,8 +104,15 @@ DEVICE  = _envc("TRAIN_DEVICE", DEVICE)
 WEIGHTS = _envc("TRAIN_WEIGHTS", WEIGHTS)
 RESUME  = _envc("TRAIN_RESUME", RESUME)
 BASE_CFG = _envc("TRAIN_BASE_CFG", BASE_CFG)
-if os.environ.get("TRAIN_LR"):
-    LR = float(os.environ["TRAIN_LR"])
+_lr_env = os.environ.get("TRAIN_LR", "").strip()
+if _lr_env:
+    try:
+        LR = float(_lr_env)
+    except ValueError:
+        # Поле learning rate содержит мусор (бывает из-за повреждённого состояния окна) —
+        # не валим обучение, просто берём LR из штатного конфига.
+        print(f"  [!] TRAIN_LR не похоже на число ({_lr_env[:60]!r}…) — беру learning rate из конфига")
+        LR = None
 if os.environ.get("TRAIN_GPU_IDS"):
     GPU_IDS = [int(x) for x in re.split(r"[,\s]+", os.environ["TRAIN_GPU_IDS"].strip()) if x]
 if os.environ.get("TRAIN_EXPORT"):
@@ -294,7 +308,10 @@ def write_config(base_cfg, train_img, train_json, val_img, val_json):
     names = ", ".join(f"'{c}'" for c in CLASSES)
     sub(r"(?m)^save_dir:.*$", "save_dir: workspace/custom", 1, "save_dir")
     sub(r"num_classes:\s*\d+", f"num_classes: {len(CLASSES)}", 0, "num_classes")
-    sub(r"(?m)^class_names:.*$", f"class_names: &class_names [{names}]", 1, "class_names")
+    # class_names в COCO-конфигах — это МНОГОСТРОЧНЫЙ список (≈80 имён на 13 строк).
+    # Заменяем весь блок целиком (от '[' до ']'), а не первую строку, иначе остаются
+    # хвостовые имена и len(class_names) != num_classes -> падение обучения.
+    sub(r"class_names:\s*\[.*?\]", f"class_names: [{names}]", 1, "class_names", flags=re.DOTALL)
     # img_path / ann_path идут train-затем-val; меняем первые два каждого по порядку.
     img_it = iter([train_img, val_img]); ann_it = iter([train_json, val_json])
     sub(r"(?m)^(\s*img_path:\s*).*$", lambda m: m.group(1) + next(img_it), 2, "img_path (train,val)")
