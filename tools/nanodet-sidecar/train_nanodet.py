@@ -345,12 +345,47 @@ def write_config(base_cfg, train_img, train_json, val_img, val_json):
     return out_cfg
 
 
+def preflight_gpu():
+    """Быстрая проверка, что выбранная видеокарта реально умеет считать на этом torch.
+    RTX 5090 (Blackwell, sm_120) требует torch собранный под CUDA 12.8 (cu128); со старым
+    torch любой GPU-запуск падает 'no kernel image is available' — но только глубоко внутри
+    обучения. Ловим это здесь, до конвертации датасета, и даём точную инструкцию."""
+    if DEVICE != "gpu":
+        return
+    try:
+        import torch
+    except Exception:
+        return  # torch ещё не поставлен — обычный путь установки разберётся сам
+    if not torch.cuda.is_available():
+        sys.exit("ОШИБКА: DEVICE=gpu, но torch не видит CUDA-устройств.\n"
+                 "  Поставь GPU-сборку torch или переключись на CPU (TRAIN_DEVICE=cpu).")
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        name = "?"
+    try:
+        x = torch.randn(8, device="cuda")          # реальный запуск ядра на карте
+        torch.cuda.synchronize()
+        _ = (x + 1).sum().item()
+    except Exception as e:
+        py = sys.executable
+        sys.exit(
+            f"ОШИБКА: видеокарта '{name}' несовместима с установленным PyTorch.\n"
+            f"  {type(e).__name__}: {e}\n"
+            "  Скорее всего это новая карта (RTX 50xx, Blackwell, sm_120), а у тебя torch без ядер под неё.\n"
+            "  Поставь сборку под CUDA 12.8:\n"
+            f'    "{py}" -m pip uninstall -y torch torchvision torchaudio\n'
+            f'    "{py}" -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio\n'
+            "  Либо обучай на CPU: задай TRAIN_DEVICE=cpu (медленно).")
+
+
 def main():
     if sys.version_info >= (3, 13):
         print(f"  [!] У тебя Python {sys.version_info.major}.{sys.version_info.minor}. У стека обучения "
               "(torch, pytorch-lightning, pycocotools) часто ещё НЕТ колёс под такой свежий\n"
               "      Python, поэтому установка тихо попадает не туда / не собирается. Если что-то ниже\n"
               "      упадёт на импортах — используй для машины обучения Python 3.11 (см. README).")
+    preflight_gpu()
     print(f"[1/4] Конвертирую датасет в COCO... (модель {MODEL_SIZE}, вход {INPUT})")
     if not os.path.isdir(DATASET):
         sys.exit(f"ОШИБКА: DATASET не найден: {DATASET}")
