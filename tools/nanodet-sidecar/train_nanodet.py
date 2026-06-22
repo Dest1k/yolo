@@ -140,6 +140,26 @@ def sh(cmd, cwd=None, extra_env=None):
     return subprocess.call([str(c) for c in cmd], cwd=cwd, env=e)
 
 
+def patch_repo_sources():
+    """Чиним исходники nanodet под современный torch ПРЯМО В ФАЙЛАХ репозитория.
+    Обёртка-шим (_nd_train_wrapper) не помогает для torch._six на Windows: даталоадер с
+    воркерами стартует через spawn, и дочерний процесс заново импортирует nanodet/tools/
+    train.py напрямую, минуя обёртку -> снова 'No module named torch._six'. Патч исходника
+    виден всем процессам. Идемпотентно."""
+    collate = os.path.join(os.path.abspath(REPO_DIR), "nanodet", "data", "collate.py")
+    if not os.path.isfile(collate):
+        return
+    src = open(collate, encoding="utf-8").read()
+    if "from torch._six import" in src:
+        # В torch 2.x string_classes == str; держим (str, bytes) для совместимости с bytes-ключами.
+        src = re.sub(r"(?m)^from torch\._six import .*$",
+                     "string_classes = (str, bytes)  # torch._six удалён в torch 2.x (патч train_nanodet.py)",
+                     src)
+        with open(collate, "w", encoding="utf-8") as f:
+            f.write(src)
+        print("  [совместимость] пропатчил nanodet/data/collate.py (убрал импорт torch._six)")
+
+
 def setup_repo_env():
     """Ставим зависимости склонированного nanodet — БЕЗ затрагивания твоего torch — чтобы
     следующие шаги не упали на отсутствующем подмодуле или не той версии pytorch-lightning.
@@ -407,6 +427,7 @@ def main():
         if not ok:
             sys.exit("ОШИБКА: git clone не удался (проверь интернет/доступ к github.com)")
     setup_repo_env()                         # делаем `import nanodet` рабочим + зависимости (torch не трогаем)
+    patch_repo_sources()                      # чиним torch._six прямо в исходниках (виден spawn-воркерам)
     base_cfg = выбрать_базовый_конфиг()
     print(f"  базовый конфиг: {base_cfg}")
     cfg = write_config(base_cfg, tr_img, tr_json, va_img, va_json)
