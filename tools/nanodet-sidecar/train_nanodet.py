@@ -235,9 +235,10 @@ def _install_progress_commentary():
         print("  [оценка] комментатор прогресса не подключён:", e)
         return
     try:
-        every = max(1, int(os.environ.get("TRAIN_COMMENT_EVERY", "10")))
+        every = max(1, int(os.environ.get("TRAIN_COMMENT_EVERY", "1")))
     except ValueError:
-        every = 10
+        every = 1
+    period = "за эпоху" if every == 1 else ("за %d эпох" % every)
     hist = []                                  # [(эпоха, mAP)]
     _orig = _L.log_metrics
     def _pct(x):
@@ -276,7 +277,7 @@ def _install_progress_commentary():
             trend = "первая контрольная точка — сравнивать пока не с чем"
             rec = "продолжай обучение"
         elif delta > 0.02:
-            trend = "уверенный рост (+%.1f п.п. за %d эпох)" % (delta * 100, every)
+            trend = "уверенный рост (+%.1f п.п. %s)" % (delta * 100, period)
             rec = "всё идёт хорошо — продолжай"
         elif delta > 0.005:
             trend = "умеренный рост (+%.1f п.п.)" % (delta * 100)
