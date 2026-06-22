@@ -224,6 +224,88 @@ try:
     torch.load = _load_compat
 except Exception as e:
     print("  [совместимость] шим torch пропущен:", e)
+
+# ── Человеческая оценка прогресса каждые N эпох ──────────────────────────────────
+# Перехватываем NanoDetLightningLogger.log_metrics (вызывается в главном процессе с готовым
+# словарём метрик COCO и номером эпохи) и печатаем понятный комментарий на русском.
+def _install_progress_commentary():
+    try:
+        from nanodet.util.logger import NanoDetLightningLogger as _L
+    except Exception as e:
+        print("  [оценка] комментатор прогресса не подключён:", e)
+        return
+    try:
+        every = max(1, int(os.environ.get("TRAIN_COMMENT_EVERY", "10")))
+    except ValueError:
+        every = 10
+    hist = []                                  # [(эпоха, mAP)]
+    _orig = _L.log_metrics
+    def _pct(x):
+        try:
+            x = float(x)
+        except Exception:
+            return "н/д"
+        return ("%.1f%%" % (x * 100.0)) if x >= 0 else "н/д"
+    def log_metrics(self, metrics, step):
+        _orig(self, metrics, step)
+        try:
+            mAP = float(metrics.get("mAP", -1))
+        except Exception:
+            mAP = -1.0
+        ep = int(step)
+        if mAP >= 0:
+            hist.append((ep, mAP))
+        if ep % every != 0 or mAP < 0:
+            return
+        best_ep, best = max(hist, key=lambda t: t[1])
+        prev = None
+        for e, v in hist:
+            if e <= ep - every:
+                prev = v
+        if prev is None and len(hist) > 1:
+            prev = hist[0][1]
+        delta = (mAP - prev) if prev is not None else None
+        if   mAP < 0.05: qual = "почти ничего не выучилось"
+        elif mAP < 0.15: qual = "очень слабо, но процесс пошёл"
+        elif mAP < 0.30: qual = "слабый / начальный уровень"
+        elif mAP < 0.45: qual = "средний уровень — рабочая модель формируется"
+        elif mAP < 0.60: qual = "хороший уровень"
+        elif mAP < 0.75: qual = "очень хороший уровень"
+        else:            qual = "отличный уровень"
+        if delta is None:
+            trend = "первая контрольная точка — сравнивать пока не с чем"
+            rec = "продолжай обучение"
+        elif delta > 0.02:
+            trend = "уверенный рост (+%.1f п.п. за %d эпох)" % (delta * 100, every)
+            rec = "всё идёт хорошо — продолжай"
+        elif delta > 0.005:
+            trend = "умеренный рост (+%.1f п.п.)" % (delta * 100)
+            rec = "прогресс есть — продолжай"
+        elif delta >= -0.005:
+            trend = "плато — почти без изменений"
+            rec = ("вышел на насыщение: можно скоро останавливать, лучшая модель сохраняется сама"
+                   if mAP >= 0.30 else
+                   "рост встал на низком уровне — проверь разметку и датасет, попробуй меньше lr, "
+                   "больше эпох или модель крупнее / вход больше")
+        else:
+            trend = "снижение (%.1f п.п.)" % (delta * 100)
+            rec = "метрика падает — возможна нестабильность или переобучение; лучшая модель уже сохранена (model_best)"
+        L = []
+        L.append("")
+        L.append("============== ОЦЕНКА ПРОГРЕССА (эпоха %d) ==============" % ep)
+        L.append("  Качество:  mAP = %s  ->  %s" % (_pct(mAP), qual))
+        if "AP_50" in metrics:
+            L.append("  Точность при лёгком пороге IoU 0.5 (AP50): %s" % _pct(metrics.get("AP_50")))
+        L.append("  Динамика:  %s" % trend)
+        L.append("  Рекорд:    лучший mAP = %s (эпоха %d)" % (_pct(best), best_ep))
+        L.append("  Вывод:     %s" % rec)
+        L.append("========================================================")
+        L.append("")
+        print(chr(10).join(L), flush=True)
+    _L.log_metrics = log_metrics
+    print("  [оценка] комментарий прогресса включён (каждые %d эпох)" % every)
+_install_progress_commentary()
+
 cfg = sys.argv[1]
 sys.argv = [os.path.join("tools", "train.py"), cfg]
 runpy.run_path(os.path.join("tools", "train.py"), run_name="__main__")
