@@ -70,6 +70,8 @@ DEVICE     = "gpu"         # "gpu" (RTX 5090, nightly torch cu128) или "cpu"
 GPU_IDS    = [0]
 BATCH      = 96            # nanodet-plus-m небольшой; 96-160 влезает в 32GB. OOM? уменьши.
 WORKERS    = 20            # воркеров загрузчика на GPU (у 285K — 24 ядра)
+LOG_INTERVAL = 1           # печатать лоссы каждую N-ю итерацию (1 = максимально подробно)
+VAL_INTERVAL = 1           # валидация (mAP, AP по классам) каждые N эпох
 
 # ── Служебное ──────────────────────────────────────────────────────────────────
 OUT        = "nd_data"                 # куда писать COCO .json
@@ -100,6 +102,8 @@ EPOCHS  = _envc("TRAIN_EPOCHS", EPOCHS, int)
 REG_MAX = _envc("TRAIN_REG_MAX", REG_MAX, int)
 BATCH   = _envc("TRAIN_BATCH", BATCH, int)
 WORKERS = _envc("TRAIN_WORKERS", WORKERS, int)
+LOG_INTERVAL = _envc("TRAIN_LOG_INTERVAL", LOG_INTERVAL, int)
+VAL_INTERVAL = _envc("TRAIN_VAL_INTERVAL", VAL_INTERVAL, int)
 DEVICE  = _envc("TRAIN_DEVICE", DEVICE)
 WEIGHTS = _envc("TRAIN_WEIGHTS", WEIGHTS)
 RESUME  = _envc("TRAIN_RESUME", RESUME)
@@ -194,8 +198,10 @@ _WRAPPER_SRC = '''\
 # Авто-сгенерировано train_nanodet.py. Возвращает API, которые свежий PyTorch убрал, чтобы
 # (старый) код nanodet / pytorch-lightning работал на сборке torch 2.x / cu128, затем
 # запускает nanodet/tools/train.py.
-import os, sys, types, runpy
+import os, sys, types, runpy, warnings
 import collections.abc as _abc
+# Прячем шумное предупреждение lightning/setuptools про pkg_resources (не ошибка обучения).
+warnings.filterwarnings("ignore", message=r"pkg_resources is deprecated as an API")
 sys.path.insert(0, os.getcwd())                     # чтобы `import nanodet` нашёл склонированный репозиторий
 try:
     import torch
@@ -341,6 +347,10 @@ def write_config(base_cfg, train_img, train_json, val_img, val_json):
     sub(r"workers_per_gpu:\s*\d+", f"workers_per_gpu: {WORKERS}", 0, "workers_per_gpu")
     sub(r"batchsize_per_gpu:\s*\d+", f"batchsize_per_gpu: {BATCH}", 0, "batchsize_per_gpu")
     sub(r"total_epochs:\s*\d+", f"total_epochs: {EPOCHS}", 0, "total_epochs")
+    # Подробность вывода: log.interval — как часто печатать лоссы (по итерациям),
+    # val_intervals — как часто гонять валидацию с mAP/AP по классам (по эпохам).
+    sub(r"(?m)^(\s*interval:\s*)\d+", lambda m: m.group(1) + str(LOG_INTERVAL), 1, "log interval")
+    sub(r"(?m)^(\s*val_intervals:\s*)\d+", lambda m: m.group(1) + str(VAL_INTERVAL), 1, "val_intervals")
     if LR is not None:                       # первый lr: под schedule.optimizer
         sub(r"(?m)^(\s*lr:\s*).*$", lambda m: m.group(1) + repr(float(LR)), 1, "optimizer lr")
 
@@ -437,7 +447,11 @@ def main():
     print(f"[3/4] Обучение на {DEVICE.upper()} ({mode}; batch={BATCH}, workers={WORKERS}, epochs={EPOCHS})...")
     # PYTHONPATH=<repo> гарантирует, что `import nanodet` укажет на склонированный репозиторий,
     # даже если pip-шаг пропущен/офлайн или другой 'nanodet' установлен где-то ещё.
-    train_env = {"PYTHONPATH": os.path.abspath(REPO_DIR) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    # PYTHONWARNINGS наследуется spawn-воркерами даталоадера (где обёртка не действует),
+    # поэтому предупреждение про pkg_resources прячется во всех процессах.
+    _pw = "ignore:pkg_resources is deprecated as an API"
+    train_env = {"PYTHONPATH": os.path.abspath(REPO_DIR) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                 "PYTHONWARNINGS": _pw + ("," + os.environ["PYTHONWARNINGS"] if os.environ.get("PYTHONWARNINGS") else "")}
     wrapper = write_train_wrapper()          # шимит убранный в torch 2.x torch._six + torch.load, затем обучает
     if sh([sys.executable, wrapper, cfg], cwd=REPO_DIR, extra_env=train_env):
         sys.exit("ОШИБКА: обучение не удалось (см. вывод выше). Если это ошибка API pytorch-\n"
