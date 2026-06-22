@@ -47,9 +47,20 @@ def _newest(paths):
 
 
 def find_ckpt(repo):
-    """Самый свежий .ckpt, созданный обучением (NanoDet кладёт их в save_dir/workspace)."""
-    return _newest(glob.glob(os.path.join(repo, "**", "*.ckpt"), recursive=True)) \
-        or _newest(glob.glob(os.path.join("workspace", "**", "*.ckpt"), recursive=True))
+    """Чекпойнт для экспорта. Предпочитаем ЛУЧШИЙ по mAP (model_best), а не просто самый
+    свежий: NanoDet переписывает model_last.ckpt каждую эпоху, поэтому 'самый свежий' — это
+    последняя эпоха, которая нередко хуже лучшей. Откатываемся на самый свежий .ckpt
+    (model_last и т.п.), только если model_best не найден."""
+    best = (_newest(glob.glob(os.path.join(repo, "**", "model_best.ckpt"), recursive=True))
+            or _newest(glob.glob(os.path.join("workspace", "**", "model_best.ckpt"), recursive=True)))
+    if best:
+        _log(f"  выбран лучший чекпойнт по mAP: {best}")
+        return best
+    newest = (_newest(glob.glob(os.path.join(repo, "**", "*.ckpt"), recursive=True))
+              or _newest(glob.glob(os.path.join("workspace", "**", "*.ckpt"), recursive=True)))
+    if newest:
+        _log(f"  model_best не найден — беру самый свежий чекпойнт: {newest}")
+    return newest
 
 
 def _shim_torch_six():

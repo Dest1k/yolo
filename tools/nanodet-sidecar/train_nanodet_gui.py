@@ -77,10 +77,83 @@ def save_state(state):
         pass
 
 
+def _win_suspend_tree(pid, resume):
+    """Windows без psutil: заморозить/разморозить процесс и ВСЕХ его потомков через
+    Toolhelp32 (обход дерева по PPID) + NtSuspendProcess/NtResumeProcess из ntdll."""
+    import ctypes
+    from ctypes import wintypes
+    TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_SUSPEND_RESUME = 0x0800
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)]
+    k = ctypes.windll.kernel32
+    snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap in (-1, 0xFFFFFFFF):
+        return False
+    children = {}
+    e = PROCESSENTRY32(); e.dwSize = ctypes.sizeof(PROCESSENTRY32)
+    ok = k.Process32First(snap, ctypes.byref(e))
+    while ok:
+        children.setdefault(e.th32ParentProcessID, []).append(e.th32ProcessID)
+        ok = k.Process32Next(snap, ctypes.byref(e))
+    k.CloseHandle(snap)
+    seen, stack = set(), [pid]                         # собрать всё поддерево от pid
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(children.get(cur, []))
+    func = ctypes.windll.ntdll.NtResumeProcess if resume else ctypes.windll.ntdll.NtSuspendProcess
+    any_ok = False
+    for pp in seen:
+        h = k.OpenProcess(PROCESS_SUSPEND_RESUME, False, pp)
+        if h:
+            func(h); k.CloseHandle(h); any_ok = True
+    return any_ok
+
+
+def suspend_process_tree(pid, resume=False):
+    """Заморозить (resume=False) или разморозить (resume=True) процесс и всех его потомков.
+    Тяжёлое обучение живёт в дочерних процессах (обёртка + воркеры загрузчика), поэтому
+    замораживаем именно всё дерево, иначе пауза не остановит реальные вычисления."""
+    try:
+        import psutil
+        try:
+            root = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return False
+        for pr in [root] + root.children(recursive=True):
+            try:
+                pr.resume() if resume else pr.suspend()
+            except Exception:
+                pass
+        return True
+    except ImportError:
+        pass
+    if os.name != "nt":                                # POSIX — сигнал всей группе процессов
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGCONT if resume else signal.SIGSTOP)
+            return True
+        except Exception:
+            return False
+    try:
+        return _win_suspend_tree(pid, resume)
+    except Exception:
+        return False
+
+
 class TrainerGUI:
     def __init__(self, root):
         self.root = root
         self.proc = None
+        self.paused = False
         self.q = queue.Queue()
         self.state = load_state()
         root.title("Тренер NanoDet-Plus")
@@ -166,6 +239,8 @@ class TrainerGUI:
         bar = ttk.Frame(f); bar.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.start_btn = ttk.Button(bar, text="▶  Начать обучение", command=self.start)
         self.start_btn.pack(side="left")
+        self.pause_btn = ttk.Button(bar, text="⏸  Пауза", command=self.toggle_pause, state="disabled")
+        self.pause_btn.pack(side="left", padx=6)
         self.stop_btn = ttk.Button(bar, text="■  Стоп", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
         ttk.Button(bar, text="Очистить лог", command=self._clear_log).pack(side="left", padx=6)
@@ -345,7 +420,30 @@ class TrainerGUI:
         for b in (self.start_btn, self.ready_btn, self.ready_all_btn):
             b.configure(state=st_run)
         self.stop_btn.configure(state="normal" if on else "disabled")
+        self.paused = False
+        self.pause_btn.configure(text="⏸  Пауза", state="normal" if on else "disabled")
         self.status.configure(text="выполняется…" if on else self.status.cget("text"))
+
+    def toggle_pause(self):
+        """Заморозить/разморозить обучение в любой момент без потери прогресса (без перезапуска)."""
+        p = self.proc
+        if not p or p.poll() is not None:
+            return
+        want_pause = not self.paused
+        ok = suspend_process_tree(p.pid, resume=not want_pause)
+        if not ok:
+            self._append("не удалось поставить на паузу (нет прав или процесс уже завершился); "
+                         "для надёжной паузы поставь: pip install psutil\n", "err")
+            return
+        self.paused = want_pause
+        if want_pause:
+            self.pause_btn.configure(text="▶  Возобновить")
+            self.status.configure(text="на паузе (видеопамять удерживается)")
+            self._append("\n[пауза — обучение заморожено; нажми «Возобновить», чтобы продолжить]\n", "ok")
+        else:
+            self.pause_btn.configure(text="⏸  Пауза")
+            self.status.configure(text="выполняется…")
+            self._append("[возобновлено]\n", "ok")
 
     def start(self):
         if self._busy():
@@ -415,6 +513,9 @@ class TrainerGUI:
         if not p or p.poll() is not None:
             return
         self.status.configure(text="останавливаю…")
+        if self.paused:                                # размораживаем, иначе процесс не примет сигнал/закрытие
+            suspend_process_tree(p.pid, resume=True)
+            self.paused = False
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
