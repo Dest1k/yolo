@@ -33,7 +33,7 @@ import sys
 # Старая кодовая страница консоли Windows (cp1251 и т.п.) не должна падать на наших стрелках.
 for _s in (sys.stdout, sys.stderr):
     try:
-        _s.reconfigure(errors="replace")
+        _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 

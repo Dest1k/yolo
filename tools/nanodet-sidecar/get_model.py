@@ -39,7 +39,7 @@ import urllib.request
 # Просим поток заменять непечатаемые символы вместо краха.
 for _s in (sys.stdout, sys.stderr):
     try:
-        _s.reconfigure(errors="replace")
+        _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 

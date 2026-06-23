@@ -48,9 +48,21 @@ SPLIT_NAMES = ("train", "val", "valid", "test")
 BACKUP_PREFIX = "_dataset_backup_"
 EPS = 1e-6
 
+# Везде UTF-8, чтобы русский в логе не превращался в крокозябры при чтении в GUI на Windows.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+
 
 def _log(msg=""):
     print(msg, flush=True)
+
+
+def _pb(frac, text=""):
+    """Маркер прогресса для GUI (он рисует полосу). В обычной консоли — просто строка."""
+    print("@@PB@@\t%.4f\t%s" % (max(0.0, min(1.0, frac)), text), flush=True)
 
 
 # ── обнаружение раскладки ────────────────────────────────────────────────────────
@@ -170,18 +182,36 @@ def fix_line(raw, ncls):
 # ── бэкап ─────────────────────────────────────────────────────────────────────────
 def make_backup(dataset):
     """Полная копия датасета ВНУТРИ него: <датасет>/_dataset_backup_<дата_время>/.
-    Прошлые бэкапы исключаются (без рекурсии и разрастания)."""
+    Прошлые бэкапы исключаются (без рекурсии). Копирует по файлам с прогресс-баром."""
     ts = time.strftime("%Y%m%d_%H%M%S")
     dst = os.path.join(dataset, BACKUP_PREFIX + ts)
-
-    def _ignore(d, names):
-        return [n for n in names if n.startswith(BACKUP_PREFIX)]
-
-    _log("  делаю резервную копию (картинки + метки целиком) -> %s" % dst)
-    _log("  это может занять время и место на диске; не прерывай…")
-    shutil.copytree(dataset, dst, ignore=_ignore)
-    _log("  бэкап готов: %s" % dst)
+    _log("  собираю список файлов для бэкапа…")
+    todo = []                                       # (абсолютный_путь, путь_назначения)
+    for root, dirs, files in os.walk(dataset):
+        dirs[:] = [d for d in dirs if not d.startswith(BACKUP_PREFIX)]  # не копировать прошлые бэкапы
+        for fn in files:
+            src = os.path.join(root, fn)
+            todo.append((src, os.path.join(dst, os.path.relpath(src, dataset))))
+    total = len(todo)
+    _log("  копирую %d файлов -> %s" % (total, dst))
+    _log("  (это может занять время и место на диске; не прерывай)")
+    t0 = time.time()
+    for i, (src, d) in enumerate(todo, 1):
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        try:
+            shutil.copy2(src, d)
+        except Exception as e:
+            _log("    не скопировал %s: %s" % (src, e))
+        if i % 200 == 0 or i == total:
+            _pb(i / max(1, total), "Бэкап: %d/%d файлов" % (i, total))
+    _log("  бэкап готов за %s: %s" % (fmt_hms(time.time() - t0), dst))
     return dst
+
+
+def fmt_hms(sec):
+    sec = int(sec)
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return ("%dч %02dм %02dс" % (h, m, s)) if h else ("%dм %02dс" % (m, s)) if m else ("%dс" % s)
 
 
 # ── нейро-проверка разметки (YOLO-World, как в генераторе датасетов) ───────────────
@@ -235,15 +265,23 @@ def nn_audit(splits, classes, weights, conf, add_conf, iou_match):
 
     additions, details = {}, []
     stat = dict(imgs=0, preds=0, missing=0, unsupported=0, mismatch=0)
+    grand = sum(len(_list_images(d)) for d in splits.values()) or 1
+    done = 0
+    t0 = time.time()
     for split, img_dir in splits.items():
         n = len(_list_images(img_dir))
         if not n:
             continue
-        _log("\n  [нейро-проверка: %s] %d картинок моделью %s (conf>=%.2f, дозаполнять conf>=%.2f)…"
+        _log("  • сплит '%s': %d картинок моделью %s (conf>=%.2f, дозаполнять conf>=%.2f)…"
              % (split, n, os.path.basename(weights), conf, add_conf))
         results = model.predict(source=img_dir, conf=conf, iou=0.5, stream=True, verbose=False)
         for r in results:
             stat["imgs"] += 1
+            done += 1
+            if done % 20 == 0 or done == grand:
+                eta = (time.time() - t0) / done * (grand - done)
+                _pb(done / grand, "Нейро-проверка: %d/%d картинок  (осталось ~%s)"
+                    % (done, grand, fmt_hms(eta)))
             preds = []
             if r.boxes is not None and len(r.boxes):
                 for c, cc, (x, y, w, h) in zip(r.boxes.cls.tolist(), r.boxes.conf.tolist(),
@@ -304,10 +342,12 @@ def make_val_split(dataset, splits, frac):
         return 0
     random.seed(1337)
     k = max(1, int(len(imgs) * frac))
-    picked = set(random.sample(imgs, k))
+    picked = list(random.sample(imgs, k))
     # путь val зеркалит train: .../images/train -> .../images/val и .../labels/train -> .../labels/val
     moved = 0
-    for img in picked:
+    for j, img in enumerate(picked, 1):
+        if j % 25 == 0 or j == k:
+            _pb(j / k, "Шаг 4/4 — перенос в val: %d/%d" % (j, k))
         lp = _label_path(img)
         v_img = img.replace(os.sep + "train", os.sep + "val")
         if v_img == img:
@@ -355,13 +395,24 @@ def check(dataset, classes, do_fix, nn=False, nn_weights="yolov8x-worldv2.pt",
     def bump(tag, n=1):
         tag_counts[tag] = tag_counts.get(tag, 0) + n
 
+    split_imgs = {s: _list_images(d) for s, d in splits.items()}
+    grand_total = sum(len(v) for v in split_imgs.values()) or 1
+    _log("\n[Шаг 1/4] Сканирую картинки и метки (всего картинок: %d)…" % grand_total)
+    scanned = 0
+    t0 = time.time()
     for split, img_dir in splits.items():
-        imgs = _list_images(img_dir)
+        imgs = split_imgs[split]
         label_dirs_seen = set()
         basenames = {}
-        _log("\n[%s] картинок: %d  (%s)" % (split, len(imgs), img_dir))
+        _log("  • сплит '%s': %d картинок  (%s)" % (split, len(imgs), img_dir))
         for img in imgs:
             totals["images"] += 1
+            scanned += 1
+            if scanned % 50 == 0 or scanned == grand_total:
+                eta = (time.time() - t0) / scanned * (grand_total - scanned)
+                _pb(scanned / grand_total,
+                    "Шаг 1/4 — проверка меток: %d/%d  (осталось ~%s)"
+                    % (scanned, grand_total, fmt_hms(eta)))
             bn = os.path.basename(img)
             basenames.setdefault(bn.lower(), []).append(img)
             ok, _wh = _img_ok(img)
@@ -498,22 +549,29 @@ def check(dataset, classes, do_fix, nn=False, nn_weights="yolov8x-worldv2.pt",
     # ── структурная починка (если просили) ──
     fixed_files = deleted = added_boxes = moved_val = 0
     if do_fix and fixable_struct:
-        _log("\nИСПРАВЛЕНИЕ структуры: %d файлов меток, %d сирот." % (len(plan), len(orphans)))
+        _log("\n[Шаг 2/4] Применяю исправления структуры: %d файлов меток, %d сирот." % (len(plan), len(orphans)))
         ensure_backup()
+        steps = (len(plan) + len(orphans)) or 1
+        k = 0
         for lp, text in plan:
             try:
                 open(lp, "w", encoding="utf-8").write(text); fixed_files += 1
             except Exception as e:
                 _log("  не смог переписать %s: %s" % (lp, e))
+            k += 1; _pb(k / steps, "Шаг 2/4 — починка меток: %d/%d" % (k, steps))
         for txt in orphans:
             try:
                 os.remove(txt); deleted += 1
             except Exception as e:
                 _log("  не смог удалить сироту %s: %s" % (txt, e))
+            k += 1; _pb(k / steps, "Шаг 2/4 — починка меток: %d/%d" % (k, steps))
+    elif do_fix:
+        _log("\n[Шаг 2/4] Структурных исправлений не требуется.")
 
     # ── нейро-проверка YOLO-World (на уже починенных метках) ──
     pending_nn = 0
     if nn:
+        _log("\n[Шаг 3/4] Нейро-проверка разметки моделью %s…" % os.path.basename(nn_weights))
         res = nn_audit(splits, classes, nn_weights, nn_conf, nn_add_conf, nn_iou)
         if res:
             additions, nstat, details = res
@@ -555,7 +613,7 @@ def check(dataset, classes, do_fix, nn=False, nn_weights="yolov8x-worldv2.pt",
 
     # ── авто-создание val-сплита ──
     if do_fix and make_val and "val" not in splits and "valid" not in splits:
-        _log("\n  СОЗДАЮ val-сплит (%.0f%% из train)…" % (make_val * 100))
+        _log("\n[Шаг 4/4] Создаю val-сплит (%.0f%% из train)…" % (make_val * 100))
         ensure_backup()
         moved_val = make_val_split(dataset, splits, make_val)
         _log("    перенесено в val: %d картинок" % moved_val)

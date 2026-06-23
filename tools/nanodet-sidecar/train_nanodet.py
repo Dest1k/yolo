@@ -42,7 +42,7 @@ import subprocess
 # стрелки/эмодзи -> UnicodeEncodeError. Просим заменять непечатаемые символы вместо краха.
 for _s in (sys.stdout, sys.stderr):
     try:
-        _s.reconfigure(errors="replace")
+        _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -247,6 +247,11 @@ def _install_progress_commentary():
         except Exception:
             return "н/д"
         return ("%.1f%%" % (x * 100.0)) if x >= 0 else "н/д"
+    total_ep = 0
+    try:
+        total_ep = int(os.environ.get("TRAIN_EPOCHS", "0"))
+    except ValueError:
+        total_ep = 0
     def log_metrics(self, metrics, step):
         _orig(self, metrics, step)
         try:
@@ -254,6 +259,9 @@ def _install_progress_commentary():
         except Exception:
             mAP = -1.0
         ep = int(step)
+        if total_ep > 0:                            # прогресс-бар обучения по эпохам (для GUI)
+            print("@@PB@@\\t%.4f\\tОбучение: эпоха %d/%d  (mAP %.1f%%)"
+                  % (min(1.0, ep / total_ep), ep, total_ep, max(0.0, mAP) * 100), flush=True)
         if mAP >= 0:
             hist.append((ep, mAP))
         if ep % every != 0 or mAP < 0:
@@ -534,7 +542,8 @@ def main():
     # поэтому предупреждение про pkg_resources прячется во всех процессах.
     _pw = "ignore:pkg_resources is deprecated as an API"
     train_env = {"PYTHONPATH": os.path.abspath(REPO_DIR) + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                 "PYTHONWARNINGS": _pw + ("," + os.environ["PYTHONWARNINGS"] if os.environ.get("PYTHONWARNINGS") else "")}
+                 "PYTHONWARNINGS": _pw + ("," + os.environ["PYTHONWARNINGS"] if os.environ.get("PYTHONWARNINGS") else ""),
+                 "TRAIN_EPOCHS": str(EPOCHS)}     # чтобы обёртка показывала прогресс-бар обучения по эпохам
     wrapper = write_train_wrapper()          # шимит убранный в torch 2.x torch._six + torch.load, затем обучает
     if sh([sys.executable, wrapper, cfg], cwd=REPO_DIR, extra_env=train_env):
         sys.exit("ОШИБКА: обучение не удалось (см. вывод выше). Если это ошибка API pytorch-\n"

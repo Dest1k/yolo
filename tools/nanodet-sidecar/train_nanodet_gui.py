@@ -312,6 +312,14 @@ class TrainerGUI:
     def _build_log(self):
         frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         frame.pack(fill="both", expand=True)
+        # строка прогресса: бар + проценты + текст текущего шага
+        pb = ttk.Frame(frame); pb.pack(fill="x", pady=(0, 4))
+        self.prog = ttk.Progressbar(pb, orient="horizontal", mode="determinate", maximum=1000)
+        self.prog.pack(side="left", fill="x", expand=True)
+        self.prog_pct = ttk.Label(pb, text="", width=6, anchor="e")
+        self.prog_pct.pack(side="left", padx=(6, 6))
+        self.prog_txt = ttk.Label(frame, text="", foreground="#9fb3c8", anchor="w")
+        self.prog_txt.pack(fill="x")
         ttk.Label(frame, text="Лог").pack(anchor="w")
         wrap = ttk.Frame(frame); wrap.pack(fill="both", expand=True)
         self.log = tk.Text(wrap, wrap="none", bg="#101418", fg="#d6e2ec",
@@ -324,6 +332,23 @@ class TrainerGUI:
         xs.pack(fill="x")
         self.log.tag_config("err", foreground="#ff9b9b")
         self.log.tag_config("ok", foreground="#8ce6a0")
+        self.log.tag_config("step", foreground="#7fd1ff")
+
+    def _set_progress(self, frac, text):
+        """Обновляет полосу прогресса (frac 0..1) и подпись текущего шага."""
+        try:
+            frac = max(0.0, min(1.0, float(frac)))
+        except (TypeError, ValueError):
+            return
+        self.prog["value"] = frac * 1000
+        self.prog_pct.configure(text="%d%%" % round(frac * 100))
+        if text:
+            self.prog_txt.configure(text=text)
+
+    def _reset_progress(self):
+        self.prog["value"] = 0
+        self.prog_pct.configure(text="")
+        self.prog_txt.configure(text="")
 
     # ── сохранение состояния ─────────────────────────────────────────────────────
     def _restore(self):
@@ -429,12 +454,16 @@ class TrainerGUI:
             return
         self._persist()
         self._append(f"$ {' '.join(заголовок)}   (cwd={HERE})\n", "ok")
+        # Везде UTF-8: иначе русский из дочернего процесса читается как cp1251 -> крокозябры.
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        self._reset_progress()
         creflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         try:
             self.proc = subprocess.Popen(
                 cmd, cwd=HERE, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1, text=True, errors="replace",
+                bufsize=1, text=True, encoding="utf-8", errors="replace",
                 creationflags=creflags,
                 start_new_session=(os.name != "nt"))
         except Exception as e:
@@ -559,13 +588,20 @@ class TrainerGUI:
                 item = self.q.get_nowait()
                 if isinstance(item, tuple) and item and item[0] == "__exit__":
                     self._on_exit(item[1])
-                else:
-                    low = item.lower()
-                    tag = "err" if ("ошибк" in low or "провал" in low or "error" in low
-                                    or "fail" in low or "traceback" in low) \
-                        else "ok" if ("проверка ok" in low or "verify ok" in low
-                                      or "готово" in low or "done" in low) else None
-                    self._append(item, tag)
+                    continue
+                # Маркер прогресса от дочернего скрипта:  @@PB@@<TAB>доля<TAB>текст
+                if item.startswith("@@PB@@\t"):
+                    parts = item.rstrip("\n").split("\t")
+                    if len(parts) >= 3:
+                        self._set_progress(parts[1], parts[2])
+                    continue
+                low = item.lower()
+                tag = "err" if ("ошибк" in low or "провал" in low or "error" in low
+                                or "fail" in low or "traceback" in low) \
+                    else "ok" if ("проверка ok" in low or "verify ok" in low
+                                  or "готово" in low or "done" in low) \
+                    else "step" if item.lstrip().startswith(("[", "═", "==")) else None
+                self._append(item, tag)
         except queue.Empty:
             pass
         self.root.after(80, self._drain)
@@ -573,6 +609,8 @@ class TrainerGUI:
     def _on_exit(self, code):
         self._append(f"\n[процесс завершился с кодом {code}]\n", "ok" if code == 0 else "err")
         self._set_running(False)
+        if code == 0:
+            self._set_progress(1.0, "готово")
         self.status.configure(text="готово" if code == 0 else f"вышел ({code})")
         self.proc = None
 
