@@ -46,6 +46,7 @@ except Exception as e:                                       # машина бе
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRAINER = os.path.join(HERE, "train_nanodet.py")
 GETMODEL = os.path.join(HERE, "get_model.py")
+CHECKER = os.path.join(HERE, "check_dataset.py")
 STATE_PATH = os.path.expanduser("~/.nanodet_trainer_gui.json")
 
 INPUT_CHOICES = ["256", "320", "352", "416", "512"]
@@ -235,6 +236,27 @@ class TrainerGUI:
         self.ckpt_btn.grid(row=1, column=2, sticky="ew", pady=(6, 0))
         r += 1
 
+        # ── Проверка датасета ──
+        cf = ttk.LabelFrame(f, text="Проверка датасета (разметка + при желании починка)", padding=8)
+        cf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.chk_nn = tk.BooleanVar(value=False)
+        self.chk_nnfix = tk.BooleanVar(value=False)
+        self.chk_val = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cf, text="Нейро-проверка разметки (YOLO-World — как в генераторе; качает модель)",
+                        variable=self.chk_nn).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(cf, text="Дозаполнять пропущенные объекты находками модели (аддитивно)",
+                        variable=self.chk_nnfix).grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(cf, text="Создать val-сплит (15%), если его нет",
+                        variable=self.chk_val).grid(row=2, column=0, columnspan=3, sticky="w")
+        cbar = ttk.Frame(cf); cbar.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.check_btn = ttk.Button(cbar, text="🔍  Только проверить", command=lambda: self.run_check(False))
+        self.check_btn.pack(side="left")
+        self.checkfix_btn = ttk.Button(cbar, text="🔧  Проверить и исправить", command=lambda: self.run_check(True))
+        self.checkfix_btn.pack(side="left", padx=6)
+        ttk.Label(cf, text="Перед любыми изменениями делается полный бэкап ВНУТРИ папки датасета.",
+                  foreground="#6b7785").grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        r += 1
+
         # Кнопки действий
         bar = ttk.Frame(f); bar.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.start_btn = ttk.Button(bar, text="▶  Начать обучение", command=self.start)
@@ -317,6 +339,9 @@ class TrainerGUI:
         self.ft_mode.set(self.state.get("ft_mode", "scratch"))
         self.ckpt_var.set(self.state.get("ckpt", ""))
         self.ready_var.set(self.state.get("ready", "m-416"))
+        self.chk_nn.set(self.state.get("chk_nn", False))
+        self.chk_nnfix.set(self.state.get("chk_nnfix", False))
+        self.chk_val.set(self.state.get("chk_val", False))
         self._sync_ft()
 
     def _collect(self):
@@ -328,6 +353,9 @@ class TrainerGUI:
         self.state["ft_mode"] = self.ft_mode.get()
         self.state["ckpt"] = self.ckpt_var.get().strip()
         self.state["ready"] = self.ready_var.get()
+        self.state["chk_nn"] = bool(self.chk_nn.get())
+        self.state["chk_nnfix"] = bool(self.chk_nnfix.get())
+        self.state["chk_val"] = bool(self.chk_val.get())
         save_state(self.state)
 
     # ── мелкие обработчики ───────────────────────────────────────────────────────
@@ -417,7 +445,8 @@ class TrainerGUI:
 
     def _set_running(self, on):
         st_run = "disabled" if on else "normal"
-        for b in (self.start_btn, self.ready_btn, self.ready_all_btn):
+        for b in (self.start_btn, self.ready_btn, self.ready_all_btn,
+                  self.check_btn, self.checkfix_btn):
             b.configure(state=st_run)
         self.stop_btn.configure(state="normal" if on else "disabled")
         self.paused = False
@@ -475,6 +504,45 @@ class TrainerGUI:
 
     def build_ready_all(self):
         self.build_ready(variants="all")
+
+    def run_check(self, fix):
+        """Проверка/починка датасета (check_dataset.py) с теми же датасетом и классами, что у обучения."""
+        if self._busy():
+            return
+        if not os.path.isfile(CHECKER):
+            messagebox.showerror("Чекер", f"check_dataset.py не найден рядом с этим окном:\n{CHECKER}")
+            return
+        fields = self._collect()
+        ds = fields.get("TRAIN_DATASET", "")
+        if not ds or not os.path.isdir(ds):
+            messagebox.showerror("Датасет", f"Папка датасета не найдена:\n{ds or '(пусто)'}")
+            return
+        nn = bool(self.chk_nn.get())
+        if (self.chk_nnfix.get() and not nn):
+            messagebox.showinfo("Нейро-починка", "Для дозаполнения включи «Нейро-проверка разметки».")
+            return
+        if fix:
+            msg = ("Сейчас будет сделан ПОЛНЫЙ бэкап датасета внутри его папки "
+                   "(_dataset_backup_…), затем применены исправления разметки.")
+            if self.chk_nnfix.get():
+                msg += "\n\n• Будут дозаполнены пропущенные объекты находками модели (метки не удаляются)."
+            if self.chk_val.get():
+                msg += "\n• Будет создан val-сплит (15%), если его нет (часть train переедет в val)."
+            msg += "\n\nБэкап может занять место на диске. Продолжить?"
+            if not messagebox.askyesno("Проверить и исправить", msg):
+                return
+        env = dict(os.environ); env["PYTHONUNBUFFERED"] = "1"
+        env["TRAIN_DATASET"] = ds
+        if fields.get("TRAIN_CLASSES"):
+            env["TRAIN_CLASSES"] = fields["TRAIN_CLASSES"]
+        env["CHECK_FIX"] = "1" if fix else "0"
+        env["CHECK_NN"] = "1" if nn else "0"
+        env["CHECK_NN_FIX"] = "1" if self.chk_nnfix.get() else "0"
+        env["CHECK_MAKE_VAL"] = "0.15" if self.chk_val.get() else "0"
+        self._persist()
+        self._launch([sys.executable, "-u", CHECKER], env,
+                     [os.path.basename(sys.executable), "-u", "check_dataset.py",
+                      ("--fix" if fix else "--анализ")])
 
     def _reader(self, proc):
         try:
