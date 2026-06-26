@@ -233,10 +233,22 @@ class GeneratorGUI:
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
-        ttk.Label(inner, text="Объект генерации (что это — любой объект, не только дрон):",
+        ttk.Label(inner, text="Объект генерации (используется, если список объектов сцены ниже пуст):",
                   foreground="#bbb").pack(anchor="w", pady=(4, 0))
         self.object_noun = tk.StringVar(); self.widgets["prompts.object_noun"] = self.object_noun
         ttk.Entry(inner, textvariable=self.object_noun).pack(fill="x", pady=(0, 8))
+
+        ttk.Label(inner, text="Объекты сцены для генерации (по одному в строке). Если их 2+, часть "
+                              "картинок будет содержать НЕСКОЛЬКО разных объектов сразу:",
+                  foreground="#888", wraplength=820, justify="left").pack(anchor="w")
+        wrap, self.obj_text = self._textbox(inner, height=4); wrap.pack(fill="x", pady=(0, 4))
+        mo = ttk.Frame(inner); mo.pack(fill="x", pady=(0, 8))
+        ttk.Label(mo, text="Доля сцен с 2+ объектами (0..1):").pack(side="left")
+        self.widgets["prompts.multi_object_prob"] = v1 = tk.StringVar()
+        ttk.Entry(mo, textvariable=v1, width=6).pack(side="left", padx=(4, 16))
+        ttk.Label(mo, text="Макс. объектов в сцене:").pack(side="left")
+        self.widgets["prompts.multi_object_max"] = v2 = tk.StringVar()
+        ttk.Entry(mo, textvariable=v2, width=6).pack(side="left", padx=(4, 0))
 
         ttk.Label(inner, text="СЛОВАРЬ КАТЕГОРИЙ. Заголовок категории — строкой «## Имя», ниже её варианты "
                               "по одному в строке. Категории любые свои; LLM фокусируется на случайном "
@@ -375,6 +387,8 @@ class GeneratorGUI:
                 var.set(bool(val))
             else:
                 var.set("" if val is None else str(val))
+        self.obj_text.delete("1.0", "end")
+        self.obj_text.insert("1.0", "\n".join(self.cfg["prompts"].get("objects", [])))
         self.cat_text.delete("1.0", "end")
         self.cat_text.insert("1.0", self._cats_to_text(self.cfg["prompts"].get("categories", {})))
         self.scales_text.delete("1.0", "end")
@@ -396,9 +410,9 @@ class GeneratorGUI:
                      "generation.super_chunk", "generation.encode_batch",
                      "generation.num_inference_steps", "generation.jpeg_quality",
                      "generation.width", "generation.height", "llm.max_tokens",
-                     "labeling.class_index"}
+                     "prompts.multi_object_max"}
         float_paths = {"generation.guidance_scale", "llm.temperature",
-                       "labeling.conf", "labeling.iou"}
+                       "labeling.conf", "labeling.iou", "prompts.multi_object_prob"}
         for path, var in self.widgets.items():
             if isinstance(var, tk.BooleanVar):
                 dset(cfg, path, bool(var.get())); continue
@@ -412,6 +426,7 @@ class GeneratorGUI:
                     dset(cfg, path, raw)
             except ValueError:
                 raise ValueError(f"'{path}' ожидает число, а получено {raw!r}")
+        cfg["prompts"]["objects"] = self._lines(self.obj_text)
         cats = self._text_to_cats(self.cat_text.get("1.0", "end"))
         if not cats:
             raise ValueError("Словарь категорий пуст — добавь хотя бы одну «## Категория» с вариантами.")

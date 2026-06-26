@@ -88,6 +88,13 @@ DEFAULTS = {
     # вариативности: имя -> список вариантов. Шаблон подставит по одному случайному из каждой.
     "prompts": {
         "object_noun": "drone (UAV / quadcopter)",
+        # МУЛЬТИОБЪЕКТ: если objects непусто и в нём ≥2 объектов, часть сцен будет содержать
+        # 2+ разных объекта вместе (доля = multi_object_prob, максимум = multi_object_max).
+        # Объекты — естественные фразы для генерации; их имена обычно совпадают с классами
+        # разметки. Пусто => используется один object_noun (как раньше).
+        "objects": [],
+        "multi_object_prob": 0.3,
+        "multi_object_max": 2,
         "categories": {
             "Тип/форм-фактор": [
                 "commercial DJI Mavic style quadcopter with folded arms",
@@ -307,8 +314,26 @@ class ScalePlanner:
                     break
 
 
+def choose_scene_objects(pr):
+    """Выбирает объект(ы) сцены для текущего батча. Иногда (multi_object_prob) берёт 2+ разных
+    объекта вместе — для датасета, где на части картинок несколько классов сразу.
+    Возвращает строку для подстановки в {object_noun}."""
+    objects = [str(o).strip() for o in (pr.get("objects") or []) if str(o).strip()]
+    if not objects:
+        return pr.get("object_noun", "the target object")
+    p = float(pr.get("multi_object_prob", 0.0) or 0.0)
+    mx = int(pr.get("multi_object_max", 2) or 2)
+    mx = max(2, min(mx, len(objects)))
+    if len(objects) >= 2 and random.random() < p:
+        k = random.randint(2, mx)
+        chosen = random.sample(objects, k)
+        return (" AND ".join(chosen) +
+                " — ALL of them clearly visible together in the SAME single scene")
+    return random.choice(objects)
+
+
 def build_system_prompt(cfg):
-    """Собирает системный промпт: по одному случайному варианту из каждой категории словаря."""
+    """Собирает системный промпт: объект(ы) сцены + по одному случайному варианту из каждой категории."""
     pr = cfg["prompts"]
     cats = pr.get("categories", {})
     lines = []
@@ -318,7 +343,7 @@ def build_system_prompt(cfg):
     config_block = "\n".join(lines)
     return pr["system_template"].format(
         batch_size=cfg["generation"]["batch_size"],
-        object_noun=pr.get("object_noun", "the target object"),
+        object_noun=choose_scene_objects(pr),
         config_block=config_block,
     )
 
@@ -856,8 +881,11 @@ def main():
     setup_torch(cfg)
     g = cfg["generation"]
     own = g.get("backend", "flux") == "own"
+    objs = cfg['prompts'].get('objects') or [cfg['prompts'].get('object_noun', '?')]
+    multi = (len(objs) >= 2 and float(cfg['prompts'].get('multi_object_prob', 0) or 0) > 0)
     print("\n" + "=" * 60)
-    print(f"[ПЛАН] Цель: {cfg['total_images']} картинок | объект: {cfg['prompts'].get('object_noun','?')}")
+    print(f"[ПЛАН] Цель: {cfg['total_images']} картинок | объект(ы): {', '.join(objs)}"
+          + (f" | мультиобъект ~{int(float(cfg['prompts']['multi_object_prob'])*100)}% сцен" if multi else ""))
     print(f"       Генерация: {'СВОИ картинки (без рендера)' if own else 'FLUX'} | разметка: {cfg['labeling'].get('backend')}")
     print(f"       Фазы: промпты={cfg['run']['phase1_prompts']} картинки={cfg['run']['phase2_images']} "
           f"разметка={cfg['run']['phase3_label']}")
