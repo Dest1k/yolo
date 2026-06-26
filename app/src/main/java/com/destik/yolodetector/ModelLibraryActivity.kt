@@ -209,11 +209,10 @@ class ModelLibraryActivity : AppCompatActivity() {
 
     private fun returnModel(entry: ModelEntry) {
         val (paramFile, binFile) = localFiles(entry)
-        // Use ~half the cores (min 2, max 6): on big.LITTLE single-board boards and
-        // phones, oversubscribing past the big cluster spills onto the slow LITTLE
-        // cores and actually drops inference FPS, so we cap rather than max out.
+        // Производительность по максимуму, но без вылета на медленные LITTLE-ядра:
+        // берём ~3/4 ядер (большой кластер), от 4 до 8 потоков.
         val cores = Runtime.getRuntime().availableProcessors()
-        val threads = (cores / 2).coerceIn(2, 6)
+        val threads = (cores * 3 / 4).coerceIn(4, 8)
         val config = ModelConfig(
             paramPath     = paramFile.absolutePath,
             binPath       = binFile.absolutePath,
@@ -263,7 +262,7 @@ class ModelLibraryActivity : AppCompatActivity() {
             val entry = items[position]
             h.name.text  = entry.name
             h.desc.text  = entry.description
-            h.badge.text = "v${entry.yoloVersion}"
+            h.badge.text = if (entry.yoloVersion == 1) "ND" else "v${entry.yoloVersion}"
 
             val prog = progress[position]
             if (prog != null) {

@@ -17,8 +17,11 @@ package com.destik.yolodetector
  * public methods are synchronized.
  */
 class DetectionTracker(
-    private val holdMs: Long = 600L,
-    private val iouThreshold: Float = 0.3f
+    // Максимальная цепкость: держим рамку дольше сквозь пропуски детекции и легче
+    // сопоставляем её с новым кадром (меньший порог IoU), чтобы не мигала и не
+    // «отлипала» при резком движении камеры в любой ориентации.
+    private val holdMs: Long = 1000L,
+    private val iouThreshold: Float = 0.2f
 ) {
     private class Track(var det: Detection, var lastSeen: Long)
 

@@ -19,48 +19,37 @@ data class ModelEntry(
     val nmsThreshold: Float = 0.45f
 ) {
     companion object {
-        // Curated to the detection models that nihui/ncnn-assets actually ships in a
-        // clean, decodable NCNN layout. yolov6n / yolov7-tiny were dropped: their
-        // exports use non-standard permuted / objectness blobs that don't decode
-        // reliably, which is the opposite of "guaranteed best result".
+        // 4 готовые модели NanoDet-Plus (COCO 80 классов), как «Готовые модели» в обучалке:
+        // экспортируются get_model.py одним кликом (--все), выкладываются в Releases репозитория
+        // и здесь скачиваются/выбираются. yoloVersion=1 → нативный декодер NanoDet-Plus
+        // (strides 8/16/32/64, reg_max 7). outputName0="output" — реальное имя выходного блоба
+        // нативный код определяет сам, менять не нужно.
         //
-        // All URLs use raw.githubusercontent.com so LFS pointer detection works.
-        private const val RAW = "https://raw.githubusercontent.com/nihui/ncnn-assets/master/models"
+        // КУДА ЗАЛИВАТЬ: собери `python get_model.py --все`, затем загрузи 8 файлов
+        // (.param/.bin каждого варианта) в релиз репозитория с тегом nanodet-ncnn.
+        private const val RELEASES =
+            "https://github.com/dest1k/yolo/releases/download/nanodet-ncnn"
+
+        private fun nd(id: String, name: String, desc: String, input: Int, mb: Int) = ModelEntry(
+            id = id, name = name, description = desc,
+            yoloVersion = 1, numClasses = 80, inputSize = input,
+            outputName0 = "output",
+            paramUrl = "$RELEASES/$id.param",
+            binUrl   = "$RELEASES/$id.bin",
+            approxMb = mb,
+            // NanoDet-Plus: порог 0.35 / NMS 0.6 — сразу рабочие значения.
+            confThreshold = 0.35f, nmsThreshold = 0.6f
+        )
 
         val CATALOG = listOf(
-            ModelEntry(
-                id = "yolo11n",
-                name = "YOLO11n",
-                description = "Новейшая · COCO 80 классов · 640 · лучший баланс скорость/точность",
-                yoloVersion = 8, numClasses = 80, inputSize = 640,
-                outputName0 = "out0",
-                paramUrl = "$RAW/yolo11n.ncnn.param",
-                binUrl   = "$RAW/yolo11n.ncnn.bin",
-                approxMb = 5,
-                confThreshold = 0.25f
-            ),
-            ModelEntry(
-                id = "yolov8n",
-                name = "YOLOv8n",
-                description = "Популярная · COCO 80 классов · 640 · быстрая и точная",
-                yoloVersion = 8, numClasses = 80, inputSize = 640,
-                outputName0 = "out0",
-                paramUrl = "$RAW/yolov8n.ncnn.param",
-                binUrl   = "$RAW/yolov8n.ncnn.bin",
-                approxMb = 6,
-                confThreshold = 0.25f
-            ),
-            ModelEntry(
-                id = "yolov5s",
-                name = "YOLOv5s",
-                description = "Классическая · COCO 80 классов · 640 · стабильная на слабом железе",
-                yoloVersion = 5, numClasses = 80, inputSize = 640,
-                outputName0 = "out0", outputName1 = "out1", outputName2 = "out2",
-                paramUrl = "$RAW/yolov5s.ncnn.param",
-                binUrl   = "$RAW/yolov5s.ncnn.bin",
-                approxMb = 7,
-                confThreshold = 0.25f
-            )
+            nd("nanodet-m-416", "NanoDet-Plus m · 416",
+               "Баланс скорость/точность · COCO 80 · вход 416 (рекомендую)", 416, 4),
+            nd("nanodet-m-320", "NanoDet-Plus m · 320",
+               "Самая БЫСТРАЯ · COCO 80 · вход 320", 320, 4),
+            nd("nanodet-m-1.5x-416", "NanoDet-Plus m-1.5x · 416",
+               "Самая ТОЧНАЯ · COCO 80 · вход 416 · тяжелее", 416, 8),
+            nd("nanodet-m-1.5x-320", "NanoDet-Plus m-1.5x · 320",
+               "Точнее обычной · COCO 80 · вход 320", 320, 8)
         )
     }
 }

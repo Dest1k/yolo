@@ -3,17 +3,18 @@ package com.destik.yolodetector
 data class ModelConfig(
     var paramPath: String = "",
     var binPath: String = "",
-    var yoloVersion: Int = 10,
-    var inputSize: Int = 640,
+    // По умолчанию NanoDet-Plus (нативный декодер: strides 8/16/32/64, reg_max 7).
+    var yoloVersion: Int = 1,
+    var inputSize: Int = 416,
     var numClasses: Int = 80,
-    var confThreshold: Float = 0.15f,
-    var nmsThreshold: Float = 0.45f,
+    var confThreshold: Float = 0.35f,
+    var nmsThreshold: Float = 0.6f,
     var numThreads: Int = 8,
     // Default OFF: ncnn-Vulkan crashes on some models (e.g. YOLOv11) on certain
     // devices, and for end-to-end / NMS-free ONNX models NNAPI is slower than
     // CPU+XNNPACK. Users can opt back into GPU in settings.
     var useGPU: Boolean = false,
-    var outputName0: String = "output0",
+    var outputName0: String = "output",
     var outputName1: String = "output1",
     var outputName2: String = "output2",
     // YOLO-FastestV2 anchors, pixels at the training input, in the trainer's
@@ -24,11 +25,10 @@ data class ModelConfig(
     var onnxPath: String = "",
     var engine: String = "ncnn",   // "ncnn" or "onnx"
     var streamUrl: String = "",    // if non-empty, use network stream instead of camera
-    // Hold boxes through brief detection gaps (IoU tracking) so they stop
-    // flickering when the camera moves. On by default.
+    // Держим рамки сквозь короткие пропуски детекции (IoU-трекинг) — чтобы не мигали
+    // при движении камеры. Включено для максимальной цепкости рамок.
     var stabilizeBoxes: Boolean = true,
-    // Rotate the frame upright before inference so portrait orientation detects
-    // as well as landscape. Costs one bitmap rotation per inference frame, so
-    // it's off by default.
-    var uprightInference: Boolean = false
+    // Поворачиваем кадр «как надо» перед инференсом, чтобы портрет ловился так же
+    // хорошо, как ландшафт. Включено по умолчанию (цепкость в обеих ориентациях).
+    var uprightInference: Boolean = true
 )
