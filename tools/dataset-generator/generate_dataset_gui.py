@@ -585,7 +585,12 @@ class GeneratorGUI:
         except Exception:
             pass
         finally:
-            self.q.put(("__exit__", proc.poll()))
+            # wait() (а не poll()) — иначе сразу после EOF потока код часто ещё None.
+            try:
+                code = proc.wait(timeout=10)
+            except Exception:
+                code = proc.poll()
+            self.q.put(("__exit__", code))
 
     def _drain(self):
         try:
@@ -683,16 +688,18 @@ class GeneratorGUI:
         self.status.configure(text="заполняю из описания…")
 
     def _reload_after_autofill(self, code):
-        if code == 0 and os.path.isfile(RUN_CONFIG):
+        # code==0 в норме; None бывает из-за гонки реапинга — пробуем загрузить, раз файл валиден.
+        if code in (0, None) and os.path.isfile(RUN_CONFIG):
             try:
                 with open(RUN_CONFIG, encoding="utf-8") as f:
                     self.cfg = engine.deep_merge(engine.DEFAULTS, json.load(f))
                 self._restore()
                 self._append("✓ Поля заполнены из описания — проверь вкладки «Промпты» и «Разметка».\n", "ok")
+                return
             except Exception as e:
                 self._append(f"не смог прочитать результат авто-заполнения: {e}\n", "err")
-        else:
-            self._append("авто-заполнение не удалось (см. лог выше).\n", "err")
+                return
+        self._append("авто-заполнение не удалось (см. лог выше).\n", "err")
 
     def stop(self):
         p = self.proc
