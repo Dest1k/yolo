@@ -61,6 +61,7 @@ DEFAULTS = {
     "generation": {
         "backend": "flux",          # "flux" (рендерить) | "own" (свои картинки, генерацию пропустить)
         "flux_repo": "black-forest-labs/FLUX.1-schnell",  # для авто-скачивания, если flux_dir пуст
+        "hf_token": "",             # токен HF (FLUX закрыт гейтом — нужен токен + принять условия)
         "file_prefix": "synth",      # имя файлов: <prefix>_00001.jpg
         "batch_size": 40,            # промптов за один запрос к LLM
         "quant_mode": "torchao",     # nf4 | torchao | layerwise (torchao fp8 — нативно быстр на Blackwell)
@@ -260,32 +261,53 @@ def ensure_flux(cfg):
         except Exception:
             pass
     repo = cfg["generation"].get("flux_repo", "black-forest-labs/FLUX.1-schnell")
+    token = ((cfg["generation"].get("hf_token") or "").strip()
+             or os.environ.get("HF_TOKEN")
+             or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+             or os.environ.get("HUGGINGFACE_TOKEN") or None)
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")   # терпимее к медленному каналу
+
+    def _gated_help():
+        print("[!] Репозиторий FLUX закрыт ГЕЙТОМ (GatedRepoError): нужен доступ + токен HF.")
+        print("    Что сделать (один раз):")
+        print(f"    1) Залогинься на huggingface.co и на странице модели прими условия:")
+        print(f"       https://huggingface.co/{repo}  (кнопка Agree / Access repository);")
+        print("    2) Создай токен: https://huggingface.co/settings/tokens (тип Read);")
+        print("    3) Дай токен генератору одним из способов:")
+        print("       • поле «HF токен» на вкладке «Картинки» в окне; ИЛИ")
+        print("       • выполни в консоли:  huggingface-cli login   (вставь токен); ИЛИ")
+        print("       • переменная окружения HF_TOKEN=hf_xxx;")
+        print("    4) Запусти генерацию снова.")
+        print("    Альтернатива: переключи «Движок генерации» на «own» — FLUX не нужен, только разметка.")
+
     print(f"[setup] FLUX не найден — качаю {repo} (~24 ГБ, надолго).")
-    print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')}")
+    print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')} | "
+          f"токен: {'есть' if token else 'нет'}")
     print("[setup] прогресс по файлам ниже; при обрыве сам повторяю с ДОКАЧКОЙ (готовое не качается заново)…")
     t0 = time.perf_counter()
     last = None
     for attempt in range(1, 7):
         try:
-            snapshot_download(repo, local_dir=flux_dir, max_workers=8)
+            snapshot_download(repo, local_dir=flux_dir, max_workers=8, token=token)
             if not os.path.isdir(tr):
                 cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
             print(f"[setup] FLUX скачан в {flux_dir} за {fmt_hms(time.perf_counter()-t0)}")
             return True
         except Exception as e:
             last = e
-            print(f"[setup] обрыв скачивания FLUX (попытка {attempt}/6): {type(e).__name__}. "
-                  f"Повтор с докачкой…")
+            name = type(e).__name__
+            # Гейт / отказ авторизации — ретраи бессмысленны, сразу даём инструкцию.
+            if "Gated" in name or "401" in str(e) or "403" in str(e) or "Unauthorized" in name:
+                _gated_help()
+                return False
+            print(f"[setup] обрыв скачивания FLUX (попытка {attempt}/6): {name}. Повтор с докачкой…")
             time.sleep(min(30, 3 * attempt))
     print(f"[!] Не удалось скачать FLUX за 6 попыток: {type(last).__name__}: {last}")
-    print("    Судя по логу — канал рвётся на больших файлах (это не блокировка). Что помогает:")
-    print("    1) Эндпойнт: у тебя HF открывается напрямую — на вкладке «Картинки» поставь")
-    print("       «HF endpoint» = https://huggingface.co (вместо зеркала, оно бывает нестабильным);")
-    print("    2) Просто ЗАПУСТИ ЕЩЁ РАЗ — докачается с места обрыва (готовые файлы пропускаются);")
-    print("    3) Либо скачай FLUX.1-schnell вручную (git lfs / браузер) и укажи путь в «Папка FLUX»")
+    print("    Похоже, рвётся канал на больших файлах. Что помогает:")
+    print("    1) Просто ЗАПУСТИ ЕЩЁ РАЗ — докачается с места обрыва (готовые файлы пропускаются);")
+    print("    2) Либо скачай FLUX.1-schnell вручную (hf download / git lfs) и укажи путь в «Папка FLUX»")
     print("       и «Папка трансформера»;")
-    print("    4) Либо переключи «Движок генерации» на «own» — генерация не нужна, только разметка.")
+    print("    3) Либо переключи «Движок генерации» на «own» — генерация не нужна, только разметка.")
     return False
 
 

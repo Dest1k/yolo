@@ -220,8 +220,10 @@ class GeneratorGUI:
         self._entry(f, 6, "HF endpoint", "generation.hf_endpoint", width=40)
         self._entry(f, 7, "Префикс имён файлов", "generation.file_prefix", width=20)
         self._entry(f, 8, "Repo FLUX для авто-скачивания", "generation.flux_repo", width=40)
-        self._entry(f, 9, "Суффикс к каждому промпту", "generation.prompt_suffix", width=48)
-        self._check(f, 10, "Разрешить TF32 matmul (быстрее на Ampere+)", "generation.allow_tf32", colspan=4)
+        self._entry(f, 9, "HF токен (FLUX закрыт гейтом — нужен токен + принять условия)",
+                    "generation.hf_token", width=40)
+        self._entry(f, 10, "Суффикс к каждому промпту", "generation.prompt_suffix", width=48)
+        self._check(f, 11, "Разрешить TF32 matmul (быстрее на Ampere+)", "generation.allow_tf32", colspan=4)
 
     def _tab_prompts(self, nb):
         outer = ttk.Frame(nb, padding=6); nb.add(outer, text="  Промпты  ")
