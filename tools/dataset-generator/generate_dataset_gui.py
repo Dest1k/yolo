@@ -240,8 +240,9 @@ class GeneratorGUI:
         self.object_noun = tk.StringVar(); self.widgets["prompts.object_noun"] = self.object_noun
         ttk.Entry(inner, textvariable=self.object_noun).pack(fill="x", pady=(0, 8))
 
-        ttk.Label(inner, text="Объекты сцены для генерации (по одному в строке). Если их 2+, часть "
-                              "картинок будет содержать НЕСКОЛЬКО разных объектов сразу:",
+        ttk.Label(inner, text="Объекты сцены для генерации (по одному в строке, можно с весом: "
+                              "«фраза | вес»). Если их 2+, часть картинок будет содержать НЕСКОЛЬКО "
+                              "разных объектов сразу; вес влияет на частоту объекта:",
                   foreground="#888", wraplength=820, justify="left").pack(anchor="w")
         wrap, self.obj_text = self._textbox(inner, height=4); wrap.pack(fill="x", pady=(0, 4))
         mo = ttk.Frame(inner); mo.pack(fill="x", pady=(0, 8))

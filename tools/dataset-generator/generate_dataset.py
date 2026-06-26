@@ -321,22 +321,54 @@ class ScalePlanner:
                     break
 
 
+def parse_weighted(items):
+    """Список строк «фраза» или «фраза | вес» -> (phrases, weights). Вес необязателен (=1)."""
+    phrases, weights = [], []
+    for it in items:
+        s = str(it)
+        if "|" in s:
+            ph, w = s.rsplit("|", 1)
+            try:
+                wt = float(w.strip())
+            except ValueError:
+                ph, wt = s, 1.0
+        else:
+            ph, wt = s, 1.0
+        ph = ph.strip()
+        if ph:
+            phrases.append(ph); weights.append(max(0.0, wt))
+    if not any(weights):
+        weights = [1.0] * len(phrases)
+    return phrases, weights
+
+
+def weighted_sample(phrases, weights, k):
+    """k различных фраз с учётом весов (без повторов)."""
+    pairs = list(zip(phrases, weights))
+    out = []
+    for _ in range(min(k, len(pairs))):
+        i = random.choices(range(len(pairs)), weights=[p[1] for p in pairs], k=1)[0]
+        out.append(pairs[i][0]); pairs.pop(i)
+    return out
+
+
 def choose_scene_objects(pr):
-    """Выбирает объект(ы) сцены для текущего батча. Иногда (multi_object_prob) берёт 2+ разных
-    объекта вместе — для датасета, где на части картинок несколько классов сразу.
-    Возвращает строку для подстановки в {object_noun}."""
-    objects = [str(o).strip() for o in (pr.get("objects") or []) if str(o).strip()]
-    if not objects:
+    """Выбирает объект(ы) сцены для текущего батча с учётом ВЕСОВ. Иногда (multi_object_prob)
+    берёт 2+ разных объекта вместе. Возвращает строку для подстановки в {object_noun}."""
+    items = [s for s in (pr.get("objects") or []) if str(s).strip()]
+    if not items:
+        return pr.get("object_noun", "the target object")
+    phrases, weights = parse_weighted(items)
+    if not phrases:
         return pr.get("object_noun", "the target object")
     p = float(pr.get("multi_object_prob", 0.0) or 0.0)
-    mx = int(pr.get("multi_object_max", 2) or 2)
-    mx = max(2, min(mx, len(objects)))
-    if len(objects) >= 2 and random.random() < p:
+    mx = max(2, min(int(pr.get("multi_object_max", 2) or 2), len(phrases)))
+    if len(phrases) >= 2 and random.random() < p:
         k = random.randint(2, mx)
-        chosen = random.sample(objects, k)
+        chosen = weighted_sample(phrases, weights, k)
         return (" AND ".join(chosen) +
                 " — ALL of them clearly visible together in the SAME single scene")
-    return random.choice(objects)
+    return random.choices(phrases, weights=weights, k=1)[0]
 
 
 def build_system_prompt(cfg, empty=False):
@@ -345,7 +377,7 @@ def build_system_prompt(cfg, empty=False):
     cats = pr.get("categories", {})
     bs = cfg["generation"]["batch_size"]
     if empty:
-        objs = pr.get("objects") or [pr.get("object_noun", "the target object")]
+        objs = parse_weighted(pr.get("objects") or [])[0] or [pr.get("object_noun", "the target object")]
         bg = []
         for name, options in cats.items():
             low = name.lower()
@@ -949,7 +981,7 @@ def main():
     setup_torch(cfg)
     g = cfg["generation"]
     own = g.get("backend", "flux") == "own"
-    objs = cfg['prompts'].get('objects') or [cfg['prompts'].get('object_noun', '?')]
+    objs = parse_weighted(cfg['prompts'].get('objects') or [])[0] or [cfg['prompts'].get('object_noun', '?')]
     multi = (len(objs) >= 2 and float(cfg['prompts'].get('multi_object_prob', 0) or 0) > 0)
     print("\n" + "=" * 60)
     print(f"[ПЛАН] Цель: {cfg['total_images']} картинок | объект(ы): {', '.join(objs)}"
