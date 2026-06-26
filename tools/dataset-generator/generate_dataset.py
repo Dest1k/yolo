@@ -238,6 +238,18 @@ def ensure(import_name, pip_name=None):
         return __import__(import_name)
 
 
+def _dir_size(path):
+    """Суммарный размер файлов в папке (для heartbeat-прогресса скачивания)."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fn))
+            except OSError:
+                pass
+    return total
+
+
 def ensure_flux(cfg):
     """Если папки FLUX нет — скачиваем веса с HuggingFace (большие, ~24 ГБ).
     Прогресс по файлам идёт в лог; при недоступности HF — понятная диагностика и варианты."""
@@ -280,20 +292,48 @@ def ensure_flux(cfg):
         print("    4) Запусти генерацию снова.")
         print("    Альтернатива: переключи «Движок генерации» на «own» — FLUX не нужен, только разметка.")
 
-    print(f"[setup] FLUX не найден — качаю {repo} (~24 ГБ, надолго).")
+    # Реальный размер репозитория для прогресса (tqdm от hub в GUI не виден — он пишет \r без \n).
+    total_bytes = 0
+    try:
+        info = huggingface_hub.HfApi().model_info(repo, files_metadata=True, token=token)
+        total_bytes = sum((getattr(s, "size", 0) or 0) for s in (info.siblings or []))
+    except Exception:
+        pass
+
+    print(f"[setup] FLUX не найден — качаю {repo}"
+          + (f" (~{total_bytes/1e9:.1f} ГБ)" if total_bytes else " (~24 ГБ)") + ", надолго.")
     print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')} | "
           f"токен: {'есть' if token else 'нет'}")
-    print("[setup] прогресс по файлам ниже; при обрыве сам повторяю с ДОКАЧКОЙ (готовое не качается заново)…")
+    print("[setup] прогресс печатаю каждые 5с (heartbeat); при обрыве повторяю с ДОКАЧКОЙ…")
     t0 = time.perf_counter()
     last = None
+
+    def _heartbeat(stop_evt):
+        while not stop_evt.wait(5):
+            got = _dir_size(flux_dir)
+            sp = got / max(1e-6, time.perf_counter() - t0) / 1e6   # МБ/с
+            if total_bytes:
+                eta = (total_bytes - got) / max(1e-6, got / max(1e-6, time.perf_counter() - t0))
+                _pb(min(0.999, got / total_bytes), f"FLUX: {got/1e9:.1f}/{total_bytes/1e9:.1f} ГБ")
+                print(f"[setup] FLUX: {got/1e9:.2f}/{total_bytes/1e9:.2f} ГБ "
+                      f"({100*got/total_bytes:4.1f}%) | {sp:.1f} МБ/с | осталось ~{fmt_hms(eta)}", flush=True)
+            else:
+                print(f"[setup] FLUX: скачано {got/1e9:.2f} ГБ | {sp:.1f} МБ/с…", flush=True)
+
+    import threading
     for attempt in range(1, 7):
+        stop_evt = threading.Event()
+        hb = threading.Thread(target=_heartbeat, args=(stop_evt,), daemon=True)
+        hb.start()
         try:
             snapshot_download(repo, local_dir=flux_dir, max_workers=8, token=token)
+            stop_evt.set()
             if not os.path.isdir(tr):
                 cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
             print(f"[setup] FLUX скачан в {flux_dir} за {fmt_hms(time.perf_counter()-t0)}")
             return True
         except Exception as e:
+            stop_evt.set()
             last = e
             name = type(e).__name__
             # Гейт / отказ авторизации — ретраи бессмысленны, сразу даём инструкцию.
