@@ -145,11 +145,14 @@ DEFAULTS = {
     },
     "labeling": {
         "backend": "yoloworld",      # yoloworld | groundingdino | owlv2
-        "classes": ["drone", "quadcopter", "uav", "fpv drone", "hexacopter", "octocopter", "multirotor"],
+        # МУЛЬТИКЛАСС: каждый класс — отдельная группа со своими синонимами и своим id
+        # (id = порядок в списке). Разные классы НЕ валятся в одну кучу.
+        "classes": [
+            {"name": "drone", "synonyms": ["drone", "quadcopter", "uav", "fpv drone",
+                                           "hexacopter", "octocopter", "multirotor"]},
+        ],
         "conf": 0.05,
         "iou": 0.5,
-        "class_index": 0,            # все находки маппятся в этот id (синонимы -> один класс)
-        "class_names": ["drone"],    # имена классов для dataset.yaml
         # веса под каждый бэкенд (скачиваются сами на первом запуске)
         "yoloworld_weights": "yolov8x-worldv2.pt",
         "groundingdino_model": "IDEA-Research/grounding-dino-base",
@@ -610,17 +613,55 @@ def _list_jpgs(images_dir):
     return sorted([fn for fn in os.listdir(images_dir) if fn.lower().endswith((".jpg", ".jpeg", ".png"))])
 
 
-def _write_label(labels_dir, stem, boxes_xywhn, cls_idx):
-    lines = [f"{cls_idx} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}" for (cx, cy, w, h) in boxes_xywhn]
+def resolve_classes(lab):
+    """Разворачивает мультиклассовую разметку в (flat, syn2id, names):
+      flat   — плоский список ВСЕХ синонимов (это словарь для open-vocab модели);
+      syn2id — для каждого синонима его id класса (параллельно flat);
+      names  — имена классов в порядке id (для dataset.yaml).
+    Понимает и новый формат [{name, synonyms}], и старый плоский [синонимы] (1 класс)."""
+    raw = lab.get("classes", [])
+    flat, syn2id, names = [], [], []
+    if raw and isinstance(raw[0], dict):                 # новый: список классов
+        for cid, c in enumerate(raw):
+            nm = (c.get("name") or f"class{cid}").strip()
+            names.append(nm)
+            for s in (c.get("synonyms") or [nm]):
+                s = str(s).strip()
+                if s:
+                    flat.append(s); syn2id.append(cid)
+    else:                                                # старый: плоский список -> один класс
+        names = lab.get("class_names") or ["object"]
+        for s in raw:
+            s = str(s).strip()
+            if s:
+                flat.append(s); syn2id.append(0)
+    if not names:
+        names = ["object"]
+    if not flat:                                         # на всякий случай — имена как синонимы
+        flat = list(names); syn2id = list(range(len(names)))
+    return flat, syn2id, names
+
+
+def _match_label_id(text, flat, syn2id):
+    """Текстовую метку (Grounding DINO) -> id класса по вхождению синонима."""
+    t = str(text).lower()
+    for i, s in enumerate(flat):
+        if s.lower() in t or t in s.lower():
+            return syn2id[i]
+    return 0
+
+
+def _write_label(labels_dir, stem, boxes):
+    """boxes — список (cx,cy,w,h,cls_id) нормированных. Пишет YOLO-txt."""
+    lines = [f"{cid} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}" for (cx, cy, w, h, cid) in boxes]
     with open(os.path.join(labels_dir, stem + ".txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     return len(lines)
 
 
-def _write_yaml(cfg):
+def _write_yaml(cfg, names):
     images_dir = cfg["paths"]["images_dir"]
     output_yolo_dir = cfg["paths"]["output_yolo_dir"]
-    names = cfg["labeling"].get("class_names", ["object"])
     os.makedirs(output_yolo_dir, exist_ok=True)
     yaml_path = os.path.join(output_yolo_dir, "dataset.yaml")
     with open(yaml_path, "w", encoding="utf-8") as f:
@@ -632,19 +673,19 @@ def _write_yaml(cfg):
     return yaml_path
 
 
-def _label_loop(cfg, predict_one, banner):
-    """Общий цикл разметки: predict_one(path, (W,H)) -> список (cx,cy,w,h) нормированных."""
+def _label_loop(cfg, predict_one, banner, names):
+    """Общий цикл разметки: predict_one(path,(W,H)) -> список (cx,cy,w,h,cls_id) нормированных."""
     from PIL import Image
     images_dir = cfg["paths"]["images_dir"]
     lab = cfg["labeling"]
-    cls_idx = int(lab["class_index"])
     labels_dir = os.path.join(os.path.dirname(images_dir), "labels")
     os.makedirs(labels_dir, exist_ok=True)
 
     images = _list_jpgs(images_dir)
     total = len(images)
-    print(f" -> {banner}: {total} картинок (conf={lab['conf']})…")
+    print(f" -> {banner}: {total} картинок, классов: {len(names)} ({', '.join(names)}) (conf={lab['conf']})…")
     detected = empty = total_boxes = 0
+    per_class = [0] * len(names)
     t0 = time.perf_counter()
     for i, fn in enumerate(images, 1):
         path = os.path.join(images_dir, fn)
@@ -655,7 +696,10 @@ def _label_loop(cfg, predict_one, banner):
         except Exception as e:
             boxes = []
             print(f"    [!] {fn}: {e}")
-        n = _write_label(labels_dir, os.path.splitext(fn)[0], boxes, cls_idx)
+        n = _write_label(labels_dir, os.path.splitext(fn)[0], boxes)
+        for (_, _, _, _, cid) in boxes:
+            if 0 <= cid < len(per_class):
+                per_class[cid] += 1
         if n:
             detected += 1; total_boxes += n
         else:
@@ -664,13 +708,14 @@ def _label_loop(cfg, predict_one, banner):
             eta = (time.perf_counter() - t0) / i * (total - i)
             _pb(i / total, f"Фаза 3 — разметка: {i}/{total}")
             print(f"  [{i}/{total}] с рамками: {detected} ({100*detected/i:4.1f}%) | "
-                  f"пустых: {empty} | боксов всего: {total_boxes} | осталось ~{fmt_hms(eta)}")
+                  f"пустых: {empty} | боксов: {total_boxes} | осталось ~{fmt_hms(eta)}")
 
-    yaml_path = _write_yaml(cfg)
+    yaml_path = _write_yaml(cfg, names)
     print(f"\n{'='*60}")
     print(f"[ФАЗА 3] Разметка завершена за {fmt_hms(time.perf_counter()-t0)}")
     print(f"  картинок с рамками: {detected}/{total} ({100*detected/max(1,total):.1f}%)")
     print(f"  пустых меток: {empty}    боксов всего: {total_boxes}")
+    print("  по классам: " + ", ".join(f"{names[c]}={per_class[c]}" for c in range(len(names))))
     print(f"  метки: {labels_dir}\n  dataset.yaml: {yaml_path}")
     print(f"{'='*60}")
 
@@ -680,19 +725,21 @@ def label_yoloworld(cfg):
     ensure("ultralytics", "ultralytics")
     from ultralytics import YOLO
     lab = cfg["labeling"]
+    flat, syn2id, names = resolve_classes(lab)
     print(f" -> Загружаю YOLO-World ({lab['yoloworld_weights']})…")
     model = YOLO(lab["yoloworld_weights"])
-    model.set_classes(list(lab["classes"]))
+    model.set_classes(flat)                              # словарь = все синонимы всех классов
     conf, iou = float(lab["conf"]), float(lab["iou"])
-    # ultralytics эффективнее батчем по папке — но ради единого цикла идём по одной картинке
+
     def predict_one(path, wh):
         r = model.predict(source=path, conf=conf, iou=iou, verbose=False, save=False)[0]
         out = []
         if r.boxes is not None and len(r.boxes):
-            for cx, cy, w, h in r.boxes.xywhn.tolist():
-                out.append((cx, cy, w, h))
+            for (cx, cy, w, h), c in zip(r.boxes.xywhn.tolist(), r.boxes.cls.tolist()):
+                ci = int(c)
+                out.append((cx, cy, w, h, syn2id[ci] if 0 <= ci < len(syn2id) else 0))
         return out
-    _label_loop(cfg, predict_one, "YOLO-World разметка")
+    _label_loop(cfg, predict_one, "YOLO-World разметка", names)
 
 
 def label_groundingdino(cfg):
@@ -701,12 +748,13 @@ def label_groundingdino(cfg):
     import torch
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
     lab = cfg["labeling"]
+    flat, syn2id, names = resolve_classes(lab)
     name = lab.get("groundingdino_model", "IDEA-Research/grounding-dino-base")
     print(f" -> Загружаю Grounding DINO ({name})…")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     proc = AutoProcessor.from_pretrained(name)
     model = AutoModelForZeroShotObjectDetection.from_pretrained(name).to(dev)
-    text = ". ".join(str(c).lower() for c in lab["classes"]) + "."
+    text = ". ".join(s.lower() for s in flat) + "."
     conf = float(lab["conf"])
     from PIL import Image
 
@@ -720,14 +768,15 @@ def label_groundingdino(cfg):
         res = proc.post_process_grounded_object_detection(
             out, inp["input_ids"], box_threshold=conf, text_threshold=conf,
             target_sizes=[(H, W)])[0]
+        labels = res.get("labels") or res.get("text_labels") or [""] * len(res["boxes"])
         boxes = []
-        for (x0, y0, x1, y1) in res["boxes"].tolist():
+        for (x0, y0, x1, y1), lab_txt in zip(res["boxes"].tolist(), labels):
             cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
             bw, bh = (x1 - x0) / W, (y1 - y0) / H
             if bw > 0 and bh > 0:
-                boxes.append((cx, cy, bw, bh))
+                boxes.append((cx, cy, bw, bh, _match_label_id(lab_txt, flat, syn2id)))
         return boxes
-    _label_loop(cfg, predict_one, "Grounding DINO разметка")
+    _label_loop(cfg, predict_one, "Grounding DINO разметка", names)
 
 
 def label_owlv2(cfg):
@@ -736,12 +785,12 @@ def label_owlv2(cfg):
     import torch
     from transformers import Owlv2Processor, Owlv2ForObjectDetection
     lab = cfg["labeling"]
+    flat, syn2id, names = resolve_classes(lab)
     name = lab.get("owlv2_model", "google/owlv2-base-patch16-ensemble")
     print(f" -> Загружаю OWLv2 ({name})…")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     proc = Owlv2Processor.from_pretrained(name)
     model = Owlv2ForObjectDetection.from_pretrained(name).to(dev)
-    queries = [str(c) for c in lab["classes"]]
     conf = float(lab["conf"])
     from PIL import Image
 
@@ -749,19 +798,20 @@ def label_owlv2(cfg):
         W, H = wh
         with Image.open(path) as im:
             im = im.convert("RGB")
-            inp = proc(text=[queries], images=im, return_tensors="pt").to(dev)
+            inp = proc(text=[flat], images=im, return_tensors="pt").to(dev)
             with torch.no_grad():
                 out = model(**inp)
         res = proc.post_process_object_detection(
             out, threshold=conf, target_sizes=torch.tensor([(H, W)]).to(dev))[0]
+        labels = res["labels"].tolist()                  # индексы в flat
         boxes = []
-        for (x0, y0, x1, y1) in res["boxes"].tolist():
+        for (x0, y0, x1, y1), li in zip(res["boxes"].tolist(), labels):
             cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
             bw, bh = (x1 - x0) / W, (y1 - y0) / H
             if bw > 0 and bh > 0:
-                boxes.append((cx, cy, bw, bh))
+                boxes.append((cx, cy, bw, bh, syn2id[li] if 0 <= li < len(syn2id) else 0))
         return boxes
-    _label_loop(cfg, predict_one, "OWLv2 разметка")
+    _label_loop(cfg, predict_one, "OWLv2 разметка", names)
 
 
 def label_dataset(cfg):

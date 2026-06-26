@@ -264,15 +264,14 @@ class GeneratorGUI:
         self._entry(f, 4, "Модель OWLv2", "labeling.owlv2_model", width=36)
         self._entry(f, 5, "Порог уверенности (conf)", "labeling.conf", width=10)
         self._entry(f, 6, "IoU (NMS)", "labeling.iou", width=10)
-        self._entry(f, 7, "id выходного класса", "labeling.class_index", width=10)
-        ttk.Label(f, text="Классы-синонимы (по одному в строке — все находки идут в один выходной класс):")\
-            .grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 2))
-        wrap, self.classes_text = self._textbox(f, height=6)
-        wrap.grid(row=9, column=0, columnspan=2, sticky="ew")
-        ttk.Label(f, text="Имена классов для dataset.yaml (по одному в строке):")\
-            .grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 2))
-        wrap, self.names_text = self._textbox(f, height=3)
-        wrap.grid(row=11, column=0, columnspan=2, sticky="ew")
+        ttk.Label(f, text="КЛАССЫ (мультикласс). Заголовок класса — строкой «## Имя», ниже его "
+                          "синонимы по одному в строке. id класса = порядок (0,1,2…). Разные классы "
+                          "НЕ смешиваются — у каждого своя группа синонимов.",
+                  foreground="#888", justify="left", wraplength=820)\
+            .grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        wrap, self.cls_text = self._textbox(f, height=12)
+        wrap.grid(row=8, column=0, columnspan=2, sticky="ew")
+        f.rowconfigure(8, weight=1)
 
     def _build_log(self):
         frame = ttk.Frame(self.root, padding=(8, 0, 8, 8))
@@ -326,6 +325,45 @@ class GeneratorGUI:
                 cats[cur].append(s)
         return {k: v for k, v in cats.items() if v}
 
+    # ── классы разметки (мультикласс) <-> текст ────────────────────────────────
+    @staticmethod
+    def _classes_to_text(lab):
+        """labeling.classes ([{name,synonyms}] или старый плоский список) -> текст блоками."""
+        raw = lab.get("classes", [])
+        blocks = []
+        if raw and isinstance(raw[0], dict):
+            for c in raw:
+                nm = c.get("name", "object")
+                syns = c.get("synonyms") or [nm]
+                blocks.append("## " + nm + "\n" + "\n".join(str(s) for s in syns))
+        else:                                            # старый формат: один класс
+            nm = (lab.get("class_names") or ["object"])[0]
+            blocks.append("## " + nm + "\n" + "\n".join(str(s) for s in raw))
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _text_to_classes(text):
+        """Текст блоками «## Имя» + синонимы -> [{name, synonyms}] (id = порядок)."""
+        classes, cur = [], None
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.startswith("## "):
+                cur = {"name": s[3:].strip(), "synonyms": []}
+                classes.append(cur)
+            elif s:
+                if cur is None:
+                    cur = {"name": "object", "synonyms": []}
+                    classes.append(cur)
+                cur["synonyms"].append(s)
+        # отбрасываем пустые группы; если у класса нет синонимов — берём само имя
+        out = []
+        for c in classes:
+            if not c["synonyms"]:
+                c["synonyms"] = [c["name"]]
+            if c["name"]:
+                out.append(c)
+        return out
+
     # ── заполнение/чтение ─────────────────────────────────────────────────────
     def _restore(self):
         for path, var in self.widgets.items():
@@ -344,10 +382,8 @@ class GeneratorGUI:
             f"{w} | {phrase}" for phrase, w in self.cfg["prompts"]["object_scales"]))
         self.template_text.delete("1.0", "end")
         self.template_text.insert("1.0", self.cfg["prompts"]["system_template"])
-        self.classes_text.delete("1.0", "end")
-        self.classes_text.insert("1.0", "\n".join(self.cfg["labeling"]["classes"]))
-        self.names_text.delete("1.0", "end")
-        self.names_text.insert("1.0", "\n".join(self.cfg["labeling"].get("class_names", ["object"])))
+        self.cls_text.delete("1.0", "end")
+        self.cls_text.insert("1.0", self._classes_to_text(self.cfg.get("labeling", {})))
 
     @staticmethod
     def _lines(text_widget):
@@ -393,8 +429,11 @@ class GeneratorGUI:
             raise ValueError("Микс масштабов пуст — добавь хотя бы одну строку «вес | фраза».")
         cfg["prompts"]["object_scales"] = scales
         cfg["prompts"]["system_template"] = self.template_text.get("1.0", "end").strip("\n")
-        cfg["labeling"]["classes"] = self._lines(self.classes_text)
-        cfg["labeling"]["class_names"] = self._lines(self.names_text) or ["object"]
+        classes = self._text_to_classes(self.cls_text.get("1.0", "end"))
+        if not classes:
+            raise ValueError("Классы пусты — добавь хотя бы один «## Имя» с синонимами на вкладке «Разметка».")
+        cfg["labeling"]["classes"] = classes
+        cfg["labeling"]["class_names"] = [c["name"] for c in classes]   # для совместимости
         return cfg
 
     # ── обзор / сохранение ────────────────────────────────────────────────────
