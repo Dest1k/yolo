@@ -167,6 +167,7 @@ DEFAULTS = {
         "conf": 0.05,
         "iou": 0.5,
         "batch": 16,                 # картинок за один проход модели разметки (грузим GPU плотно)
+        "resume": True,              # пропускать картинки, у которых метка уже есть (докачка после обрыва)
         # веса под каждый бэкенд (скачиваются сами на первом запуске)
         "yoloworld_weights": "yolov8x-worldv2.pt",
         "groundingdino_model": "IDEA-Research/grounding-dino-base",
@@ -631,22 +632,32 @@ def generate_all_images(cfg, prompts):
     suffix = g["prompt_suffix"]
 
     prompts = [normalize_prompt(p) for p in prompts[:total]]
-    existing = [fn for fn in os.listdir(images_dir) if fn.endswith(".jpg")]
-    generated_count = len(existing)
-    print(f"\n[ФАЗА 2] Картинок готово: {generated_count}/{total}")
-    if generated_count >= min(total, len(prompts)):
+    limit = min(len(prompts), total)
+    # Резюме по ИНДЕКСАМ: парсим уже готовые файлы и генерим только недостающие — так дозаполнение
+    # корректно закрывает любые «дыры» после обрыва (а не просто продолжает с конца).
+    existing_idx = set()
+    pat = re.compile(re.escape(prefix) + r"_(\d+)\.jpg$")
+    for fn in os.listdir(images_dir):
+        m = pat.match(fn)
+        if m:
+            existing_idx.add(int(m.group(1)))
+    todo = [i for i in range(limit) if i not in existing_idx]
+    done_total = len(existing_idx)
+    print(f"\n[ФАЗА 2] Картинок готово: {done_total}/{total}; докачать: {len(todo)}")
+    if not todo:
         print("[ФАЗА 2] Всё уже сгенерировано.")
-        return generated_count
+        save_pool.shutdown(wait=True)
+        return done_total
 
     session_start = time.perf_counter()
     session_done = 0
-    idx = generated_count
 
-    while idx < min(len(prompts), total):
-        chunk = prompts[idx: idx + super_chunk]
-        chunk_final = [p + suffix for p in chunk]
+    for c in range(0, len(todo), super_chunk):
+        chunk_idx = todo[c:c + super_chunk]                       # глобальные индексы этого чанка
+        chunk_final = [prompts[i] + suffix for i in chunk_idx]
 
-        print(f"\n=== [СУПЕРЧАНК idx={idx}..{idx + len(chunk) - 1}] ===")
+        print(f"\n=== [ЧАНК {c}..{c + len(chunk_idx) - 1} из недостающих, "
+              f"индексы {chunk_idx[0]}..{chunk_idx[-1]}] ===")
         print(f" -> Загружаю пайплайн (без трансформера), кодирую {len(chunk_final)} промптов…")
         try:
             pipe = FluxPipeline.from_pretrained(flux_dir, transformer=None, torch_dtype=torch.bfloat16)
@@ -658,7 +669,7 @@ def generate_all_images(cfg, prompts):
             a, r = vram_gb(torch)
             print(f"    [VRAM] после кодирования + выгрузки энкодеров: занято {a:.2f} / резерв {r:.2f} ГБ")
 
-            print(" -> Поднимаю квантованный трансформер (раз на суперчанк)…")
+            print(" -> Поднимаю квантованный трансформер (раз на чанк)…")
             transformer, quant_mode = build_fast_transformer(cfg, torch)
             pipe.transformer = transformer
             pipe.vae.to("cuda")
@@ -667,16 +678,13 @@ def generate_all_images(cfg, prompts):
             a, r = vram_gb(torch)
             print(f"    [QUANT] {quant_mode} | exec={pipe._execution_device} | VRAM {a:.1f}/{r:.1f} ГБ")
         except Exception as e:
-            print(f"[!] Ошибка инициализации FLUX на суперчанке idx={idx}: {e}. Пропускаю суперчанк.")
+            print(f"[!] Ошибка инициализации FLUX на чанке {c}: {e}. Пропускаю чанк.")
             torch.cuda.empty_cache()
-            idx += len(chunk)
             continue
 
         torch.cuda.reset_peak_memory_stats()
 
         for start in range(0, len(chunk_final), micro_batch):
-            if generated_count >= total:
-                break
             end = min(start + micro_batch, len(chunk_final))
             cur = end - start
             try:
@@ -691,22 +699,20 @@ def generate_all_images(cfg, prompts):
                 ).images
 
                 for k, img in enumerate(images):
-                    gi = idx + start + k
-                    if gi >= total:
-                        break
+                    gi = chunk_idx[start + k]                     # настоящий глобальный индекс
                     save_pool.submit(_save_jpg, img,
                                      os.path.join(images_dir, f"{prefix}_{gi:0{pad}d}.jpg"),
                                      int(g["jpeg_quality"]))
-                    generated_count = max(generated_count, gi + 1)
+                    done_total += 1
                     session_done += 1
 
                 dt = time.perf_counter() - t_mb
                 sess = time.perf_counter() - session_start
                 avg = sess / max(1, session_done)
-                eta = avg * (total - generated_count)
+                eta = avg * (total - done_total)
                 _, rr = vram_gb(torch)
-                _pb(generated_count / total, f"Фаза 2 — картинки: {generated_count}/{total}")
-                print(f"    [+] {generated_count:05d}/{total} | +{cur} за {dt:4.1f}с "
+                _pb(done_total / total, f"Фаза 2 — картинки: {done_total}/{total}")
+                print(f"    [+] {done_total:05d}/{total} | +{cur} за {dt:4.1f}с "
                       f"({dt / cur:4.1f}с/шт) | сред {avg:4.1f}с/шт | VRAM {rr:4.1f}ГБ | осталось ~{fmt_hms(eta)}")
             except torch.cuda.OutOfMemoryError:
                 print(f"    [!] CUDA OOM на {start}-{end}. Уменьши micro_batch (сейчас {micro_batch}).")
@@ -718,18 +724,17 @@ def generate_all_images(cfg, prompts):
                 continue
 
         peak = torch.cuda.max_memory_reserved() / 1024**3 if torch.cuda.is_available() else 0
-        print(f" -> Суперчанк готов. Пик VRAM {peak:.2f} ГБ. Всего готово: {generated_count}/{total}")
+        print(f" -> Чанк готов. Пик VRAM {peak:.2f} ГБ. Всего готово: {done_total}/{total}")
 
         del transformer
         pipe.transformer = None
         del pipe, prompt_embeds, pooled_embeds
         gc.collect()
         torch.cuda.empty_cache()
-        idx += len(chunk)
 
     save_pool.shutdown(wait=True)      # дождаться, пока все JPEG допишутся на диск
-    print(f"\n[ФАЗА 2] Готово: {generated_count}/{total} картинок.")
-    return generated_count
+    print(f"\n[ФАЗА 2] Готово: {done_total}/{total} картинок.")
+    return done_total
 
 
 # =====================================================================
@@ -833,10 +838,19 @@ def _label_loop(cfg, predict_batch, banner, names):
     labels_dir = os.path.join(os.path.dirname(images_dir), "labels")
     os.makedirs(labels_dir, exist_ok=True)
 
-    images = _list_jpgs(images_dir)
-    total = len(images)
-    print(f" -> {banner}: {total} картинок, классов: {len(names)} ({', '.join(names)}) "
-          f"(conf={lab['conf']}, батч={batch})…")
+    all_images = _list_jpgs(images_dir)
+    total = len(all_images)
+    # Возобновление: пропускаем картинки, у которых метка уже есть (включая пустую — это
+    # валидный «размечено, объектов нет»). Выключается labeling.resume=false (перелейблить всё).
+    resume = str(lab.get("resume", True)).lower() not in ("0", "false", "no", "off")
+    if resume:
+        images = [fn for fn in all_images
+                  if not os.path.isfile(os.path.join(labels_dir, os.path.splitext(fn)[0] + ".txt"))]
+    else:
+        images = all_images
+    skipped = total - len(images)
+    print(f" -> {banner}: {total} картинок (уже размечено и пропущено: {skipped}), "
+          f"классов: {len(names)} ({', '.join(names)}) (conf={lab['conf']}, батч={batch})…")
     detected = empty = total_boxes = done = 0
     per_class = [0] * len(names)
     t0 = time.perf_counter()
@@ -864,17 +878,19 @@ def _label_loop(cfg, predict_batch, banner, names):
             else:
                 empty += 1
             done += 1
-        eta = (time.perf_counter() - t0) / done * (total - done)
-        _pb(done / total, f"Фаза 3 — разметка: {done}/{total}")
-        print(f"  [{done}/{total}] с рамками: {detected} ({100*detected/done:4.1f}%) | "
+        shown = skipped + done
+        rem = len(images) - done
+        eta = (time.perf_counter() - t0) / max(1, done) * rem
+        _pb(shown / max(1, total), f"Фаза 3 — разметка: {shown}/{total}")
+        print(f"  [{shown}/{total}] (сессия {done}/{len(images)}) с рамками: {detected} | "
               f"пустых: {empty} | боксов: {total_boxes} | осталось ~{fmt_hms(eta)}")
 
-    yaml_path = _write_yaml(cfg, names, images)
+    yaml_path = _write_yaml(cfg, names, all_images)        # сплит/yaml — по ВСЕМ картинкам
     print(f"\n{'='*60}")
     print(f"[ФАЗА 3] Разметка завершена за {fmt_hms(time.perf_counter()-t0)}")
-    print(f"  картинок с рамками: {detected}/{total} ({100*detected/max(1,total):.1f}%)")
-    print(f"  пустых меток: {empty}    боксов всего: {total_boxes}")
-    print("  по классам: " + ", ".join(f"{names[c]}={per_class[c]}" for c in range(len(names))))
+    print(f"  обработано в этой сессии: {len(images)} (пропущено готовых: {skipped}) из {total}")
+    print(f"  с рамками: {detected}    пустых меток: {empty}    боксов: {total_boxes}")
+    print("  по классам (сессия): " + ", ".join(f"{names[c]}={per_class[c]}" for c in range(len(names))))
     print(f"  метки: {labels_dir}\n  dataset.yaml: {yaml_path}")
     print(f"{'='*60}")
 
