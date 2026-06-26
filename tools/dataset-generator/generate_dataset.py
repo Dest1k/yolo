@@ -303,16 +303,26 @@ def ensure_flux(cfg):
         print("    4) Запусти генерацию снова.")
         print("    Альтернатива: переключи «Движок генерации» на «own» — FLUX не нужен, только разметка.")
 
-    # Реальный размер репозитория для прогресса (tqdm от hub в GUI не виден — он пишет \r без \n).
+    # Качаем ТОЛЬКО diffusers-формат (подпапки), пропуская дубль-чекпойнт в корне
+    # (flux1-schnell.safetensors ~24 ГБ для ComfyUI) и прочие single-file/оннх — FluxPipeline
+    # их не использует, иначе вышло бы ~57 ГБ вместо нужных ~33.
+    import fnmatch
+    ignore = ["flux1-schnell.safetensors", "ae.safetensors", "*.gguf", "*.onnx"]
+
+    def _ignored(name):
+        return any(fnmatch.fnmatch(name, p) for p in ignore)
+
+    # Реальный размер того, что СКАЧАЕМ, для прогресса (tqdm от hub в GUI не виден — он пишет \r).
     total_bytes = 0
     try:
         info = huggingface_hub.HfApi().model_info(repo, files_metadata=True, token=token)
-        total_bytes = sum((getattr(s, "size", 0) or 0) for s in (info.siblings or []))
+        total_bytes = sum((getattr(s, "size", 0) or 0) for s in (info.siblings or [])
+                          if not _ignored(getattr(s, "rfilename", "")))
     except Exception:
         pass
 
-    print(f"[setup] FLUX не найден — качаю {repo}"
-          + (f" (~{total_bytes/1e9:.1f} ГБ)" if total_bytes else " (~24 ГБ)") + ", надолго.")
+    print(f"[setup] FLUX не найден — качаю {repo} (только нужный diffusers-формат)"
+          + (f" (~{total_bytes/1e9:.1f} ГБ)" if total_bytes else " (~33 ГБ)") + ", надолго.")
     print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')} | "
           f"токен: {'есть' if token else 'нет'}")
     print("[setup] прогресс печатаю каждые 5с (heartbeat); при обрыве повторяю с ДОКАЧКОЙ…")
@@ -337,7 +347,8 @@ def ensure_flux(cfg):
         hb = threading.Thread(target=_heartbeat, args=(stop_evt,), daemon=True)
         hb.start()
         try:
-            snapshot_download(repo, local_dir=flux_dir, max_workers=8, token=token)
+            snapshot_download(repo, local_dir=flux_dir, max_workers=8, token=token,
+                              ignore_patterns=ignore)
             stop_evt.set()
             if not os.path.isdir(tr):
                 cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
