@@ -582,6 +582,31 @@ def autoconfig_from_brief(cfg):
     # если объектов 2+, а мультисцены были выключены — включим разумную долю
     if len(pr.get("objects", [])) >= 2 and not float(pr.get("multi_object_prob", 0) or 0):
         pr["multi_object_prob"] = 0.3
+
+    # Аэро-съёмка: если описание про дрон/вид сверху/с высоты — ДЕТЕРМИНИРОВАННО ставим
+    # вид сверху на КАЖДОМ кадре (ракурс + суффикс) и мелкий/далёкий масштаб объектов
+    # (иначе FLUX по умолчанию снимает сбоку и крупно).
+    blow = brief.lower()
+    aerial = any(k in blow for k in (
+        "дрон", "drone", "uav", "сверху", "с высоты", "высоты", "с воздуха", "воздуха",
+        "aerial", "top-down", "top down", "overhead", "bird", "птичьего", "квадрокоптер"))
+    if aerial:
+        pr.setdefault("categories", {})["Ракурс"] = [
+            "top-down bird's-eye view looking straight down (near-nadir)",
+            "high-altitude aerial drone view from far above",
+            "overhead drone shot, camera pointing down at the ground",
+            "oblique aerial view from a high-flying drone",
+        ]
+        cfg["generation"]["prompt_suffix"] = (
+            ", aerial top-down drone photo taken from high altitude, looking down at the ground, "
+            "objects appear small and far below, overhead perspective, realistic photo, high resolution")
+        pr["object_scales"] = [
+            ["the object is a tiny distant speck seen from high above, ~1-3% of the frame, lots of ground around it", 45],
+            ["the object is small, seen from above, ~5-12% of the frame, surrounded by ground", 40],
+            ["the object is medium-small from an overhead view, ~15-25% of the frame", 15],
+        ]
+        print("[autoconfig] описание про съёмку с высоты — выставил вид сверху + мелкий масштаб объектов.")
+
     print("[autoconfig] готово:")
     print("   object_noun:", pr.get("object_noun"))
     print("   объекты:", pr.get("objects"))
