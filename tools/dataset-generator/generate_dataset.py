@@ -226,7 +226,8 @@ def ensure(import_name, pip_name=None):
 
 
 def ensure_flux(cfg):
-    """Если папки FLUX нет — скачиваем веса с HuggingFace (большие, ~24 ГБ)."""
+    """Если папки FLUX нет — скачиваем веса с HuggingFace (большие, ~24 ГБ).
+    Прогресс по файлам идёт в лог; при недоступности HF — понятная диагностика и варианты."""
     flux_dir = cfg["paths"]["flux_dir"]
     tr = cfg["paths"]["transformer_path"]
     if os.path.isdir(flux_dir) and os.path.isdir(tr):
@@ -235,13 +236,36 @@ def ensure_flux(cfg):
         print(f"[!] FLUX не найден в {flux_dir}, а авто-скачивание выключено.")
         return False
     ensure("huggingface_hub", "huggingface_hub")
+    import huggingface_hub
     from huggingface_hub import snapshot_download
+    # Зеркало HF (в части сетей huggingface.co недоступен). Форсим и через env, и через
+    # уже импортированную константу — иначе при раннем импорте hub зеркало не подхватится.
+    ep = (cfg["generation"].get("hf_endpoint") or "").strip()
+    if ep:
+        os.environ["HF_ENDPOINT"] = ep
+        try:
+            huggingface_hub.constants.ENDPOINT = ep
+        except Exception:
+            pass
     repo = cfg["generation"].get("flux_repo", "black-forest-labs/FLUX.1-schnell")
-    print(f"[setup] FLUX не найден — качаю {repo} (это большие веса, ~24 ГБ, надолго)…")
-    snapshot_download(repo, local_dir=flux_dir, resume_download=True)
+    print(f"[setup] FLUX не найден — качаю {repo} (~24 ГБ, надолго).")
+    print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')}")
+    print("[setup] прогресс по файлам пойдёт ниже; НЕ прерывай (качается дозагрузкой при повторе)…")
+    t0 = time.perf_counter()
+    try:
+        snapshot_download(repo, local_dir=flux_dir, max_workers=8)
+    except Exception as e:
+        print(f"[!] Не удалось скачать FLUX: {type(e).__name__}: {e}")
+        print("    Обычно это нет доступа к HuggingFace из твоей сети. Что делать:")
+        print("    1) Зеркало: в окне поле «Repo FLUX…» оставь как есть, а «HF endpoint» (вкладка")
+        print("       «Картинки») поставь https://hf-mirror.com или другое рабочее зеркало;")
+        print("    2) Скачай FLUX.1-schnell вручную и укажи путь в «Папка FLUX» и «Папка трансформера»;")
+        print("    3) Или переключи «Движок генерации» на «own» (свои картинки) — генерация не нужна,")
+        print("       будет только разметка готовой папки.")
+        return False
     if not os.path.isdir(tr):
         cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
-    print(f"[setup] FLUX скачан в {flux_dir}")
+    print(f"[setup] FLUX скачан в {flux_dir} за {fmt_hms(time.perf_counter()-t0)}")
     return True
 
 
@@ -554,8 +578,10 @@ def encode_chunk(cfg, torch, pipe, chunk_prompts):
     pipe.text_encoder.to("cuda")
     pipe.text_encoder_2.to("cuda")
     pe_parts, pp_parts = [], []
+    total = len(chunk_prompts)
+    t0 = time.perf_counter()
     with torch.no_grad():
-        for j in range(0, len(chunk_prompts), enc_batch):
+        for j in range(0, total, enc_batch):
             sub = chunk_prompts[j:j + enc_batch]
             ti = pipe.tokenizer(sub, padding="max_length", max_length=77,
                                 truncation=True, return_tensors="pt").to("cuda")
@@ -565,6 +591,10 @@ def encode_chunk(cfg, torch, pipe, chunk_prompts):
             emb = pipe.text_encoder_2(ti2.input_ids, output_hidden_states=False).last_hidden_state
             pe_parts.append(emb.detach().to("cpu", dtype=torch.bfloat16))
             pp_parts.append(pooled.detach().to("cpu", dtype=torch.bfloat16))
+            done = min(j + enc_batch, total)
+            if done == total or (j // enc_batch) % 4 == 0:
+                eta = (time.perf_counter() - t0) / done * (total - done)
+                print(f"    [энкод] {done}/{total} промптов закодировано (осталось ~{fmt_hms(eta)})", flush=True)
     prompt_embeds = torch.cat(pe_parts)
     pooled_embeds = torch.cat(pp_parts)
     pipe.text_encoder = None
