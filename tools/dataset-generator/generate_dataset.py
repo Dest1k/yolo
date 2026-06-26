@@ -75,7 +75,8 @@ DEFAULTS = {
         "height": 640,
         "jpeg_quality": 92,
         "prompt_suffix": ", realistic photo, high resolution",
-        "hf_endpoint": "https://hf-mirror.com",
+        # Официальный HF (если у тебя он недоступен — поставь рабочее зеркало, напр. https://hf-mirror.com).
+        "hf_endpoint": "https://huggingface.co",
         "allow_tf32": True,
     },
     "llm": {
@@ -211,8 +212,18 @@ _AUTO = True   # переопределяется из cfg в main()
 
 
 def _pip_install(*pkgs):
+    """pip install с ретраями — на медленном/рвущемся канале одиночная попытка падает на
+    IncompleteRead/Connection broken; pip докачивает кэш колёс, поэтому повтор обычно проходит."""
     print(f"  [setup] устанавливаю: {', '.join(pkgs)} …")
-    return subprocess.call([sys.executable, "-m", "pip", "install", *pkgs]) == 0
+    cmd = [sys.executable, "-m", "pip", "install",
+           "--retries", "10", "--timeout", "120", *pkgs]
+    for attempt in range(1, 5):
+        if subprocess.call(cmd) == 0:
+            return True
+        print(f"  [setup] установка не удалась (попытка {attempt}/4) — обрыв канала? повтор…")
+        time.sleep(2 * attempt)
+    print(f"  [setup] не удалось установить {', '.join(pkgs)} за 4 попытки.")
+    return False
 
 
 def ensure(import_name, pip_name=None):
@@ -249,25 +260,33 @@ def ensure_flux(cfg):
         except Exception:
             pass
     repo = cfg["generation"].get("flux_repo", "black-forest-labs/FLUX.1-schnell")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")   # терпимее к медленному каналу
     print(f"[setup] FLUX не найден — качаю {repo} (~24 ГБ, надолго).")
     print(f"[setup] эндпойнт: {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')}")
-    print("[setup] прогресс по файлам пойдёт ниже; НЕ прерывай (качается дозагрузкой при повторе)…")
+    print("[setup] прогресс по файлам ниже; при обрыве сам повторяю с ДОКАЧКОЙ (готовое не качается заново)…")
     t0 = time.perf_counter()
-    try:
-        snapshot_download(repo, local_dir=flux_dir, max_workers=8)
-    except Exception as e:
-        print(f"[!] Не удалось скачать FLUX: {type(e).__name__}: {e}")
-        print("    Обычно это нет доступа к HuggingFace из твоей сети. Что делать:")
-        print("    1) Зеркало: в окне поле «Repo FLUX…» оставь как есть, а «HF endpoint» (вкладка")
-        print("       «Картинки») поставь https://hf-mirror.com или другое рабочее зеркало;")
-        print("    2) Скачай FLUX.1-schnell вручную и укажи путь в «Папка FLUX» и «Папка трансформера»;")
-        print("    3) Или переключи «Движок генерации» на «own» (свои картинки) — генерация не нужна,")
-        print("       будет только разметка готовой папки.")
-        return False
-    if not os.path.isdir(tr):
-        cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
-    print(f"[setup] FLUX скачан в {flux_dir} за {fmt_hms(time.perf_counter()-t0)}")
-    return True
+    last = None
+    for attempt in range(1, 7):
+        try:
+            snapshot_download(repo, local_dir=flux_dir, max_workers=8)
+            if not os.path.isdir(tr):
+                cfg["paths"]["transformer_path"] = os.path.join(flux_dir, "transformer")
+            print(f"[setup] FLUX скачан в {flux_dir} за {fmt_hms(time.perf_counter()-t0)}")
+            return True
+        except Exception as e:
+            last = e
+            print(f"[setup] обрыв скачивания FLUX (попытка {attempt}/6): {type(e).__name__}. "
+                  f"Повтор с докачкой…")
+            time.sleep(min(30, 3 * attempt))
+    print(f"[!] Не удалось скачать FLUX за 6 попыток: {type(last).__name__}: {last}")
+    print("    Судя по логу — канал рвётся на больших файлах (это не блокировка). Что помогает:")
+    print("    1) Эндпойнт: у тебя HF открывается напрямую — на вкладке «Картинки» поставь")
+    print("       «HF endpoint» = https://huggingface.co (вместо зеркала, оно бывает нестабильным);")
+    print("    2) Просто ЗАПУСТИ ЕЩЁ РАЗ — докачается с места обрыва (готовые файлы пропускаются);")
+    print("    3) Либо скачай FLUX.1-schnell вручную (git lfs / браузер) и укажи путь в «Папка FLUX»")
+    print("       и «Папка трансформера»;")
+    print("    4) Либо переключи «Движок генерации» на «own» — генерация не нужна, только разметка.")
+    return False
 
 
 # =====================================================================
@@ -1010,7 +1029,9 @@ def label_dataset(cfg):
 # ТОЧКА ВХОДА
 # =====================================================================
 def setup_torch(cfg):
-    os.environ["HF_ENDPOINT"] = cfg["generation"]["hf_endpoint"]
+    ep = (cfg["generation"].get("hf_endpoint") or "").strip()
+    if ep:                                     # пустой эндпойнт -> официальный HF по умолчанию
+        os.environ["HF_ENDPOINT"] = ep
     if not (cfg["run"]["phase2_images"] or cfg["run"]["phase3_label"]):
         return
     try:
