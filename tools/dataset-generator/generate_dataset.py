@@ -92,6 +92,9 @@ DEFAULTS = {
     # object_noun — что генерируем (любой объект). categories — произвольные категории
     # вариативности: имя -> список вариантов. Шаблон подставит по одному случайному из каждой.
     "prompts": {
+        # Краткое описание датасета на любом языке — кнопка «Заполнить из описания» в окне
+        # попросит LLM развернуть его в object_noun/objects/categories/классы.
+        "brief": "",
         "object_noun": "drone (UAV / quadcopter)",
         # МУЛЬТИОБЪЕКТ: если objects непусто и в нём ≥2 объектов, часть сцен будет содержать
         # 2+ разных объекта вместе (доля = multi_object_prob, максимум = multi_object_max).
@@ -497,6 +500,94 @@ def choose_scene_objects(pr):
         return (" AND ".join(chosen) +
                 " — ALL of them clearly visible together in the SAME single scene")
     return random.choices(phrases, weights=weights, k=1)[0]
+
+
+def _parse_json_object(text):
+    """Достаёт первый JSON-объект из ответа LLM (терпит markdown-заборы и болтовню)."""
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+    s, e = t.find("{"), t.rfind("}")
+    if s == -1 or e <= s:
+        return None
+    chunk = re.sub(r",\s*([\]}])", r"\1", t[s:e + 1])
+    try:
+        return json.loads(chunk)
+    except json.JSONDecodeError:
+        return None
+
+
+def autoconfig_from_brief(cfg):
+    """Разворачивает короткое описание (prompts.brief) в поля промптов и классов через LLM.
+    Заполняет object_noun, objects, categories и labeling.classes."""
+    brief = (cfg["prompts"].get("brief") or "").strip()
+    if not brief:
+        print("[autoconfig] поле описания пустое — заполнять нечего.")
+        return cfg
+    OpenAI = ensure("openai", "openai").OpenAI
+    model = cfg["llm"]["model"]
+    use_lms = cfg["llm"].get("use_lms", True)
+    if use_lms:
+        print(f"[autoconfig] загружаю LLM {model}…")
+        subprocess.run(f"lms load {model}", shell=True, stdout=subprocess.DEVNULL)
+    client = OpenAI(base_url=cfg["llm"]["base_url"], api_key=cfg["llm"]["api_key"])
+    sys_prompt = (
+        "Ты — помощник по проектированию датасетов для детекции объектов. По краткому описанию "
+        "верни ТОЛЬКО один JSON-объект (без markdown, без пояснений) со схемой:\n"
+        '{\n'
+        '  "object_noun": "короткая фраза, что снимаем в целом",\n'
+        '  "objects": ["english phrase per distinct object, e.g. a person", "a car"],\n'
+        '  "categories": {"Тип/форм-фактор": ["...english..."], "Материал/текстура": ["..."], '
+        '"Фон/окружение": ["..."], "Погода/освещение": ["..."], "Состояние": ["..."], "Ракурс": ["..."]},\n'
+        '  "classes": [{"name": "person", "synonyms": ["person","pedestrian","human"]}, '
+        '{"name": "car", "synonyms": ["car","vehicle","automobile"]}]\n'
+        '}\n'
+        "Значения в objects/categories — на АНГЛИЙСКОМ (для модели картинок). Имена классов — как удобно. "
+        "Категорий 4-7, в каждой 5-10 разнообразных вариантов, отражающих описание (например ракурс "
+        "'top-down drone view', если сказано 'вид с дрона'). Классы — реальные объекты для разметки.\n"
+        f"Описание: {brief}"
+    )
+    print("[autoconfig] прошу LLM собрать настройки из описания…")
+    try:
+        resp = client.chat.completions.create(
+            model=model, messages=[{"role": "system", "content": sys_prompt}],
+            temperature=0.5, max_tokens=cfg["llm"]["max_tokens"])
+        data = _parse_json_object(resp.choices[0].message.content or "")
+    except Exception as e:
+        print(f"[autoconfig] ошибка LLM: {e}")
+        data = None
+    if use_lms:
+        subprocess.run("lms unload --all", shell=True, stdout=subprocess.DEVNULL)
+    if not data:
+        print("[autoconfig] не удалось разобрать ответ LLM — поля не изменены.")
+        return cfg
+
+    pr = cfg["prompts"]
+    if data.get("object_noun"):
+        pr["object_noun"] = str(data["object_noun"])
+    if isinstance(data.get("objects"), list) and data["objects"]:
+        pr["objects"] = [str(x).strip() for x in data["objects"] if str(x).strip()]
+    if isinstance(data.get("categories"), dict) and data["categories"]:
+        pr["categories"] = {str(k): [str(v) for v in vals if str(v).strip()]
+                            for k, vals in data["categories"].items() if vals}
+    norm = []
+    for c in (data.get("classes") or []):
+        if isinstance(c, dict) and c.get("name"):
+            syns = [str(s).strip() for s in (c.get("synonyms") or [c["name"]]) if str(s).strip()]
+            norm.append({"name": str(c["name"]).strip(), "synonyms": syns or [str(c["name"]).strip()]})
+        elif isinstance(c, str) and c.strip():
+            norm.append({"name": c.strip(), "synonyms": [c.strip()]})
+    if norm:
+        cfg["labeling"]["classes"] = norm
+    # если объектов 2+, а мультисцены были выключены — включим разумную долю
+    if len(pr.get("objects", [])) >= 2 and not float(pr.get("multi_object_prob", 0) or 0):
+        pr["multi_object_prob"] = 0.3
+    print("[autoconfig] готово:")
+    print("   object_noun:", pr.get("object_noun"))
+    print("   объекты:", pr.get("objects"))
+    print("   категории:", list(pr.get("categories", {}).keys()))
+    print("   классы:", [c["name"] for c in cfg["labeling"]["classes"]])
+    return cfg
 
 
 def build_system_prompt(cfg, empty=False):
@@ -1135,6 +1226,21 @@ def setup_torch(cfg):
 
 def main():
     global _AUTO
+    # Режим авто-конфига: разворачиваем описание в поля и перезаписываем тот же конфиг, выходим.
+    if "--autoconfig" in sys.argv:
+        paths = [a for a in sys.argv[1:] if not a.startswith("-")]
+        path = paths[0] if paths else os.environ.get("GEN_CONFIG")
+        if not path or not os.path.isfile(path):
+            print("[autoconfig] не передан путь к конфигу."); return
+        with open(path, encoding="utf-8") as f:
+            cfg = deep_merge(DEFAULTS, json.load(f))
+        _AUTO = bool(cfg.get("auto_install", True))
+        cfg = autoconfig_from_brief(cfg)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=1, ensure_ascii=False)
+        print(f"[autoconfig] конфиг обновлён: {path}")
+        return
+
     print("[СТАРТ] Генератор синтетических датасетов")
     cfg = load_config()
     _AUTO = bool(cfg.get("auto_install", True))

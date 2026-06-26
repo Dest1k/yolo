@@ -101,6 +101,7 @@ class GeneratorGUI:
         self.q = queue.Queue()
         self.cfg = load_state()
         self.widgets = {}
+        self._on_done = None        # колбэк по завершении дочернего процесса (для авто-заполнения)
         root.title("Генератор датасетов")
         root.minsize(920, 760)
 
@@ -236,6 +237,20 @@ class GeneratorGUI:
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+
+        # ── Простой режим: одно поле-описание -> LLM заполнит всё остальное ──
+        box = ttk.LabelFrame(inner, text="Просто опиши датасет — остальное заполнит LLM", padding=8)
+        box.pack(fill="x", pady=(2, 10))
+        ttk.Label(box, text="Например: «люди и машины, вид с дрона» или «дроны в небе разных типов»:",
+                  foreground="#bbb").pack(anchor="w")
+        self.brief = tk.StringVar(); self.widgets["prompts.brief"] = self.brief
+        ttk.Entry(box, textvariable=self.brief).pack(fill="x", pady=(2, 6))
+        self.autofill_btn = ttk.Button(box, text="✨  Заполнить поля из описания (LLM)",
+                                       command=self.autofill_from_brief)
+        self.autofill_btn.pack(anchor="w")
+        ttk.Label(box, text="Заполнит объект, объекты сцены, словарь категорий и классы разметки. "
+                            "Потом можно вручную поправить поля ниже.",
+                  foreground="#888", wraplength=820, justify="left").pack(anchor="w", pady=(4, 0))
 
         ttk.Label(inner, text="Объект генерации (используется, если список объектов сцены ниже пуст):",
                   foreground="#bbb").pack(anchor="w", pady=(4, 0))
@@ -538,6 +553,7 @@ class GeneratorGUI:
             self._append(f"не удалось запустить: {e}\n", "err"); return
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
         self.start_btn.configure(state="disabled")
+        self.autofill_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.status.configure(text="выполняется…")
 
@@ -576,8 +592,86 @@ class GeneratorGUI:
         if code == 0:
             self._set_progress(1.0, "готово")
         self.start_btn.configure(state="normal")
+        self.autofill_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.proc = None
+        cb, self._on_done = self._on_done, None
+        if cb:
+            cb(code)
+
+    # ── простой режим: заполнить поля из описания через LLM ──────────────────────
+    def _collect_lenient(self):
+        """Сбор конфига без строгой валидации (классы/масштабы могут быть пустыми) — для авто-заполнения."""
+        import copy
+        cfg = copy.deepcopy(self.cfg)
+        int_paths = {"total_images", "generation.batch_size", "generation.micro_batch",
+                     "generation.super_chunk", "generation.encode_batch",
+                     "generation.num_inference_steps", "generation.jpeg_quality",
+                     "generation.width", "generation.height", "llm.max_tokens",
+                     "prompts.multi_object_max", "labeling.batch", "generation.save_workers"}
+        float_paths = {"generation.guidance_scale", "llm.temperature", "labeling.conf",
+                       "labeling.iou", "prompts.multi_object_prob", "val_split",
+                       "prompts.empty_scene_prob"}
+        for path, var in self.widgets.items():
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    dset(cfg, path, bool(var.get()))
+                else:
+                    raw = var.get().strip()
+                    if path in int_paths:
+                        dset(cfg, path, int(float(raw)))
+                    elif path in float_paths:
+                        dset(cfg, path, float(raw))
+                    else:
+                        dset(cfg, path, raw)
+            except Exception:
+                pass
+        return cfg
+
+    def autofill_from_brief(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        brief = self.brief.get().strip()
+        if not brief:
+            messagebox.showinfo("Описание", "Сначала впиши описание датасета в поле выше."); return
+        cfg = self._collect_lenient()
+        cfg["prompts"]["brief"] = brief
+        try:
+            with open(RUN_CONFIG, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=1, ensure_ascii=False)
+        except Exception as e:
+            messagebox.showerror("Конфиг", f"Не смог записать конфиг:\n{e}"); return
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"; env["PYTHONUTF8"] = "1"; env["PYTHONIOENCODING"] = "utf-8"
+        self._append("$ generate_dataset.py --autoconfig (LLM заполняет поля из описания)…\n", "ok")
+        self._set_progress(0, "")
+        creflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, "-u", ENGINE, "--autoconfig", RUN_CONFIG], cwd=HERE, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=1, text=True, encoding="utf-8", errors="replace",
+                creationflags=creflags, start_new_session=(os.name != "nt"))
+        except Exception as e:
+            self._append(f"не удалось запустить: {e}\n", "err"); return
+        self._on_done = self._reload_after_autofill
+        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+        self.start_btn.configure(state="disabled")
+        self.autofill_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.status.configure(text="заполняю из описания…")
+
+    def _reload_after_autofill(self, code):
+        if code == 0 and os.path.isfile(RUN_CONFIG):
+            try:
+                with open(RUN_CONFIG, encoding="utf-8") as f:
+                    self.cfg = engine.deep_merge(engine.DEFAULTS, json.load(f))
+                self._restore()
+                self._append("✓ Поля заполнены из описания — проверь вкладки «Промпты» и «Разметка».\n", "ok")
+            except Exception as e:
+                self._append(f"не смог прочитать результат авто-заполнения: {e}\n", "err")
+        else:
+            self._append("авто-заполнение не удалось (см. лог выше).\n", "err")
 
     def stop(self):
         p = self.proc
