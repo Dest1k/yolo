@@ -171,6 +171,7 @@ DEFAULTS = {
         ],
         "conf": 0.05,
         "iou": 0.5,
+        "imgsz": 0,                  # разрешение инференса разметки (0=дефолт 640; 1280+ ловит мелочь)
         "batch": 16,                 # картинок за один проход модели разметки (грузим GPU плотно)
         "resume": True,              # пропускать картинки, у которых метка уже есть (докачка после обрыва)
         # веса под каждый бэкенд (скачиваются сами на первом запуске)
@@ -605,7 +606,8 @@ def autoconfig_from_brief(cfg):
             ["the object is small, seen from above, ~5-12% of the frame, surrounded by ground", 40],
             ["the object is medium-small from an overhead view, ~15-25% of the frame", 15],
         ]
-        print("[autoconfig] описание про съёмку с высоты — выставил вид сверху + мелкий масштаб объектов.")
+        cfg["labeling"]["imgsz"] = 1280   # мелкие объекты сверху — размечаем в высоком разрешении
+        print("[autoconfig] описание про съёмку с высоты — выставил вид сверху + мелкий масштаб + разметку 1280px.")
 
     print("[autoconfig] готово:")
     print("   object_noun:", pr.get("object_noun"))
@@ -1129,9 +1131,14 @@ def label_yoloworld(cfg):
     model = YOLO(lab["yoloworld_weights"])
     model.set_classes(flat)                              # словарь = все синонимы всех классов
     conf, iou = float(lab["conf"]), float(lab["iou"])
+    imgsz = int(lab.get("imgsz", 0) or 0)               # 0 = дефолт модели (640); больше = лучше мелочь
+    extra = {"imgsz": imgsz} if imgsz > 0 else {}
+    if imgsz > 0:
+        print(f"    (инференс на {imgsz}px — для мелких объектов)")
 
     def predict_batch(paths, sizes):
-        res = model.predict(source=paths, conf=conf, iou=iou, verbose=False, save=False, batch=len(paths))
+        res = model.predict(source=paths, conf=conf, iou=iou, verbose=False, save=False,
+                            batch=len(paths), **extra)
         out = []
         for r in res:
             b = []

@@ -301,6 +301,7 @@ class GeneratorGUI:
         self._entry(f, 5, "Порог уверенности (conf)", "labeling.conf", width=10)
         self._entry(f, 6, "IoU (NMS)", "labeling.iou", width=10)
         self._entry(f, 12, "Картинок за проход (батч)", "labeling.batch", width=10)
+        self._entry(f, 13, "Разрешение инференса (0=640; 1280+ для мелких)", "labeling.imgsz", width=10)
         ttk.Label(f, text="КЛАССЫ (мультикласс). Заголовок класса — строкой «## Имя», ниже его "
                           "синонимы по одному в строке. id класса = порядок (0,1,2…). Разные классы "
                           "НЕ смешиваются — у каждого своя группа синонимов.",
@@ -440,7 +441,8 @@ class GeneratorGUI:
                      "generation.super_chunk", "generation.encode_batch",
                      "generation.num_inference_steps", "generation.jpeg_quality",
                      "generation.width", "generation.height", "llm.max_tokens",
-                     "prompts.multi_object_max", "labeling.batch", "generation.save_workers"}
+                     "prompts.multi_object_max", "labeling.batch", "labeling.imgsz",
+                     "generation.save_workers"}
         float_paths = {"generation.guidance_scale", "llm.temperature",
                        "labeling.conf", "labeling.iou", "prompts.multi_object_prob",
                        "val_split", "prompts.empty_scene_prob"}
@@ -634,7 +636,8 @@ class GeneratorGUI:
                      "generation.super_chunk", "generation.encode_batch",
                      "generation.num_inference_steps", "generation.jpeg_quality",
                      "generation.width", "generation.height", "llm.max_tokens",
-                     "prompts.multi_object_max", "labeling.batch", "generation.save_workers"}
+                     "prompts.multi_object_max", "labeling.batch", "labeling.imgsz",
+                     "generation.save_workers"}
         float_paths = {"generation.guidance_scale", "llm.temperature", "labeling.conf",
                        "labeling.iou", "prompts.multi_object_prob", "val_split",
                        "prompts.empty_scene_prob"}
