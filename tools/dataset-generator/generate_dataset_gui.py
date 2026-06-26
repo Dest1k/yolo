@@ -183,6 +183,7 @@ class GeneratorGUI:
         self.stop_btn = ttk.Button(bar, text="■  Стоп", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
         ttk.Button(bar, text="Сохранить конфиг…", command=self.save_config_as).pack(side="left", padx=6)
+        ttk.Button(bar, text="Сбросить настройки", command=self.reset_defaults).pack(side="left", padx=6)
         ttk.Button(bar, text="Очистить лог", command=lambda: self.log.delete("1.0", "end")).pack(side="left", padx=6)
         self.status = ttk.Label(bar, text="простаивает"); self.status.pack(side="right")
 
@@ -494,6 +495,26 @@ class GeneratorGUI:
                                              initialfile=os.path.basename(cur) or "prompts.jsonl")
         if p:
             var.set(p)
+
+    def reset_defaults(self):
+        """Сбросить ВСЕ настройки окна к дефолтам из кода (удаляет файл состояния)."""
+        if self.proc and self.proc.poll() is None:
+            messagebox.showinfo("Идёт процесс", "Сначала останови текущий запуск."); return
+        if not messagebox.askyesno(
+                "Сброс настроек",
+                "Вернуть ВСЕ поля к значениям по умолчанию?\n\n"
+                "Сбросятся только настройки окна. Скачанный FLUX, картинки, метки и промпты "
+                "НЕ трогаются."):
+            return
+        import copy
+        try:
+            if os.path.isfile(STATE_PATH):
+                os.remove(STATE_PATH)
+        except Exception as e:
+            self._append(f"не смог удалить файл состояния: {e}\n", "err")
+        self.cfg = copy.deepcopy(engine.DEFAULTS)
+        self._restore()
+        self._append("✓ Настройки сброшены к дефолтам.\n", "ok")
 
     def save_config_as(self):
         try:
