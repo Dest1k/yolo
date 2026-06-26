@@ -56,16 +56,19 @@ DEFAULTS = {
     },
     "run": {"phase1_prompts": True, "phase2_images": True, "phase3_label": True},
     "total_images": 30000,
+    "val_split": 0.15,              # доля в val (авто-сплит train/val в фазе 3); 0 = без сплита
     "auto_install": True,            # сам ставить недостающие пакеты (pip) и качать модели
     "generation": {
         "backend": "flux",          # "flux" (рендерить) | "own" (свои картинки, генерацию пропустить)
         "flux_repo": "black-forest-labs/FLUX.1-schnell",  # для авто-скачивания, если flux_dir пуст
         "file_prefix": "synth",      # имя файлов: <prefix>_00001.jpg
         "batch_size": 40,            # промптов за один запрос к LLM
-        "quant_mode": "torchao",     # nf4 | torchao | layerwise
-        "micro_batch": 4,            # картинок за один проход FLUX
-        "super_chunk": 1000,         # промптов на одну загрузку трансформера (не больше total)
-        "encode_batch": 64,          # под-батч текст-энкодера
+        "quant_mode": "torchao",     # nf4 | torchao | layerwise (torchao fp8 — нативно быстр на Blackwell)
+        # Дефолты рассчитаны на RTX 5090 (32 ГБ) + 128 ГБ RAM + Ultra 9 285K (24 потока):
+        "micro_batch": 16,           # картинок за проход FLUX (32 ГБ тянет; при OOM — уменьшить)
+        "super_chunk": 2000,         # промптов на загрузку трансформера (меньше перезагрузок; RAM хватает)
+        "encode_batch": 128,         # под-батч текст-энкодера (грузим GPU плотнее)
+        "save_workers": 12,          # потоков на сохранение JPEG (чтобы GPU не ждал диск)
         "num_inference_steps": 4,    # FLUX.1-schnell — few-step модель
         "guidance_scale": 0.0,
         "width": 640,
@@ -95,6 +98,9 @@ DEFAULTS = {
         "objects": [],
         "multi_object_prob": 0.3,
         "multi_object_max": 2,
+        # НЕГАТИВЫ: доля сцен БЕЗ объектов (чистый фон) — у них будут пустые метки, что снижает
+        # ложные срабатывания детектора. 0 = выключено.
+        "empty_scene_prob": 0.0,
         "categories": {
             "Тип/форм-фактор": [
                 "commercial DJI Mavic style quadcopter with folded arms",
@@ -160,6 +166,7 @@ DEFAULTS = {
         ],
         "conf": 0.05,
         "iou": 0.5,
+        "batch": 16,                 # картинок за один проход модели разметки (грузим GPU плотно)
         # веса под каждый бэкенд (скачиваются сами на первом запуске)
         "yoloworld_weights": "yolov8x-worldv2.pt",
         "groundingdino_model": "IDEA-Research/grounding-dino-base",
@@ -332,20 +339,29 @@ def choose_scene_objects(pr):
     return random.choice(objects)
 
 
-def build_system_prompt(cfg):
-    """Собирает системный промпт: объект(ы) сцены + по одному случайному варианту из каждой категории."""
+def build_system_prompt(cfg, empty=False):
+    """Системный промпт. empty=True -> просим ФОНОВУЮ сцену без объектов (негатив)."""
     pr = cfg["prompts"]
     cats = pr.get("categories", {})
-    lines = []
-    for name, options in cats.items():
-        if options:
-            lines.append(f"- {name}: {random.choice(list(options))}")
-    config_block = "\n".join(lines)
+    bs = cfg["generation"]["batch_size"]
+    if empty:
+        objs = pr.get("objects") or [pr.get("object_noun", "the target object")]
+        bg = []
+        for name, options in cats.items():
+            low = name.lower()
+            if options and any(k in low for k in ("фон", "окруж", "background", "environment",
+                                                  "погод", "свет", "weather", "light",
+                                                  "ракурс", "perspective", "angle")):
+                bg.append(f"- {name}: {random.choice(list(options))}")
+        block = ("\nДля этого батча:\n" + "\n".join(bg)) if bg else ""
+        return (f"Generate a raw JSON array of exactly {bs} highly detailed, unique English "
+                f"image-generation prompts of realistic BACKGROUND / EMPTY scenes that contain "
+                f"NO {', '.join(objs)} and no similar objects at all — only the environment."
+                f"{block}\nVary places, weather, lighting and viewpoint. Return ONLY a raw JSON "
+                f"array of strings. No markdown, no explanations.")
+    lines = [f"- {name}: {random.choice(list(options))}" for name, options in cats.items() if options]
     return pr["system_template"].format(
-        batch_size=cfg["generation"]["batch_size"],
-        object_noun=choose_scene_objects(pr),
-        config_block=config_block,
-    )
+        batch_size=bs, object_noun=choose_scene_objects(pr), config_block="\n".join(lines))
 
 
 # =====================================================================
@@ -390,18 +406,22 @@ def generate_all_prompts(cfg):
     t0 = time.perf_counter()
     consecutive_fail = 0
     with open(prompts_file, "a", encoding="utf-8") as f:
+        empty_prob = float(cfg["prompts"].get("empty_scene_prob", 0) or 0)
         while len(all_prompts) < total:
             try:
+                empty = empty_prob > 0 and random.random() < empty_prob
                 resp = client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "system", "content": build_system_prompt(cfg)}],
+                    messages=[{"role": "system", "content": build_system_prompt(cfg, empty=empty)}],
                     temperature=cfg["llm"]["temperature"],
                     max_tokens=cfg["llm"]["max_tokens"],
                 )
                 raw = (resp.choices[0].message.content or "").strip()
                 batch = [normalize_prompt(p) for p in extract_prompts(raw)]
                 batch = [p for p in batch if len(p) > 10]
-                batch = [f"{p}, {planner.next()}" for p in batch]
+                # негативам масштаб объекта не добавляем (объекта в кадре нет)
+                if not empty:
+                    batch = [f"{p}, {planner.next()}" for p in batch]
 
                 if not batch:
                     consecutive_fail += 1
@@ -512,7 +532,12 @@ def encode_chunk(cfg, torch, pipe, chunk_prompts):
     return prompt_embeds, pooled_embeds
 
 
+def _save_jpg(img, path, quality):
+    img.save(path, quality=quality)
+
+
 def generate_all_images(cfg, prompts):
+    from concurrent.futures import ThreadPoolExecutor
     ensure("torch", "torch")
     import torch
     ensure("diffusers", "diffusers")
@@ -522,6 +547,8 @@ def generate_all_images(cfg, prompts):
         return 0
 
     g = cfg["generation"]
+    # Сохранение JPEG — в пуле потоков, чтобы GPU не ждал диск (CPU Ultra 9 берёт это на себя).
+    save_pool = ThreadPoolExecutor(max_workers=int(g.get("save_workers", 8)))
     total = cfg["total_images"]
     images_dir = cfg["paths"]["images_dir"]
     flux_dir = cfg["paths"]["flux_dir"]
@@ -595,8 +622,9 @@ def generate_all_images(cfg, prompts):
                     gi = idx + start + k
                     if gi >= total:
                         break
-                    img.save(os.path.join(images_dir, f"{prefix}_{gi:0{pad}d}.jpg"),
-                             quality=int(g["jpeg_quality"]))
+                    save_pool.submit(_save_jpg, img,
+                                     os.path.join(images_dir, f"{prefix}_{gi:0{pad}d}.jpg"),
+                                     int(g["jpeg_quality"]))
                     generated_count = max(generated_count, gi + 1)
                     session_done += 1
 
@@ -627,6 +655,7 @@ def generate_all_images(cfg, prompts):
         torch.cuda.empty_cache()
         idx += len(chunk)
 
+    save_pool.shutdown(wait=True)      # дождаться, пока все JPEG допишутся на диск
     print(f"\n[ФАЗА 2] Готово: {generated_count}/{total} картинок.")
     return generated_count
 
@@ -684,58 +713,91 @@ def _write_label(labels_dir, stem, boxes):
     return len(lines)
 
 
-def _write_yaml(cfg, names):
+def _write_yaml(cfg, names, images):
+    """Пишет dataset.yaml. Если val_split>0 — встроенный авто-сплит train/val: создаёт
+    train.txt/val.txt со списком картинок (без перемещения файлов) и ссылается на них."""
+    import random as _r
     images_dir = cfg["paths"]["images_dir"]
-    output_yolo_dir = cfg["paths"]["output_yolo_dir"]
-    os.makedirs(output_yolo_dir, exist_ok=True)
-    yaml_path = os.path.join(output_yolo_dir, "dataset.yaml")
+    root = os.path.dirname(images_dir)
+    out_dir = cfg["paths"]["output_yolo_dir"]
+    os.makedirs(out_dir, exist_ok=True)
+    yaml_path = os.path.join(out_dir, "dataset.yaml")
+    val_split = float(cfg.get("val_split", 0.0) or 0.0)
+    train_line, val_line = "images", "images"
+    if val_split > 0 and images:
+        order = list(images); _r.Random(1337).shuffle(order)
+        k = max(1, int(len(order) * val_split))
+        val = set(order[:k])
+        tr_txt = os.path.join(out_dir, "train.txt")
+        va_txt = os.path.join(out_dir, "val.txt")
+        with open(tr_txt, "w", encoding="utf-8") as f:
+            f.writelines(os.path.join(images_dir, fn) + "\n" for fn in images if fn not in val)
+        with open(va_txt, "w", encoding="utf-8") as f:
+            f.writelines(os.path.join(images_dir, fn) + "\n" for fn in images if fn in val)
+        train_line, val_line = tr_txt, va_txt
+        print(f"  авто-сплит: train {len(images)-len(val)} / val {len(val)} "
+              f"({int(val_split*100)}%) -> {tr_txt}, {va_txt}")
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write("# Датасет детекции — авторазметка генератора\n")
-        f.write(f"path: {os.path.dirname(images_dir)}\n")
-        f.write("train: images\nval: images\n\n")
+        f.write(f"path: {root}\n")
+        f.write(f"train: {train_line}\nval: {val_line}\n\n")
         f.write(f"nc: {len(names)}\n")
         f.write("names: [%s]\n" % ", ".join(f"'{n}'" for n in names))
     return yaml_path
 
 
-def _label_loop(cfg, predict_one, banner, names):
-    """Общий цикл разметки: predict_one(path,(W,H)) -> список (cx,cy,w,h,cls_id) нормированных."""
+def _chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+def _label_loop(cfg, predict_batch, banner, names):
+    """Батчевый цикл разметки (грузит GPU плотно): predict_batch(paths, sizes) -> список
+    результатов параллельно paths, каждый — список (cx,cy,w,h,cls_id) нормированных."""
     from PIL import Image
     images_dir = cfg["paths"]["images_dir"]
     lab = cfg["labeling"]
+    batch = max(1, int(lab.get("batch", 16)))
     labels_dir = os.path.join(os.path.dirname(images_dir), "labels")
     os.makedirs(labels_dir, exist_ok=True)
 
     images = _list_jpgs(images_dir)
     total = len(images)
-    print(f" -> {banner}: {total} картинок, классов: {len(names)} ({', '.join(names)}) (conf={lab['conf']})…")
-    detected = empty = total_boxes = 0
+    print(f" -> {banner}: {total} картинок, классов: {len(names)} ({', '.join(names)}) "
+          f"(conf={lab['conf']}, батч={batch})…")
+    detected = empty = total_boxes = done = 0
     per_class = [0] * len(names)
     t0 = time.perf_counter()
-    for i, fn in enumerate(images, 1):
-        path = os.path.join(images_dir, fn)
+    for group in _chunks(images, batch):
+        paths = [os.path.join(images_dir, fn) for fn in group]
+        sizes = []
+        for p in paths:
+            try:
+                with Image.open(p) as im:
+                    sizes.append(im.size)
+            except Exception:
+                sizes.append((0, 0))
         try:
-            with Image.open(path) as im:
-                wh = im.size
-            boxes = predict_one(path, wh)
+            results = predict_batch(paths, sizes)
         except Exception as e:
-            boxes = []
-            print(f"    [!] {fn}: {e}")
-        n = _write_label(labels_dir, os.path.splitext(fn)[0], boxes)
-        for (_, _, _, _, cid) in boxes:
-            if 0 <= cid < len(per_class):
-                per_class[cid] += 1
-        if n:
-            detected += 1; total_boxes += n
-        else:
-            empty += 1
-        if i % 50 == 0 or i == total:
-            eta = (time.perf_counter() - t0) / i * (total - i)
-            _pb(i / total, f"Фаза 3 — разметка: {i}/{total}")
-            print(f"  [{i}/{total}] с рамками: {detected} ({100*detected/i:4.1f}%) | "
-                  f"пустых: {empty} | боксов: {total_boxes} | осталось ~{fmt_hms(eta)}")
+            print(f"    [!] батч: {e}")
+            results = [[] for _ in paths]
+        for fn, boxes in zip(group, results):
+            n = _write_label(labels_dir, os.path.splitext(fn)[0], boxes)
+            for (_, _, _, _, cid) in boxes:
+                if 0 <= cid < len(per_class):
+                    per_class[cid] += 1
+            if n:
+                detected += 1; total_boxes += n
+            else:
+                empty += 1
+            done += 1
+        eta = (time.perf_counter() - t0) / done * (total - done)
+        _pb(done / total, f"Фаза 3 — разметка: {done}/{total}")
+        print(f"  [{done}/{total}] с рамками: {detected} ({100*detected/done:4.1f}%) | "
+              f"пустых: {empty} | боксов: {total_boxes} | осталось ~{fmt_hms(eta)}")
 
-    yaml_path = _write_yaml(cfg, names)
+    yaml_path = _write_yaml(cfg, names, images)
     print(f"\n{'='*60}")
     print(f"[ФАЗА 3] Разметка завершена за {fmt_hms(time.perf_counter()-t0)}")
     print(f"  картинок с рамками: {detected}/{total} ({100*detected/max(1,total):.1f}%)")
@@ -756,15 +818,18 @@ def label_yoloworld(cfg):
     model.set_classes(flat)                              # словарь = все синонимы всех классов
     conf, iou = float(lab["conf"]), float(lab["iou"])
 
-    def predict_one(path, wh):
-        r = model.predict(source=path, conf=conf, iou=iou, verbose=False, save=False)[0]
+    def predict_batch(paths, sizes):
+        res = model.predict(source=paths, conf=conf, iou=iou, verbose=False, save=False, batch=len(paths))
         out = []
-        if r.boxes is not None and len(r.boxes):
-            for (cx, cy, w, h), c in zip(r.boxes.xywhn.tolist(), r.boxes.cls.tolist()):
-                ci = int(c)
-                out.append((cx, cy, w, h, syn2id[ci] if 0 <= ci < len(syn2id) else 0))
+        for r in res:
+            b = []
+            if r.boxes is not None and len(r.boxes):
+                for (cx, cy, w, h), c in zip(r.boxes.xywhn.tolist(), r.boxes.cls.tolist()):
+                    ci = int(c)
+                    b.append((cx, cy, w, h, syn2id[ci] if 0 <= ci < len(syn2id) else 0))
+            out.append(b)
         return out
-    _label_loop(cfg, predict_one, "YOLO-World разметка", names)
+    _label_loop(cfg, predict_batch, "YOLO-World разметка", names)
 
 
 def label_groundingdino(cfg):
@@ -783,25 +848,27 @@ def label_groundingdino(cfg):
     conf = float(lab["conf"])
     from PIL import Image
 
-    def predict_one(path, wh):
-        W, H = wh
-        with Image.open(path) as im:
-            im = im.convert("RGB")
-            inp = proc(images=im, text=text, return_tensors="pt").to(dev)
-            with torch.no_grad():
-                out = model(**inp)
+    def predict_batch(paths, sizes):
+        imgs = [Image.open(p).convert("RGB") for p in paths]
+        inp = proc(images=imgs, text=[text] * len(imgs), return_tensors="pt", padding=True).to(dev)
+        with torch.no_grad():
+            out = model(**inp)
+        targets = [(h, w) for (w, h) in sizes]          # post_process ждёт (H, W)
         res = proc.post_process_grounded_object_detection(
-            out, inp["input_ids"], box_threshold=conf, text_threshold=conf,
-            target_sizes=[(H, W)])[0]
-        labels = res.get("labels") or res.get("text_labels") or [""] * len(res["boxes"])
-        boxes = []
-        for (x0, y0, x1, y1), lab_txt in zip(res["boxes"].tolist(), labels):
-            cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
-            bw, bh = (x1 - x0) / W, (y1 - y0) / H
-            if bw > 0 and bh > 0:
-                boxes.append((cx, cy, bw, bh, _match_label_id(lab_txt, flat, syn2id)))
-        return boxes
-    _label_loop(cfg, predict_one, "Grounding DINO разметка", names)
+            out, inp["input_ids"], box_threshold=conf, text_threshold=conf, target_sizes=targets)
+        out_boxes = []
+        for r, (W, H) in zip(res, sizes):
+            labels = r.get("labels") or r.get("text_labels") or [""] * len(r["boxes"])
+            b = []
+            if W > 0 and H > 0:
+                for (x0, y0, x1, y1), lab_txt in zip(r["boxes"].tolist(), labels):
+                    cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
+                    bw, bh = (x1 - x0) / W, (y1 - y0) / H
+                    if bw > 0 and bh > 0:
+                        b.append((cx, cy, bw, bh, _match_label_id(lab_txt, flat, syn2id)))
+            out_boxes.append(b)
+        return out_boxes
+    _label_loop(cfg, predict_batch, "Grounding DINO разметка", names)
 
 
 def label_owlv2(cfg):
@@ -819,24 +886,25 @@ def label_owlv2(cfg):
     conf = float(lab["conf"])
     from PIL import Image
 
-    def predict_one(path, wh):
-        W, H = wh
-        with Image.open(path) as im:
-            im = im.convert("RGB")
-            inp = proc(text=[flat], images=im, return_tensors="pt").to(dev)
-            with torch.no_grad():
-                out = model(**inp)
-        res = proc.post_process_object_detection(
-            out, threshold=conf, target_sizes=torch.tensor([(H, W)]).to(dev))[0]
-        labels = res["labels"].tolist()                  # индексы в flat
-        boxes = []
-        for (x0, y0, x1, y1), li in zip(res["boxes"].tolist(), labels):
-            cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
-            bw, bh = (x1 - x0) / W, (y1 - y0) / H
-            if bw > 0 and bh > 0:
-                boxes.append((cx, cy, bw, bh, syn2id[li] if 0 <= li < len(syn2id) else 0))
-        return boxes
-    _label_loop(cfg, predict_one, "OWLv2 разметка", names)
+    def predict_batch(paths, sizes):
+        imgs = [Image.open(p).convert("RGB") for p in paths]
+        inp = proc(text=[flat] * len(imgs), images=imgs, return_tensors="pt").to(dev)
+        with torch.no_grad():
+            out = model(**inp)
+        targets = torch.tensor([(h, w) for (w, h) in sizes]).to(dev)   # (H, W)
+        res = proc.post_process_object_detection(out, threshold=conf, target_sizes=targets)
+        out_boxes = []
+        for r, (W, H) in zip(res, sizes):
+            b = []
+            if W > 0 and H > 0:
+                for (x0, y0, x1, y1), li in zip(r["boxes"].tolist(), r["labels"].tolist()):
+                    cx, cy = (x0 + x1) / 2 / W, (y0 + y1) / 2 / H
+                    bw, bh = (x1 - x0) / W, (y1 - y0) / H
+                    if bw > 0 and bh > 0:
+                        b.append((cx, cy, bw, bh, syn2id[li] if 0 <= li < len(syn2id) else 0))
+            out_boxes.append(b)
+        return out_boxes
+    _label_loop(cfg, predict_batch, "OWLv2 разметка", names)
 
 
 def label_dataset(cfg):

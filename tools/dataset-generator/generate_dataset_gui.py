@@ -164,6 +164,7 @@ class GeneratorGUI:
                        command=lambda p=path, k=kind: self._browse(p, k)).grid(row=r, column=2, padx=6)
             r += 1
         self._entry(f, r, "Сколько картинок", "total_images", width=12); r += 1
+        self._entry(f, r, "Доля в val (авто-сплит, 0 = выкл)", "val_split", width=12); r += 1
         self._entry(f, r, "Движок генерации", "generation.backend", width=12, choices=BACKEND_CHOICES); r += 1
         ttk.Label(f, text="flux — рендерить картинки FLUX;  own — взять свои готовые из папки картинок",
                   foreground="#888").grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
@@ -215,11 +216,12 @@ class GeneratorGUI:
         two(2, "Батч текст-энкодера", "generation.encode_batch", None, "Шагов инференса", "generation.num_inference_steps", None)
         two(3, "Guidance scale", "generation.guidance_scale", None, "Качество JPEG", "generation.jpeg_quality", None)
         two(4, "Ширина", "generation.width", None, "Высота", "generation.height", None)
-        self._entry(f, 5, "HF endpoint", "generation.hf_endpoint", width=40)
-        self._entry(f, 6, "Префикс имён файлов", "generation.file_prefix", width=20)
-        self._entry(f, 7, "Repo FLUX для авто-скачивания", "generation.flux_repo", width=40)
-        self._entry(f, 8, "Суффикс к каждому промпту", "generation.prompt_suffix", width=48)
-        self._check(f, 9, "Разрешить TF32 matmul (быстрее на Ampere+)", "generation.allow_tf32", colspan=4)
+        self._entry(f, 5, "Потоков сохранения JPEG", "generation.save_workers", width=14)
+        self._entry(f, 6, "HF endpoint", "generation.hf_endpoint", width=40)
+        self._entry(f, 7, "Префикс имён файлов", "generation.file_prefix", width=20)
+        self._entry(f, 8, "Repo FLUX для авто-скачивания", "generation.flux_repo", width=40)
+        self._entry(f, 9, "Суффикс к каждому промпту", "generation.prompt_suffix", width=48)
+        self._check(f, 10, "Разрешить TF32 matmul (быстрее на Ampere+)", "generation.allow_tf32", colspan=4)
 
     def _tab_prompts(self, nb):
         outer = ttk.Frame(nb, padding=6); nb.add(outer, text="  Промпты  ")
@@ -246,9 +248,12 @@ class GeneratorGUI:
         ttk.Label(mo, text="Доля сцен с 2+ объектами (0..1):").pack(side="left")
         self.widgets["prompts.multi_object_prob"] = v1 = tk.StringVar()
         ttk.Entry(mo, textvariable=v1, width=6).pack(side="left", padx=(4, 16))
-        ttk.Label(mo, text="Макс. объектов в сцене:").pack(side="left")
+        ttk.Label(mo, text="Макс. объектов:").pack(side="left")
         self.widgets["prompts.multi_object_max"] = v2 = tk.StringVar()
-        ttk.Entry(mo, textvariable=v2, width=6).pack(side="left", padx=(4, 0))
+        ttk.Entry(mo, textvariable=v2, width=6).pack(side="left", padx=(4, 16))
+        ttk.Label(mo, text="Доля пустых сцен (негативы):").pack(side="left")
+        self.widgets["prompts.empty_scene_prob"] = v3 = tk.StringVar()
+        ttk.Entry(mo, textvariable=v3, width=6).pack(side="left", padx=(4, 0))
 
         ttk.Label(inner, text="СЛОВАРЬ КАТЕГОРИЙ. Заголовок категории — строкой «## Имя», ниже её варианты "
                               "по одному в строке. Категории любые свои; LLM фокусируется на случайном "
@@ -276,6 +281,7 @@ class GeneratorGUI:
         self._entry(f, 4, "Модель OWLv2", "labeling.owlv2_model", width=36)
         self._entry(f, 5, "Порог уверенности (conf)", "labeling.conf", width=10)
         self._entry(f, 6, "IoU (NMS)", "labeling.iou", width=10)
+        self._entry(f, 12, "Картинок за проход (батч)", "labeling.batch", width=10)
         ttk.Label(f, text="КЛАССЫ (мультикласс). Заголовок класса — строкой «## Имя», ниже его "
                           "синонимы по одному в строке. id класса = порядок (0,1,2…). Разные классы "
                           "НЕ смешиваются — у каждого своя группа синонимов.",
@@ -410,9 +416,10 @@ class GeneratorGUI:
                      "generation.super_chunk", "generation.encode_batch",
                      "generation.num_inference_steps", "generation.jpeg_quality",
                      "generation.width", "generation.height", "llm.max_tokens",
-                     "prompts.multi_object_max"}
+                     "prompts.multi_object_max", "labeling.batch", "generation.save_workers"}
         float_paths = {"generation.guidance_scale", "llm.temperature",
-                       "labeling.conf", "labeling.iou", "prompts.multi_object_prob"}
+                       "labeling.conf", "labeling.iou", "prompts.multi_object_prob",
+                       "val_split", "prompts.empty_scene_prob"}
         for path, var in self.widgets.items():
             if isinstance(var, tk.BooleanVar):
                 dset(cfg, path, bool(var.get())); continue
