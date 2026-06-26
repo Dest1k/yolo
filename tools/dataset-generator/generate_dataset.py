@@ -250,13 +250,24 @@ def _dir_size(path):
     return total
 
 
+def _has_incomplete(flux_dir):
+    """Есть ли недокачанные файлы (huggingface_hub оставляет *.incomplete при обрыве)."""
+    for root, _, files in os.walk(flux_dir):
+        for fn in files:
+            if fn.endswith(".incomplete"):
+                return True
+    return False
+
+
 def ensure_flux(cfg):
-    """Если папки FLUX нет — скачиваем веса с HuggingFace (большие, ~24 ГБ).
-    Прогресс по файлам идёт в лог; при недоступности HF — понятная диагностика и варианты."""
+    """Если папки FLUX нет ИЛИ скачана не до конца — (до)качиваем веса с HuggingFace (~24 ГБ).
+    Прогресс по размеру идёт в лог; при гейте/недоступности — понятная диагностика."""
     flux_dir = cfg["paths"]["flux_dir"]
     tr = cfg["paths"]["transformer_path"]
-    if os.path.isdir(flux_dir) and os.path.isdir(tr):
+    if os.path.isdir(flux_dir) and os.path.isdir(tr) and not _has_incomplete(flux_dir):
         return True
+    if os.path.isdir(flux_dir) and _has_incomplete(flux_dir):
+        print("[setup] FLUX скачан НЕ полностью (есть .incomplete) — докачиваю недостающее…")
     if not _AUTO:
         print(f"[!] FLUX не найден в {flux_dir}, а авто-скачивание выключено.")
         return False
@@ -694,6 +705,11 @@ def generate_all_images(cfg, prompts):
     from concurrent.futures import ThreadPoolExecutor
     ensure("torch", "torch")
     import torch
+    # FluxPipeline тянет за собой text-энкодеры -> нужны transformers + токенайзер T5
+    # (sentencepiece/protobuf) + accelerate. Ставим заранее, иначе падает на from_pretrained.
+    for imp, pip in (("transformers", "transformers"), ("accelerate", "accelerate"),
+                     ("sentencepiece", "sentencepiece"), ("google.protobuf", "protobuf")):
+        ensure(imp, pip)
     ensure("diffusers", "diffusers")
     from diffusers import FluxPipeline
     if not ensure_flux(cfg):
