@@ -1,9 +1,12 @@
 package com.destik.yolodetector
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
@@ -112,7 +115,34 @@ class CameraActivity : AppCompatActivity() {
         binding.btnSmartRecord.setOnClickListener { toggleSmartMode() }
         binding.btnResolution.setOnClickListener { cycleResolution() }
         binding.btnStream.setOnClickListener { toggleStream() }
+        if (!streamMode) setupPreviewGestures()    // щипок-зум + тап-фокус прямо по превью
         updateRecordingUI()
+    }
+
+    /** Щипок двумя пальцами = зум, одиночный тап = фокус/экспозамер в точке. */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupPreviewGestures() {
+        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                val cam = camera ?: return true
+                val cur = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+                runCatching { cam.cameraControl.setZoomRatio(cur * d.scaleFactor) }
+                return true
+            }
+        })
+        binding.previewView.setOnTouchListener { v, e ->
+            scale.onTouchEvent(e)
+            if (e.actionMasked == MotionEvent.ACTION_UP && e.pointerCount == 1) {
+                camera?.let { cam ->
+                    val pt = binding.previewView.meteringPointFactory.createPoint(e.x, e.y)
+                    runCatching {
+                        cam.cameraControl.startFocusAndMetering(FocusMeteringAction.Builder(pt).build())
+                    }
+                    v.performClick()
+                }
+            }
+            true
+        }
     }
 
     // ── Stream ────────────────────────────────────────────────────────────────

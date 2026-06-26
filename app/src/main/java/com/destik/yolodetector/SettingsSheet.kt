@@ -44,44 +44,17 @@ class SettingsSheet(
         b.switchGpu.isChecked = config.useGPU
         b.switchStabilize.isChecked = config.stabilizeBoxes
         b.switchUpright.isChecked = config.uprightInference
-        b.etInputSize.setText(config.inputSize.toString())
-        b.etNumClasses.setText(config.numClasses.toString())
-        b.etOut0.setText(config.outputName0)
-        b.etOut1.setText(config.outputName1)
-        b.etOut2.setText(config.outputName2)
-        b.etAnchors.setText(config.yfAnchors)
-
-        when {
-            config.yoloVersion == 1  -> b.chipNanoDet.isChecked = true
-            config.yoloVersion == 2  -> b.chipFastest.isChecked = true
-            config.yoloVersion >= 10 -> b.chipV10.isChecked = true
-            config.yoloVersion >= 8  -> b.chipV8.isChecked  = true
-            else                     -> b.chipV5.isChecked  = true
-        }
     }
 
     private fun collect() {
-        val version = when {
-            b.chipNanoDet.isChecked -> 1
-            b.chipFastest.isChecked -> 2
-            b.chipV10.isChecked -> 10
-            b.chipV8.isChecked  -> 8
-            else                -> 5
-        }
+        // Только тест-параметры; тип модели/выходы/классы остаются как заданы при выборе модели.
         config = config.copy(
             confThreshold = b.seekConf.progress / 100f,
             nmsThreshold  = b.seekNms.progress / 100f,
             numThreads    = b.seekThreads.progress + 1,
             useGPU        = b.switchGpu.isChecked,
             stabilizeBoxes = b.switchStabilize.isChecked,
-            uprightInference = b.switchUpright.isChecked,
-            inputSize     = b.etInputSize.text.toString().toIntOrNull() ?: config.inputSize,
-            numClasses    = b.etNumClasses.text.toString().toIntOrNull() ?: config.numClasses,
-            outputName0   = b.etOut0.text.toString().trim(),
-            outputName1   = b.etOut1.text.toString().trim(),
-            outputName2   = b.etOut2.text.toString().trim(),
-            yfAnchors     = b.etAnchors.text.toString().trim().ifEmpty { config.yfAnchors },
-            yoloVersion   = version
+            uprightInference = b.switchUpright.isChecked
         )
     }
 

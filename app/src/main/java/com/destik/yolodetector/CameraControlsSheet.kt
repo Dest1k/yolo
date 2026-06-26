@@ -64,6 +64,22 @@ class CameraControlsSheet(private val camera: Camera) : BottomSheetDialogFragmen
             setPadding(0, 0, 0, px(8))
         })
 
+        // ── Фонарик (если есть вспышка) ─────────────────────────────────────────
+        runCatching {
+            if (camera.cameraInfo.hasFlashUnit()) {
+                addToggle(root, "Фонарик (вспышка)") { on ->
+                    runCatching { camera.cameraControl.enableTorch(on) }
+                }
+            }
+        }
+
+        // ── Подсказка по жестам превью ──────────────────────────────────────────
+        root.addView(TextView(requireContext()).apply {
+            text = "Совет: на превью — щипок для зума, тап для фокуса в точке."
+            setTextColor(sub); textSize = 12f
+            setPadding(0, px(2), 0, px(6))
+        })
+
         // ── Zoom (always) ──────────────────────────────────────────────────────
         runCatching {
             val zs = camera.cameraInfo.zoomState.value
