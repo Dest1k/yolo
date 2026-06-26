@@ -401,8 +401,13 @@ class GeneratorGUI:
         self.scales_text.delete("1.0", "end")
         self.scales_text.insert("1.0", "\n".join(
             f"{w} | {phrase}" for phrase, w in self.cfg["prompts"]["object_scales"]))
+        # авто-миграция старого дрон-шаблона на актуальный универсальный
+        tmpl = self.cfg["prompts"].get("system_template", "") or ""
+        if "{config_block}" not in tmpl or "{object_noun}" not in tmpl:
+            tmpl = engine.DEFAULTS["prompts"]["system_template"]
+            self.cfg["prompts"]["system_template"] = tmpl
         self.template_text.delete("1.0", "end")
-        self.template_text.insert("1.0", self.cfg["prompts"]["system_template"])
+        self.template_text.insert("1.0", tmpl)
         self.cls_text.delete("1.0", "end")
         self.cls_text.insert("1.0", self._classes_to_text(self.cfg.get("labeling", {})))
 

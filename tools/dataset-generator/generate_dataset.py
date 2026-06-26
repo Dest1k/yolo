@@ -392,8 +392,18 @@ def build_system_prompt(cfg, empty=False):
                 f"{block}\nVary places, weather, lighting and viewpoint. Return ONLY a raw JSON "
                 f"array of strings. No markdown, no explanations.")
     lines = [f"- {name}: {random.choice(list(options))}" for name, options in cats.items() if options]
-    return pr["system_template"].format(
-        batch_size=bs, object_noun=choose_scene_objects(pr), config_block="\n".join(lines))
+    template = pr.get("system_template", "") or ""
+    # Авто-миграция: старый дрон-шаблон (с {drone_type} и т.п.) не содержит новых плейсхолдеров —
+    # берём актуальный универсальный, иначе .format упал бы на KeyError('drone_type').
+    if "{config_block}" not in template or "{object_noun}" not in template:
+        template = DEFAULTS["prompts"]["system_template"]
+    # format_map с «безопасным» словарём: любые посторонние плейсхолдеры -> пустая строка,
+    # чтобы кастомный шаблон пользователя никогда не валил генерацию.
+    class _Safe(dict):
+        def __missing__(self, k):
+            return ""
+    return template.format_map(_Safe(
+        batch_size=bs, object_noun=choose_scene_objects(pr), config_block="\n".join(lines)))
 
 
 # =====================================================================
