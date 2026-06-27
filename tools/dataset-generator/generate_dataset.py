@@ -107,6 +107,7 @@ DEFAULTS = {
         # НЕГАТИВЫ: доля сцен БЕЗ объектов (чистый фон) — у них будут пустые метки, что снижает
         # ложные срабатывания детектора. 0 = выключено.
         "empty_scene_prob": 0.0,
+        "dedup_near": True,          # отсекать почти-дубликаты (одинаковый набор значимых слов)
         "categories": {
             "Тип/форм-фактор": [
                 "commercial DJI Mavic style quadcopter with folded arms",
@@ -700,6 +701,14 @@ def _valid_prompt(p):
     return True
 
 
+def _norm_sig(s):
+    """Сигнатура почти-дубля: множество значимых слов (без регистра/пунктуации/коротких слов).
+    Два промпта с ОДИНАКОВЫМ набором значимых слов считаем одинаковыми (порядок/пунктуация/
+    мелкие слова игнорируются). Дёшево и масштабируемо (O(1) на промпт)."""
+    s = re.sub(r"[^a-z0-9\s]", " ", (s or "").lower())
+    return frozenset(w for w in s.split() if len(w) >= 4)
+
+
 def load_existing_prompts(prompts_file):
     out = []
     seen = set()
@@ -740,6 +749,8 @@ def generate_all_prompts(cfg):
         print(f"[ФАЗА 1] не смог переписать prompts.jsonl: {e}")
     planner.seed(all_prompts)
     seen = set(all_prompts)
+    near_dedup = bool(cfg["prompts"].get("dedup_near", True))
+    sigs = set(_norm_sig(p) for p in all_prompts) if near_dedup else set()
     if len(all_prompts) >= total:
         print(f"\n[ФАЗА 1] Промпты уже готовы: {len(all_prompts)} >= {total}. Пропускаю LLM.")
         return all_prompts
@@ -771,15 +782,23 @@ def generate_all_prompts(cfg):
                      {"role": "user", "content": instr}],
                     cfg["llm"]["max_tokens"], cfg["llm"]["temperature"], no_think)
                 raw = (resp.choices[0].message.content or "").strip()
-                batch = [normalize_prompt(p) for p in extract_prompts(raw)]
-                batch = [p for p in batch if _valid_prompt(p)]    # отсев мусора/эха инструкции
+                valid = [p for p in (normalize_prompt(x) for x in extract_prompts(raw)) if _valid_prompt(p)]
                 # негативам масштаб объекта не добавляем (объекта в кадре нет)
                 if not empty:
-                    batch = [f"{p}, {planner.next()}" for p in batch]
-                # дедуп против уже собранных (LLM часто повторяется)
-                batch = [p for p in batch if not (p in seen or seen.add(p))]
+                    valid = [f"{p}, {planner.next()}" for p in valid]
+                # точный + почти-дубль дедуп (LLM часто повторяется)
+                batch = []
+                for p in valid:
+                    if p in seen:
+                        continue
+                    if near_dedup:
+                        sig = _norm_sig(p)
+                        if sig in sigs:
+                            continue
+                        sigs.add(sig)
+                    seen.add(p); batch.append(p)
 
-                if not batch:
+                if not valid:                       # модель реально ничего не выдала
                     consecutive_fail += 1
                     print(f"   [!] Пустой/битый ответ LLM ({consecutive_fail} подряд). Сырое: {raw[:150]!r}")
                     if consecutive_fail >= 8 and use_lms:
@@ -788,6 +807,9 @@ def generate_all_prompts(cfg):
                         time.sleep(2)
                         subprocess.run(f"lms load {model}", shell=True, stdout=subprocess.DEVNULL)
                         consecutive_fail = 0
+                    continue
+                if not batch:                       # выдала, но всё — дубли (не вина модели)
+                    print("   все промпты батча оказались дублями — продолжаю…")
                     continue
 
                 consecutive_fail = 0

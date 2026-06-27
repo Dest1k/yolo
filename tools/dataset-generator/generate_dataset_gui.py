@@ -198,10 +198,12 @@ class GeneratorGUI:
         self._check(f, 5, "Управлять LM Studio CLI (lms load/unload) для (вы)грузки модели", "llm.use_lms")
         self._check(f, 6, "Отключать «размышления» reasoning-моделей (/no_think, Qwen3) — экономит токены",
                     "llm.no_think")
+        self._check(f, 7, "Отсекать почти-дубликаты промптов (одинаковый набор значимых слов)",
+                    "prompts.dedup_near")
         ttk.Label(f, text="Подсказка: базовый URL может указывать на любой OpenAI-совместимый сервер "
                           "(LM Studio, llama.cpp, vLLM, сам OpenAI). Для reasoning-моделей лучше держать "
                           "/no_think включённым и батч 15-25.",
-                  foreground="#888").grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
+                  foreground="#888").grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
     def _tab_image(self, nb):
         f = ttk.Frame(nb, padding=12); nb.add(f, text="  Картинки (FLUX)  ")
