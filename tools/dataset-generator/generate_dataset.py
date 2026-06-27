@@ -146,7 +146,8 @@ DEFAULTS = {
         },
         # [фраза, вес] — веса это пропорции (суммировать в 100 не обязательно).
         "object_scales": [
-            ["the object is a tiny distant speck, ~2-5% of the frame, far away, lots of empty scene", 30],
+            # нижняя граница ~3% — при ресайзе обучения до 416px это ≈12px, минимум для головы NanoDet
+            ["the object is small and distant, ~3-6% of the frame, far away, lots of empty scene", 30],
             ["the object is small in the frame, ~10-15%, plenty of surrounding background", 30],
             ["the object is medium-sized, ~30-40% of the frame", 25],
             ["the object is large and close, filling most of the frame, edges may be cropped", 15],
@@ -648,9 +649,12 @@ def autoconfig_from_brief(cfg):
         cfg["generation"]["prompt_suffix"] = (
             ", aerial top-down drone photo taken from high altitude, looking down at the ground, "
             "objects appear small and far below, overhead perspective, realistic photo, high resolution")
+        # Нижняя граница ~4%: при рендере 640px и ресайзе обучения до 416 это ≈12px —
+        # минимум, который голова NanoDet (страйд 8, вход 416) ещё уверенно учит/детектит.
+        # Мельче делать нельзя: метки станут нетренируемыми «пикселями».
         pr["object_scales"] = [
-            ["the object is a tiny distant speck seen from high above, ~1-3% of the frame, lots of ground around it", 45],
-            ["the object is small, seen from above, ~5-12% of the frame, surrounded by ground", 40],
+            ["the object is small, seen from high above, ~4-8% of the frame, lots of ground around it", 45],
+            ["the object is small-to-medium, seen from above, ~8-15% of the frame, surrounded by ground", 40],
             ["the object is medium-small from an overhead view, ~15-25% of the frame", 15],
         ]
         cfg["labeling"]["imgsz"] = 1280   # мелкие объекты сверху — размечаем в высоком разрешении
@@ -1122,34 +1126,77 @@ def _write_label(labels_dir, stem, boxes):
     return len(lines)
 
 
+def _link_or_copy(src, dst):
+    """Жёсткая ссылка (без дублирования места), с откатом на копию (другой том / Windows / FS без хардлинков)."""
+    if os.path.exists(dst):
+        return
+    try:
+        os.link(src, dst)
+    except Exception:
+        import shutil
+        shutil.copy2(src, dst)
+
+
 def _write_yaml(cfg, names, images):
-    """Пишет dataset.yaml. Если val_split>0 — встроенный авто-сплит train/val: создаёт
-    train.txt/val.txt со списком картинок (без перемещения файлов) и ссылается на них."""
+    """Материализует датасет в раскладке, которую напрямую ест train_nanodet.py:
+
+        <output_yolo_dir>/
+            images/train/*.jpg   images/val/*.jpg
+            labels/train/*.txt   labels/val/*.txt
+            dataset.yaml
+
+    Картинки/метки кладутся ЖЁСТКИМИ ССЫЛКАМИ на рабочую плоскую папку (images_dir + labels/),
+    поэтому место не дублируется, а рабочая папка остаётся для дозапуска/возобновления.
+    Сплит детерминированный (seed 1337). train_nanodet.py читает images/<split> и labels/<split>,
+    а dataset.yaml — для ultralytics/совместимости."""
     import random as _r
     images_dir = cfg["paths"]["images_dir"]
-    root = os.path.dirname(images_dir)
+    labels_dir = os.path.join(os.path.dirname(images_dir), "labels")
     out_dir = cfg["paths"]["output_yolo_dir"]
-    os.makedirs(out_dir, exist_ok=True)
-    yaml_path = os.path.join(out_dir, "dataset.yaml")
     val_split = float(cfg.get("val_split", 0.0) or 0.0)
-    train_line, val_line = "images", "images"
-    if val_split > 0 and images:
-        order = list(images); _r.Random(1337).shuffle(order)
+
+    # размечаем только то, у чего реально есть .txt (пустой = «фон/негатив», тоже валиден)
+    labeled = [fn for fn in images
+               if os.path.isfile(os.path.join(labels_dir, os.path.splitext(fn)[0] + ".txt"))]
+    if not labeled:
+        labeled = list(images)
+
+    order = list(labeled); _r.Random(1337).shuffle(order)
+    if val_split > 0 and len(order) > 1:
         k = max(1, int(len(order) * val_split))
-        val = set(order[:k])
-        tr_txt = os.path.join(out_dir, "train.txt")
-        va_txt = os.path.join(out_dir, "val.txt")
-        with open(tr_txt, "w", encoding="utf-8") as f:
-            f.writelines(os.path.join(images_dir, fn) + "\n" for fn in images if fn not in val)
-        with open(va_txt, "w", encoding="utf-8") as f:
-            f.writelines(os.path.join(images_dir, fn) + "\n" for fn in images if fn in val)
-        train_line, val_line = tr_txt, va_txt
-        print(f"  авто-сплит: train {len(images)-len(val)} / val {len(val)} "
-              f"({int(val_split*100)}%) -> {tr_txt}, {va_txt}")
+    else:
+        k = 0
+    val = set(order[:k])
+
+    splits = {"train": [fn for fn in labeled if fn not in val],
+              "val":   [fn for fn in labeled if fn in val]}
+    if not splits["val"]:                       # без сплита: val=train, чтобы трейнеру было что валидировать
+        splits["val"] = splits["train"]
+
+    for split, files in (("train", splits["train"]), ("val", splits["val"])):
+        img_out = os.path.join(out_dir, "images", split)
+        lab_out = os.path.join(out_dir, "labels", split)
+        os.makedirs(img_out, exist_ok=True)
+        os.makedirs(lab_out, exist_ok=True)
+        for fn in files:
+            stem = os.path.splitext(fn)[0]
+            _link_or_copy(os.path.join(images_dir, fn), os.path.join(img_out, fn))
+            src_lbl = os.path.join(labels_dir, stem + ".txt")
+            if os.path.isfile(src_lbl):
+                _link_or_copy(src_lbl, os.path.join(lab_out, stem + ".txt"))
+            else:                                # негатив без меток — пустой .txt
+                open(os.path.join(lab_out, stem + ".txt"), "w").close()
+
+    n_tr = len(set(splits["train"])); n_va = len(set(splits["val"]))
+    print(f"  раскладка для обучения: {out_dir}\\images\\{{train,val}} + labels\\{{train,val}}")
+    print(f"  сплит: train {n_tr} / val {n_va}"
+          + ("  (val=train — сплит выключен)" if k == 0 else f"  ({int(val_split*100)}% в val)"))
+
+    yaml_path = os.path.join(out_dir, "dataset.yaml")
     with open(yaml_path, "w", encoding="utf-8") as f:
-        f.write("# Датасет детекции — авторазметка генератора\n")
-        f.write(f"path: {root}\n")
-        f.write(f"train: {train_line}\nval: {val_line}\n\n")
+        f.write("# Датасет детекции — авторазметка генератора (раскладка под NanoDet/YOLO)\n")
+        f.write(f"path: {out_dir}\n")
+        f.write("train: images/train\nval: images/val\n\n")
         f.write(f"nc: {len(names)}\n")
         f.write("names: [%s]\n" % ", ".join(f"'{n}'" for n in names))
     return yaml_path
