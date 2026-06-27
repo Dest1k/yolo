@@ -199,6 +199,29 @@ def deep_merge(base, override):
     return out
 
 
+# Ниже этого порога объект при ресайзе обучения до 416px становится < ~12px — голова NanoDet
+# (страйд 8) такие почти не учит. Старые сохранённые конфиги (в т.ч. из GUI) могли иметь
+# масштабы ~1-3% / ~2-5% — поднимаем их нижнюю границу автоматически при загрузке.
+_SCALE_MIN_PCT = 3
+
+
+def _bump_scale_phrase(phrase):
+    """Если в фразе масштаба нижняя граница процента меньше _SCALE_MIN_PCT — поднимаем её
+    (текст в остальном сохраняем). Понимает '~A-B%' и '~A%'. Идемпотентно."""
+    s = str(phrase)
+    m = re.search(r"~\s*(\d+)\s*-\s*(\d+)\s*%", s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a < _SCALE_MIN_PCT:
+            nb = max(b, _SCALE_MIN_PCT + 3)
+            return s[:m.start()] + f"~{_SCALE_MIN_PCT}-{nb}%" + s[m.end():]
+        return s
+    m = re.search(r"~\s*(\d+)\s*%", s)
+    if m and int(m.group(1)) < _SCALE_MIN_PCT:
+        return s[:m.start()] + f"~{_SCALE_MIN_PCT}%" + s[m.end():]
+    return s
+
+
 # Ключи-«коллекции», которые НЕЛЬЗЯ мёржить с дефолтами по-словарно — их задаёт пользователь
 # и они должны заменяться ЦЕЛИКОМ (иначе дефолтные дрон-категории подмешиваются обратно).
 def merge_user_config(user):
@@ -207,6 +230,22 @@ def merge_user_config(user):
     up = (user or {}).get("prompts", {})
     if isinstance(up, dict) and isinstance(up.get("categories"), dict):
         cfg["prompts"]["categories"] = copy.deepcopy(up["categories"])   # замена, не объединение
+    # авто-миграция мелких масштабов из старых сохранённых конфигов под вход 416
+    scales = cfg.get("prompts", {}).get("object_scales")
+    if isinstance(scales, list):
+        new = []
+        bumped = False
+        for item in scales:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                ph = _bump_scale_phrase(item[0])
+                bumped = bumped or (ph != str(item[0]))
+                new.append([ph, item[1]])
+            else:
+                new.append(item)
+        cfg["prompts"]["object_scales"] = new
+        if bumped:
+            print("[КОНФИГ] масштабы объектов подняты до 416-безопасного минимума "
+                  f"(нижняя граница >= {_SCALE_MIN_PCT}%).")
     return cfg
 
 
@@ -743,6 +782,7 @@ def load_existing_prompts(prompts_file):
                 except json.JSONDecodeError:
                     continue
                 p = normalize_prompt(p)
+                p = _bump_scale_phrase(p)                   # лечим вшитый мелкий масштаб под 416
                 if _valid_prompt(p) and p not in seen:     # чистим мусор и дубли
                     seen.add(p); out.append(p)
     return out
@@ -756,15 +796,24 @@ def generate_all_prompts(cfg):
     planner = ScalePlanner(cfg["prompts"]["object_scales"])
 
     all_prompts = load_existing_prompts(prompts_file)
-    # Перезаписываем файл вычищенным списком (убираем накопленный мусор/дубли навсегда).
+    # Перезаписываем файл вычищенным списком (мусор/дубли + поднятый масштаб — навсегда).
     try:
-        n_lines = sum(1 for ln in open(prompts_file, encoding="utf-8") if ln.strip()) \
-                  if os.path.exists(prompts_file) else 0
-        if n_lines != len(all_prompts):
+        raw = []
+        if os.path.exists(prompts_file):
+            with open(prompts_file, encoding="utf-8") as rf:
+                for ln in rf:
+                    ln = ln.strip()
+                    if ln:
+                        try:
+                            raw.append(json.loads(ln))
+                        except json.JSONDecodeError:
+                            raw.append(None)               # мусор -> точно перезапишем
+        if raw != all_prompts:                             # изменился состав/текст -> переписать
             with open(prompts_file, "w", encoding="utf-8") as wf:
                 for p in all_prompts:
                     wf.write(json.dumps(p, ensure_ascii=False) + "\n")
-            print(f"[ФАЗА 1] почищен prompts.jsonl: было строк {n_lines}, валидных уникальных {len(all_prompts)}.")
+            print(f"[ФАЗА 1] почищен prompts.jsonl: было строк {len(raw)}, "
+                  f"валидных уникальных {len(all_prompts)} (мусор/дубли убраны, масштаб подтянут под 416).")
     except Exception as e:
         print(f"[ФАЗА 1] не смог переписать prompts.jsonl: {e}")
     planner.seed(all_prompts)
