@@ -101,6 +101,7 @@ class GeneratorGUI:
         self.q = queue.Queue()
         self.cfg = load_state()
         self.widgets = {}
+        self.entries = {}
         self._on_done = None        # колбэк по завершении дочернего процесса (для авто-заполнения)
         root.title("Генератор датасетов")
         root.minsize(920, 760)
@@ -123,10 +124,12 @@ class GeneratorGUI:
         v = tk.StringVar()
         self.widgets[path] = v
         if choices:
-            ttk.Combobox(parent, textvariable=v, values=choices, width=width - 2).grid(
-                row=row, column=1, sticky="w")
+            w = ttk.Combobox(parent, textvariable=v, values=choices, width=width - 2)
+            w.grid(row=row, column=1, sticky="w")
         else:
-            ttk.Entry(parent, textvariable=v, width=width).grid(row=row, column=1, sticky="ew")
+            w = ttk.Entry(parent, textvariable=v, width=width)
+            w.grid(row=row, column=1, sticky="ew")
+        self.entries[path] = w
         parent.columnconfigure(1, weight=1)
         return v
 
@@ -297,12 +300,18 @@ class GeneratorGUI:
     def _tab_labeling(self, nb):
         f = ttk.Frame(nb, padding=12); nb.add(f, text="  Разметка  ")
         f.columnconfigure(1, weight=1)
-        self._entry(f, 0, "Движок авторазметки", "labeling.backend", width=16, choices=LABEL_CHOICES)
+        backend_var = self._entry(f, 0, "Движок авторазметки", "labeling.backend",
+                                   width=16, choices=LABEL_CHOICES)
         ttk.Label(f, text=LABEL_HELP, foreground="#888", justify="left",
                   wraplength=820).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 8))
         self._entry(f, 2, "Веса YOLO-World", "labeling.yoloworld_weights", width=30)
         self._entry(f, 3, "Модель Grounding DINO", "labeling.groundingdino_model", width=36)
         self._entry(f, 4, "Модель OWLv2", "labeling.owlv2_model", width=36)
+        # Активный движок подсвечивается, поля чужих моделей гаснут (но значения сохраняются).
+        self.label_active = ttk.Label(f, text="", foreground="#8ce6a0",
+                                      justify="left", wraplength=820)
+        self.label_active.grid(row=14, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        backend_var.trace_add("write", lambda *_: self._on_labeler_change())
         self._entry(f, 5, "Порог уверенности (conf)", "labeling.conf", width=10)
         self._entry(f, 6, "IoU (NMS)", "labeling.iou", width=10)
         self._entry(f, 12, "Картинок за проход (батч)", "labeling.batch", width=10)
@@ -434,6 +443,34 @@ class GeneratorGUI:
         self.template_text.insert("1.0", tmpl)
         self.cls_text.delete("1.0", "end")
         self.cls_text.insert("1.0", self._classes_to_text(self.cfg.get("labeling", {})))
+        self._on_labeler_change()       # привести вид вкладки «Разметка» к выбранному движку
+
+    def _on_labeler_change(self):
+        """Реакция на выбор движка разметки: активным остаётся только поле его модели,
+        чужие гаснут (значения сохраняются), снизу — что именно запустится."""
+        be = (self.widgets["labeling.backend"].get() or "").strip().lower()
+        field_by_be = {
+            "yoloworld":     ("labeling.yoloworld_weights", "Веса YOLO-World"),
+            "groundingdino": ("labeling.groundingdino_model", "Модель Grounding DINO"),
+            "owlv2":         ("labeling.owlv2_model", "Модель OWLv2"),
+        }
+        for path in ("labeling.yoloworld_weights", "labeling.groundingdino_model",
+                     "labeling.owlv2_model"):
+            w = self.entries.get(path)
+            if w is not None:
+                w.configure(state=("normal" if field_by_be.get(be, (None,))[0] == path else "disabled"))
+        active = field_by_be.get(be)
+        if not active:
+            self.label_active.configure(text="")
+            return
+        model = (self.widgets[active[0]].get() or "").strip() or "(модель по умолчанию)"
+        hint = {
+            "yoloworld":     "imgsz>0 (напр. 1280) заметно поднимает поиск мелких объектов.",
+            "groundingdino": "imgsz здесь не используется; conf/iou — основные рычаги.",
+            "owlv2":         "хорош на мелочи; imgsz не используется, играй conf/iou.",
+        }.get(be, "")
+        self.label_active.configure(
+            text=f"Активен: {be} → {active[1]}: {model}\n{hint}")
 
     @staticmethod
     def _lines(text_widget):
