@@ -63,7 +63,7 @@ DEFAULTS = {
         "flux_repo": "black-forest-labs/FLUX.1-schnell",  # для авто-скачивания, если flux_dir пуст
         "hf_token": "",             # токен HF (FLUX закрыт гейтом — нужен токен + принять условия)
         "file_prefix": "synth",      # имя файлов: <prefix>_00001.jpg
-        "batch_size": 40,            # промптов за один запрос к LLM
+        "batch_size": 20,            # промптов за один запрос к LLM (меньше = меньше токенов/обрывов)
         "quant_mode": "torchao",     # nf4 | torchao | layerwise (torchao fp8 — нативно быстр на Blackwell)
         # Дефолты рассчитаны на RTX 5090 (32 ГБ) + 128 ГБ RAM + Ultra 9 285K (24 потока):
         "micro_batch": 16,           # картинок за проход FLUX (32 ГБ тянет; при OOM — уменьшить)
@@ -87,6 +87,7 @@ DEFAULTS = {
         "temperature": 0.9,
         "max_tokens": 8192,
         "use_lms": True,             # дёргать `lms load/unload` для (вы)грузки модели в LM Studio
+        "no_think": True,            # отключать «размышления» reasoning-моделей (Qwen3 /no_think) — экономит токены
     },
     # ── УНИВЕРСАЛЬНЫЙ СЛОВАРЬ ПРОМПТОВ ──
     # object_noun — что генерируем (любой объект). categories — произвольные категории
@@ -401,6 +402,8 @@ def vram_gb(torch):
 def extract_prompts(raw_text):
     """Стойкий разбор ответа LLM: терпит markdown-заборы, болтовню, хвостовые запятые, обрыв."""
     txt = (raw_text or "").strip()
+    # reasoning-модели (Qwen3 и т.п.) могут вернуть <think>…</think> перед ответом — срезаем.
+    txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
     txt = re.sub(r"^```(?:json)?\s*", "", txt)
     txt = re.sub(r"\s*```$", "", txt)
     start, end = txt.find("["), txt.rfind("]")
@@ -506,6 +509,7 @@ def choose_scene_objects(pr):
 def _parse_json_object(text):
     """Достаёт первый JSON-объект из ответа LLM (терпит markdown-заборы и болтовню)."""
     t = (text or "").strip()
+    t = re.sub(r"<think>.*?</think>", "", t, flags=re.S).strip()
     t = re.sub(r"^```(?:json)?\s*", "", t)
     t = re.sub(r"\s*```$", "", t)
     s, e = t.find("{"), t.rfind("}")
@@ -548,10 +552,14 @@ def autoconfig_from_brief(cfg):
         "'top-down drone view', если сказано 'вид с дрона'). Классы — реальные объекты для разметки.\n"
         f"Описание: {brief}"
     )
+    if cfg["llm"].get("no_think", True):
+        sys_prompt += "\n/no_think"
     print("[autoconfig] прошу LLM собрать настройки из описания…")
     try:
         resp = client.chat.completions.create(
-            model=model, messages=[{"role": "system", "content": sys_prompt}],
+            model=model,
+            messages=[{"role": "system", "content": "Ты возвращаешь ТОЛЬКО один JSON-объект, без markdown и размышлений."},
+                      {"role": "user", "content": sys_prompt}],
             temperature=0.5, max_tokens=cfg["llm"]["max_tokens"])
         data = _parse_json_object(resp.choices[0].message.content or "")
     except Exception as e:
@@ -698,9 +706,15 @@ def generate_all_prompts(cfg):
         while len(all_prompts) < total:
             try:
                 empty = empty_prob > 0 and random.random() < empty_prob
+                instr = build_system_prompt(cfg, empty=empty)
+                if cfg["llm"].get("no_think", True):
+                    instr += "\n/no_think"            # Qwen3 и пр.: отключить размышления (экономит токены)
                 resp = client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "system", "content": build_system_prompt(cfg, empty=empty)}],
+                    # отдельный user-ход надёжнее: на «только system» некоторые модели молчат
+                    messages=[{"role": "system",
+                               "content": "You output ONLY a raw JSON array of image-prompt strings. No prose, no markdown, no thinking."},
+                              {"role": "user", "content": instr}],
                     temperature=cfg["llm"]["temperature"],
                     max_tokens=cfg["llm"]["max_tokens"],
                 )
