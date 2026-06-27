@@ -460,7 +460,9 @@ def parse_weighted(items):
     """Список строк «фраза» или «фраза | вес» -> (phrases, weights). Вес необязателен (=1)."""
     phrases, weights = [], []
     for it in items:
-        s = str(it)
+        s = str(it).strip()
+        if not s or s.startswith("##"):        # пропускаем заголовки категорий, если попали в объекты
+            continue
         if "|" in s:
             ph, w = s.rsplit("|", 1)
             try:
@@ -683,8 +685,24 @@ def build_system_prompt(cfg, empty=False):
 # =====================================================================
 # ФАЗА 1 — ПРОМПТЫ (LLM загружается один раз)
 # =====================================================================
+def _valid_prompt(p):
+    """Отсев мусора: артефакты редактора категорий (## …, - …), эхо инструкции, JSON, многострочное."""
+    s = (p or "").strip()
+    if len(s) < 12 or "\n" in s or "\r" in s:
+        return False
+    if s.startswith(("##", "- ", "•", "*", "{", "[", "}")):
+        return False
+    if "## " in s:
+        return False
+    low = s.lower()
+    if any(b in low for b in ("json array", "raw json", "return only", "no markdown")):
+        return False
+    return True
+
+
 def load_existing_prompts(prompts_file):
     out = []
+    seen = set()
     if os.path.exists(prompts_file):
         with open(prompts_file, encoding="utf-8") as f:
             for line in f:
@@ -692,9 +710,12 @@ def load_existing_prompts(prompts_file):
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    p = json.loads(line)
                 except json.JSONDecodeError:
-                    pass
+                    continue
+                p = normalize_prompt(p)
+                if _valid_prompt(p) and p not in seen:     # чистим мусор и дубли
+                    seen.add(p); out.append(p)
     return out
 
 
@@ -706,7 +727,19 @@ def generate_all_prompts(cfg):
     planner = ScalePlanner(cfg["prompts"]["object_scales"])
 
     all_prompts = load_existing_prompts(prompts_file)
+    # Перезаписываем файл вычищенным списком (убираем накопленный мусор/дубли навсегда).
+    try:
+        n_lines = sum(1 for ln in open(prompts_file, encoding="utf-8") if ln.strip()) \
+                  if os.path.exists(prompts_file) else 0
+        if n_lines != len(all_prompts):
+            with open(prompts_file, "w", encoding="utf-8") as wf:
+                for p in all_prompts:
+                    wf.write(json.dumps(p, ensure_ascii=False) + "\n")
+            print(f"[ФАЗА 1] почищен prompts.jsonl: было строк {n_lines}, валидных уникальных {len(all_prompts)}.")
+    except Exception as e:
+        print(f"[ФАЗА 1] не смог переписать prompts.jsonl: {e}")
     planner.seed(all_prompts)
+    seen = set(all_prompts)
     if len(all_prompts) >= total:
         print(f"\n[ФАЗА 1] Промпты уже готовы: {len(all_prompts)} >= {total}. Пропускаю LLM.")
         return all_prompts
@@ -739,10 +772,12 @@ def generate_all_prompts(cfg):
                     cfg["llm"]["max_tokens"], cfg["llm"]["temperature"], no_think)
                 raw = (resp.choices[0].message.content or "").strip()
                 batch = [normalize_prompt(p) for p in extract_prompts(raw)]
-                batch = [p for p in batch if len(p) > 10]
+                batch = [p for p in batch if _valid_prompt(p)]    # отсев мусора/эха инструкции
                 # негативам масштаб объекта не добавляем (объекта в кадре нет)
                 if not empty:
                     batch = [f"{p}, {planner.next()}" for p in batch]
+                # дедуп против уже собранных (LLM часто повторяется)
+                batch = [p for p in batch if not (p in seen or seen.add(p))]
 
                 if not batch:
                     consecutive_fail += 1
