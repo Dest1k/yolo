@@ -506,6 +506,25 @@ def choose_scene_objects(pr):
     return random.choices(phrases, weights=weights, k=1)[0]
 
 
+def _llm_chat(client, model, messages, max_tokens, temperature, no_think):
+    """Вызов чата с НАДЁЖНЫМ отключением мышления: extra_body с флагами разных серверов
+    (Qwen3/vLLM/SGLang/LM Studio), с откатом если сервер их не принимает. Текстовый /no_think
+    и срез <think> в парсерах дополняют это для любых моделей (вкл. Gemma)."""
+    base = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+    if not no_think:
+        return client.chat.completions.create(**base)
+    extra = {
+        "chat_template_kwargs": {"enable_thinking": False},   # Qwen3 на vLLM/SGLang
+        "enable_thinking": False,                             # часть OpenAI-совместимых/LM Studio
+        "reasoning_effort": "none",                           # o-style серверы
+    }
+    try:
+        return client.chat.completions.create(extra_body=extra, **base)
+    except Exception:
+        # сервер отверг неизвестные поля — текстовый /no_think + срез <think> всё равно сработают
+        return client.chat.completions.create(**base)
+
+
 def _parse_json_object(text):
     """Достаёт первый JSON-объект из ответа LLM (терпит markdown-заборы и болтовню)."""
     t = (text or "").strip()
@@ -552,15 +571,16 @@ def autoconfig_from_brief(cfg):
         "'top-down drone view', если сказано 'вид с дрона'). Классы — реальные объекты для разметки.\n"
         f"Описание: {brief}"
     )
-    if cfg["llm"].get("no_think", True):
+    no_think = cfg["llm"].get("no_think", True)
+    if no_think:
         sys_prompt += "\n/no_think"
     print("[autoconfig] прошу LLM собрать настройки из описания…")
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": "Ты возвращаешь ТОЛЬКО один JSON-объект, без markdown и размышлений."},
-                      {"role": "user", "content": sys_prompt}],
-            temperature=0.5, max_tokens=cfg["llm"]["max_tokens"])
+        resp = _llm_chat(
+            client, model,
+            [{"role": "system", "content": "Ты возвращаешь ТОЛЬКО один JSON-объект, без markdown и размышлений."},
+             {"role": "user", "content": sys_prompt}],
+            cfg["llm"]["max_tokens"], 0.5, no_think)
         data = _parse_json_object(resp.choices[0].message.content or "")
     except Exception as e:
         print(f"[autoconfig] ошибка LLM: {e}")
@@ -706,18 +726,17 @@ def generate_all_prompts(cfg):
         while len(all_prompts) < total:
             try:
                 empty = empty_prob > 0 and random.random() < empty_prob
+                no_think = cfg["llm"].get("no_think", True)
                 instr = build_system_prompt(cfg, empty=empty)
-                if cfg["llm"].get("no_think", True):
-                    instr += "\n/no_think"            # Qwen3 и пр.: отключить размышления (экономит токены)
-                resp = client.chat.completions.create(
-                    model=model,
+                if no_think:
+                    instr += "\n/no_think"            # текстовый переключатель (Qwen3 и пр.)
+                resp = _llm_chat(
+                    client, model,
                     # отдельный user-ход надёжнее: на «только system» некоторые модели молчат
-                    messages=[{"role": "system",
-                               "content": "You output ONLY a raw JSON array of image-prompt strings. No prose, no markdown, no thinking."},
-                              {"role": "user", "content": instr}],
-                    temperature=cfg["llm"]["temperature"],
-                    max_tokens=cfg["llm"]["max_tokens"],
-                )
+                    [{"role": "system",
+                      "content": "You output ONLY a raw JSON array of image-prompt strings. No prose, no markdown, no thinking."},
+                     {"role": "user", "content": instr}],
+                    cfg["llm"]["max_tokens"], cfg["llm"]["temperature"], no_think)
                 raw = (resp.choices[0].message.content or "").strip()
                 batch = [normalize_prompt(p) for p in extract_prompts(raw)]
                 batch = [p for p in batch if len(p) > 10]
