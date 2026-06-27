@@ -1409,6 +1409,34 @@ def setup_torch(cfg):
         print(f"[setup] torch не настроен ({e})")
 
 
+def preprod_check(cfg):
+    """Предпрод-проверка готовой раскладки тем же чекером, что стоит перед обучением
+    (tools/nanodet-sidecar/check_dataset.py) — РЕЖИМ АНАЛИЗА, ничего не меняет.
+    Печатает сводку: битые боксы, баланс классов, доля пустых, наличие val. Падать
+    не должна никогда — это диагностика, а не часть конвейера."""
+    out_dir = cfg["paths"]["output_yolo_dir"]
+    if not os.path.isdir(os.path.join(out_dir, "images")):
+        return                                            # раскладки нет (фаза 3 не гонялась) — пропускаем
+    _, _, names = resolve_classes(cfg["labeling"])
+    checker = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "nanodet-sidecar", "check_dataset.py")
+    print("\n" + "=" * 60)
+    print("[ПРЕДПРОД] Проверяю готовый датасет чекером тренера (анализ, без правок)…")
+    if not os.path.isfile(checker):
+        print(f"  чекер не найден: {checker} — пропускаю.")
+        return
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    try:
+        subprocess.run(
+            [sys.executable, "-u", checker, "--dataset", out_dir, "--classes", ",".join(names)],
+            env=env, check=False)
+    except Exception as e:
+        print(f"  не смог запустить чекер ({e}) — это не влияет на сам датасет.")
+    print("  (нашлись правки? почини так: python check_dataset.py --dataset "
+          f"\"{out_dir}\" --classes {','.join(names)} --fix)")
+    print("=" * 60)
+
+
 def main():
     global _AUTO
     # Режим авто-конфига: разворачиваем описание в поля и перезаписываем тот же конфиг, выходим.
@@ -1470,6 +1498,7 @@ def main():
 
     if cfg["run"]["phase3_label"]:
         label_dataset(cfg)
+        preprod_check(cfg)
     else:
         print("[ФАЗА 3] Пропущена.")
 
