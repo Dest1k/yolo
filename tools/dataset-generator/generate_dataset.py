@@ -198,6 +198,17 @@ def deep_merge(base, override):
     return out
 
 
+# Ключи-«коллекции», которые НЕЛЬЗЯ мёржить с дефолтами по-словарно — их задаёт пользователь
+# и они должны заменяться ЦЕЛИКОМ (иначе дефолтные дрон-категории подмешиваются обратно).
+def merge_user_config(user):
+    """deep_merge с DEFAULTS, но prompts.categories заменяется целиком из пользовательского конфига."""
+    cfg = deep_merge(DEFAULTS, user or {})
+    up = (user or {}).get("prompts", {})
+    if isinstance(up, dict) and isinstance(up.get("categories"), dict):
+        cfg["prompts"]["categories"] = copy.deepcopy(up["categories"])   # замена, не объединение
+    return cfg
+
+
 def load_config():
     path = None
     if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
@@ -207,7 +218,7 @@ def load_config():
         with open(path, encoding="utf-8") as f:
             user = json.load(f)
         print(f"[КОНФИГ] загружен {path}")
-        return deep_merge(DEFAULTS, user)
+        return merge_user_config(user)
     print("[КОНФИГ] встроенные дефолты (файл конфига не задан)")
     return copy.deepcopy(DEFAULTS)
 
@@ -623,7 +634,12 @@ def autoconfig_from_brief(cfg):
         "дрон", "drone", "uav", "сверху", "с высоты", "высоты", "с воздуха", "воздуха",
         "aerial", "top-down", "top down", "overhead", "bird", "птичьего", "квадрокоптер"))
     if aerial:
-        pr.setdefault("categories", {})["Ракурс"] = [
+        cats = pr.setdefault("categories", {})
+        # убираем любые «ракурсные» категории (как бы их ни назвал LLM) и ставим одну аэро
+        for k in [k for k in cats if any(t in k.lower()
+                  for t in ("ракурс", "angle", "perspective", "camera", "view", "ракурс"))]:
+            del cats[k]
+        cats["Ракурс (вид сверху)"] = [
             "top-down bird's-eye view looking straight down (near-nadir)",
             "high-altitude aerial drone view from far above",
             "overhead drone shot, camera pointing down at the ground",
@@ -1355,7 +1371,7 @@ def main():
         if not path or not os.path.isfile(path):
             print("[autoconfig] не передан путь к конфигу."); return
         with open(path, encoding="utf-8") as f:
-            cfg = deep_merge(DEFAULTS, json.load(f))
+            cfg = merge_user_config(json.load(f))
         _AUTO = bool(cfg.get("auto_install", True))
         cfg = autoconfig_from_brief(cfg)
         with open(path, "w", encoding="utf-8") as f:

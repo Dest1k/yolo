@@ -88,7 +88,7 @@ def dset(cfg, path, value):
 def load_state():
     try:
         with open(STATE_PATH, encoding="utf-8") as f:
-            return engine.deep_merge(engine.DEFAULTS, json.load(f))
+            return engine.merge_user_config(json.load(f))
     except Exception:
         import copy
         return copy.deepcopy(engine.DEFAULTS)
@@ -700,7 +700,7 @@ class GeneratorGUI:
         if code in (0, None) and os.path.isfile(RUN_CONFIG):
             try:
                 with open(RUN_CONFIG, encoding="utf-8") as f:
-                    self.cfg = engine.deep_merge(engine.DEFAULTS, json.load(f))
+                    self.cfg = engine.merge_user_config(json.load(f))
                 self._restore()
                 self._append("✓ Поля заполнены из описания — проверь вкладки «Промпты» и «Разметка».\n", "ok")
                 return
